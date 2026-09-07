@@ -1,0 +1,18 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "design-guide",
+	"main": "src/worker.ts",
+	"compatibility_date": "2026-09-07",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": {
+		"enabled": true,
+		"head_sampling_rate": 1
+	},
+	"ai_search_namespaces": [
+		{
+			"binding": "AI_SEARCH",
+			"namespace": "default",
+			"remote": true
+		}
+	]
+}
