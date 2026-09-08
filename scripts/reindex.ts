@@ -1,5 +1,5 @@
 import { isSystemId } from "../src/config/types.ts";
-import { reindex } from "../src/index/reindex.ts";
+import { reindex, reindexExitCode } from "../src/index/reindex.ts";
 
 function requiredEnv(name: string): string {
 	const value = process.env[name];
@@ -24,6 +24,4 @@ const results = await reindex(
 );
 
 console.log(JSON.stringify(results, null, 2));
-if (results.every((result) => result.uploaded === 0)) {
-	process.exitCode = 1;
-}
+process.exitCode = reindexExitCode(results);

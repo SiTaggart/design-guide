@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto";
-import { INSTANCE_ID, MAX_ITEM_BYTES } from "../config/instance.ts";
+import { CRAWL_LIMIT, INSTANCE_ID, MAX_ITEM_BYTES } from "../config/instance.ts";
 import { SEEDS, seedById } from "../config/seed.ts";
-import type { Seed, SystemId } from "../config/types.ts";
-import { crawlSeedUrls, type CrawlAuth, type CrawlRecord } from "../crawl/browser-run.ts";
+import type { CrawlCounts, Seed, SystemId } from "../config/types.ts";
+import {
+	crawlSeed,
+	hitCrawlLimit,
+	type CrawlAuth,
+	type CrawlOutcome,
+	type CrawlRecord,
+} from "../crawl/browser-run.ts";
 import {
 	deleteItem,
 	ensureInstance,
@@ -15,11 +21,16 @@ export type ReindexAuth = CrawlAuth & { instanceId?: string };
 
 export type SystemReindexResult = {
 	system: SystemId;
-	uploaded: number;
-	deleted: number;
+	startUrl: string;
+	crawl: CrawlCounts;
+	indexed: number;
+	hitLimit: boolean;
 	keptPrevious: boolean;
+	deleted?: number;
 	error?: string;
 };
+
+const EMPTY_COUNTS: CrawlCounts = { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 };
 
 function itemKey(system: SystemId, generation: string, pageUrl: string): string {
 	const digest = createHash("sha256").update(pageUrl).digest("hex").slice(0, 16);
@@ -30,26 +41,24 @@ function generationId(now = new Date()): string {
 	return now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z").toLowerCase();
 }
 
-async function crawlForSeed(auth: CrawlAuth, seed: Seed): Promise<CrawlRecord[]> {
-	const primary = await crawlSeedUrls(auth, seed, seed.startUrls);
-	if (primary.length > 0 || !seed.fallbackStartUrls?.length) {
-		return primary;
-	}
-	return crawlSeedUrls(auth, seed, seed.fallbackStartUrls);
+function fitsItem(record: CrawlRecord): boolean {
+	const markdown = record.markdown ?? "";
+	return Boolean(markdown.trim()) && new TextEncoder().encode(markdown).byteLength <= MAX_ITEM_BYTES;
 }
 
-async function rollbackGeneration(
-	auth: ItemsAuth,
-	system: SystemId,
-	generation: string,
-): Promise<void> {
-	const prefix = `${system}/${generation}/`;
-	const items = await listItems(auth);
-	for (const item of items) {
-		if (item.key.startsWith(prefix)) {
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+async function deleteItems(auth: ItemsAuth, shouldDelete: (key: string) => boolean): Promise<number> {
+	let deleted = 0;
+	for (const item of await listItems(auth)) {
+		if (shouldDelete(item.key)) {
 			await deleteItem(auth, item.id);
+			deleted += 1;
 		}
 	}
+	return deleted;
 }
 
 export async function reindexSystem(
@@ -61,32 +70,39 @@ export async function reindexSystem(
 		apiToken: auth.apiToken,
 		instanceId: auth.instanceId ?? INSTANCE_ID,
 	};
-	const generation = generationId();
-	let records: CrawlRecord[] = [];
+	let outcome: CrawlOutcome;
 	try {
-		records = await crawlForSeed(auth, seed);
+		outcome = await crawlSeed(auth, seed);
 	} catch (error) {
 		return {
 			system: seed.id,
-			uploaded: 0,
-			deleted: 0,
+			startUrl: seed.startUrl,
+			crawl: EMPTY_COUNTS,
+			indexed: 0,
+			hitLimit: false,
 			keptPrevious: true,
-			error: error instanceof Error ? error.message : String(error),
+			error: errorMessage(error),
 		};
 	}
-	const usable = records.filter((record) => {
-		const bytes = new TextEncoder().encode(record.markdown ?? "").byteLength;
-		return Boolean(record.markdown?.trim()) && bytes <= MAX_ITEM_BYTES;
-	});
+	const usable = outcome.records.filter(fitsItem);
+	const kept: SystemReindexResult = {
+		system: seed.id,
+		startUrl: outcome.startUrl,
+		crawl: outcome.counts,
+		indexed: 0,
+		hitLimit: hitCrawlLimit(outcome, usable.length),
+		keptPrevious: true,
+	};
+	if (kept.hitLimit) {
+		return { ...kept, error: `crawl hit the ${CRAWL_LIMIT} page limit` };
+	}
+	if (outcome.status !== "completed") {
+		return { ...kept, error: `crawl ended ${outcome.status}` };
+	}
 	if (usable.length === 0) {
-		return {
-			system: seed.id,
-			uploaded: 0,
-			deleted: 0,
-			keptPrevious: true,
-			error: "no usable crawl records",
-		};
+		return { ...kept, error: "no usable crawl records" };
 	}
+	const generation = generationId();
 	const uploadedKeys = new Set<string>();
 	try {
 		for (const record of usable) {
@@ -99,31 +115,14 @@ export async function reindexSystem(
 			uploadedKeys.add(key);
 		}
 	} catch (error) {
-		await rollbackGeneration(itemsAuth, seed.id, generation);
-		return {
-			system: seed.id,
-			uploaded: uploadedKeys.size,
-			deleted: 0,
-			keptPrevious: true,
-			error: error instanceof Error ? error.message : String(error),
-		};
+		await deleteItems(itemsAuth, (key) => key.startsWith(`${seed.id}/${generation}/`));
+		return { ...kept, error: errorMessage(error) };
 	}
-	const existing = await listItems(itemsAuth);
-	let deleted = 0;
-	for (const item of existing) {
-		const belongs = item.key.startsWith(`${seed.id}/`);
-		const isNew = uploadedKeys.has(item.key);
-		if (belongs && !isNew) {
-			await deleteItem(itemsAuth, item.id);
-			deleted += 1;
-		}
-	}
-	return {
-		system: seed.id,
-		uploaded: uploadedKeys.size,
-		deleted,
-		keptPrevious: false,
-	};
+	const deleted = await deleteItems(
+		itemsAuth,
+		(key) => key.startsWith(`${seed.id}/`) && !uploadedKeys.has(key),
+	);
+	return { ...kept, indexed: uploadedKeys.size, deleted, keptPrevious: false };
 }
 
 export async function reindex(
@@ -142,4 +141,15 @@ export async function reindex(
 		results.push(await reindexSystem(auth, seed));
 	}
 	return results;
+}
+
+export function reindexExitCode(results: readonly SystemReindexResult[]): 0 | 1 {
+	if (results.some((result) => result.hitLimit)) {
+		return 1;
+	}
+	const web = results.filter((result) => result.system !== "carbon");
+	if (web.length > 0 && web.every((result) => result.indexed === 0)) {
+		return 1;
+	}
+	return 0;
 }

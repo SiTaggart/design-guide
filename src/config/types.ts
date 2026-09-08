@@ -15,14 +15,20 @@ export type SystemId = (typeof SYSTEM_IDS)[number];
 export type Seed = {
 	id: SystemId;
 	source: string;
-	startUrls: string[];
-	includePatterns: string[];
+	startUrl: string;
+	fallbackStartUrl?: string;
+	includePatterns?: string[];
 	excludePatterns?: string[];
-	fallbackStartUrls?: string[];
-	limit: number;
-	depth: number;
 	render?: boolean;
 	includeSubdomains?: boolean;
+};
+
+export type CrawlCounts = {
+	total: number;
+	finished: number;
+	skipped: number;
+	disallowed: number;
+	errored: number;
 };
 
 export type Citation = {
