@@ -6,7 +6,7 @@ import { CURATED_TIP_START_URLS, isAntiSubsetUrl } from "./fixtures/curated-tip-
 const DOCS_ROOTS: Record<SystemId, string> = {
 	paste: "https://paste-dsys.com/",
 	primer: "https://primer.style/",
-	"react-spectrum": "https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages/index.mdx",
+	"react-spectrum": "https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/",
 	carbon: "https://github.com/carbon-design-system/carbon",
 	uswds: "https://designsystem.digital.gov/",
 	govuk: "https://design-system.service.gov.uk/",
@@ -48,21 +48,22 @@ describe("seed registry", () => {
 		expect(carbon?.render).toBe(false);
 		expect(carbon?.includePatterns?.every((pattern) => pattern.startsWith("https://github.com/carbon-design-system/carbon"))).toBe(true);
 		expect(spectrum?.startUrl).toBe(
-			"https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages/index.mdx",
+			"https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/",
 		);
 		expect(spectrum?.startUrl).not.toContain("react-spectrum.adobe.com");
 		expect(spectrum?.startUrl).not.toContain("/tree/");
+		expect(spectrum?.startUrl).not.toContain("/blob/");
 		expect(spectrum?.fallbackStartUrl).toBeUndefined();
-		expect(spectrum?.render).toBe(true);
+		expect(spectrum?.render).toBe(false);
 		expect(spectrum?.indexUrlSuffixes).toEqual([".md", ".mdx"]);
-		expect(spectrum?.excludePatterns).toEqual(expect.arrayContaining(["**/tree/**"]));
 		expect(spectrum?.includePatterns).toEqual([
-			"https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages/**",
-			"https://raw.githubusercontent.com/adobe/react-spectrum/main/packages/dev/s2-docs/pages/**",
+			"https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/",
+			"https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/**",
 		]);
 		for (const pattern of spectrum?.includePatterns ?? []) {
-			expect(pattern.includes("/tree/")).toBe(false);
-			expect(pattern).not.toBe("https://github.com/adobe/react-spectrum/**");
+			expect(pattern.startsWith("https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/")).toBe(
+				true,
+			);
 		}
 	});
 

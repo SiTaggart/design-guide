@@ -34,7 +34,7 @@ Config lives in `src/config/seed.ts`. A seed is one full-site crawl from a docs 
 | --- | --- |
 | paste | https://paste-dsys.com/ |
 | primer | https://primer.style/ |
-| react-spectrum | https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages/index.mdx |
+| react-spectrum | https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/ |
 | carbon | https://github.com/carbon-design-system/carbon |
 | uswds | https://designsystem.digital.gov/ |
 | govuk | https://design-system.service.gov.uk/ |
@@ -42,7 +42,7 @@ Config lives in `src/config/seed.ts`. A seed is one full-site crawl from a docs 
 | antd | https://ant.design/ |
 | gitlab-pajamas | https://design.gitlab.com/ |
 
-Carbon crawls the Apache GitHub repository with `render: false`. react-spectrum starts at the `s2-docs/pages/index.mdx` blob with `render: true`. It includes blob and raw.githubusercontent.com paths under that pages tree, excludes `**/tree/**`, and indexes only `.md` / `.mdx` URLs. It does not crawl the rest of `adobe/react-spectrum` or `react-spectrum.adobe.com`. Neither seed crawls carbondesignsystem.com or spectrum.adobe.com. Every seed excludes those two hosts. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` only scopes a crawl to its host or GitHub corpus path (uswds, carbon, react-spectrum). No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`, which the CLI uses only when the primary crawl start returns a 4xx or 5xx.
+Carbon crawls the Apache GitHub repository with `render: false`. react-spectrum starts at the jsDelivr `s2-docs/pages/` listing, includes that prefix only, and indexes only `.md` / `.mdx` URLs. It does not fall back to GitHub tree or blob URLs or to `react-spectrum.adobe.com`. Neither seed crawls carbondesignsystem.com or spectrum.adobe.com. Every seed excludes those two hosts. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` only scopes a crawl to its host or corpus path (uswds, carbon, react-spectrum). No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`, which the CLI uses only when the primary crawl start returns a 4xx or 5xx.
 
 Change the seed, then reindex. There is no admin UI.
 

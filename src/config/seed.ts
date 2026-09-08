@@ -27,14 +27,14 @@ export const SEEDS: readonly Seed[] = [
 	{
 		id: "react-spectrum",
 		source: "React Spectrum",
-		startUrl: "https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages/index.mdx",
+		startUrl: "https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/",
 		includePatterns: [
-			"https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages/**",
-			"https://raw.githubusercontent.com/adobe/react-spectrum/main/packages/dev/s2-docs/pages/**",
+			"https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/",
+			"https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/**",
 		],
-		excludePatterns: [...HARD_OUTS, "**/tree/**"],
+		excludePatterns: HARD_OUTS,
 		indexUrlSuffixes: [".md", ".mdx"],
-		render: true,
+		render: false,
 	},
 	{
 		id: "carbon",
