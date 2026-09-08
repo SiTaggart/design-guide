@@ -19,6 +19,7 @@ export type Seed = {
 	fallbackStartUrl?: string;
 	includePatterns?: string[];
 	excludePatterns?: string[];
+	indexUrlSuffixes?: string[];
 	render?: boolean;
 	includeSubdomains?: boolean;
 };

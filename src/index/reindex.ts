@@ -41,9 +41,17 @@ function generationId(now = new Date()): string {
 	return now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z").toLowerCase();
 }
 
-function fitsItem(record: CrawlRecord): boolean {
+export function fitsItem(record: CrawlRecord, seed: Seed): boolean {
 	const markdown = record.markdown ?? "";
-	return Boolean(markdown.trim()) && new TextEncoder().encode(markdown).byteLength <= MAX_ITEM_BYTES;
+	if (!markdown.trim() || new TextEncoder().encode(markdown).byteLength > MAX_ITEM_BYTES) {
+		return false;
+	}
+	const suffixes = seed.indexUrlSuffixes;
+	if (!suffixes?.length) {
+		return true;
+	}
+	const path = record.url.split("?")[0] ?? "";
+	return suffixes.some((suffix) => path.endsWith(suffix));
 }
 
 function errorMessage(error: unknown): string {
@@ -84,7 +92,7 @@ export async function reindexSystem(
 			error: errorMessage(error),
 		};
 	}
-	const usable = outcome.records.filter(fitsItem);
+	const usable = outcome.records.filter((record) => fitsItem(record, seed));
 	const kept: SystemReindexResult = {
 		system: seed.id,
 		startUrl: outcome.startUrl,

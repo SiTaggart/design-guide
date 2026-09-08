@@ -32,7 +32,7 @@ describe("crawlRequestBody", () => {
 			expect(json).not.toContain("rejectResourceTypes");
 		}
 		expect(crawlRequestBody(seedById("carbon"), seedById("carbon").startUrl).render).toBe(false);
-		expect(crawlRequestBody(seedById("react-spectrum"), seedById("react-spectrum").startUrl).render).toBe(false);
+		expect(crawlRequestBody(seedById("react-spectrum"), seedById("react-spectrum").startUrl).render).toBe(true);
 	});
 
 	it("omits includePatterns when the seed has none or an empty list", () => {
@@ -52,11 +52,12 @@ describe("crawlRequestBody", () => {
 			"https://github.com/carbon-design-system/carbon/**",
 		]);
 		expect(crawlRequestBody(seedById("react-spectrum"), seedById("react-spectrum").startUrl).options.includePatterns).toEqual([
-			"https://github.com/adobe/react-spectrum/tree/main/packages/dev/s2-docs/pages",
-			"https://github.com/adobe/react-spectrum/tree/main/packages/dev/s2-docs/pages/**",
-			"https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages",
 			"https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages/**",
+			"https://raw.githubusercontent.com/adobe/react-spectrum/main/packages/dev/s2-docs/pages/**",
 		]);
+		expect(crawlRequestBody(seedById("react-spectrum"), seedById("react-spectrum").startUrl).options.excludePatterns).toEqual(
+			expect.arrayContaining(["**/tree/**"]),
+		);
 	});
 
 	it("uses the start url it is handed so a fallback crawl reports the fallback", () => {
