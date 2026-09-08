@@ -26,12 +26,13 @@ describe("crawlRequestBody", () => {
 		});
 	});
 
-	it("never sends rejectResourceTypes, even for the static carbon crawl", () => {
-		for (const seed of ["carbon", "primer", "uswds"] as const) {
+	it("never sends rejectResourceTypes, even for the static GitHub crawls", () => {
+		for (const seed of ["carbon", "react-spectrum", "primer", "uswds"] as const) {
 			const json = JSON.stringify(crawlRequestBody(seedById(seed), seedById(seed).startUrl));
 			expect(json).not.toContain("rejectResourceTypes");
 		}
 		expect(crawlRequestBody(seedById("carbon"), seedById("carbon").startUrl).render).toBe(false);
+		expect(crawlRequestBody(seedById("react-spectrum"), seedById("react-spectrum").startUrl).render).toBe(false);
 	});
 
 	it("omits includePatterns when the seed has none or an empty list", () => {
@@ -42,13 +43,19 @@ describe("crawlRequestBody", () => {
 		expect(crawlRequestBody(emptied, emptied.startUrl).options).not.toHaveProperty("includePatterns");
 	});
 
-	it("keeps the host-scope includePatterns for uswds and carbon", () => {
+	it("keeps the host-scope includePatterns for uswds, carbon, and react-spectrum", () => {
 		expect(crawlRequestBody(seedById("uswds"), seedById("uswds").startUrl).options.includePatterns).toEqual([
 			"https://designsystem.digital.gov/**",
 		]);
 		expect(crawlRequestBody(seedById("carbon"), seedById("carbon").startUrl).options.includePatterns).toEqual([
 			"https://github.com/carbon-design-system/carbon",
 			"https://github.com/carbon-design-system/carbon/**",
+		]);
+		expect(crawlRequestBody(seedById("react-spectrum"), seedById("react-spectrum").startUrl).options.includePatterns).toEqual([
+			"https://github.com/adobe/react-spectrum/tree/main/packages/dev/s2-docs/pages",
+			"https://github.com/adobe/react-spectrum/tree/main/packages/dev/s2-docs/pages/**",
+			"https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages",
+			"https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages/**",
 		]);
 	});
 

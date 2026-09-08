@@ -34,7 +34,7 @@ Config lives in `src/config/seed.ts`. A seed is one full-site crawl from a docs 
 | --- | --- |
 | paste | https://paste-dsys.com/ |
 | primer | https://primer.style/ |
-| react-spectrum | https://react-spectrum.adobe.com/ |
+| react-spectrum | https://github.com/adobe/react-spectrum/tree/main/packages/dev/s2-docs/pages |
 | carbon | https://github.com/carbon-design-system/carbon |
 | uswds | https://designsystem.digital.gov/ |
 | govuk | https://design-system.service.gov.uk/ |
@@ -42,7 +42,7 @@ Config lives in `src/config/seed.ts`. A seed is one full-site crawl from a docs 
 | antd | https://ant.design/ |
 | gitlab-pajamas | https://design.gitlab.com/ |
 
-Carbon crawls the Apache-licensed repository on GitHub with `render: false`. It never crawls carbondesignsystem.com. Every seed excludes the `spectrum.adobe.com` and `carbondesignsystem.com` hosts. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` only scopes a crawl to its host (uswds, carbon). No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`, which the CLI uses only when the primary crawl start returns a 4xx or 5xx.
+Carbon and react-spectrum crawl Apache-licensed GitHub trees with `render: false`. Carbon starts at the repository root. react-spectrum starts at `packages/dev/s2-docs/pages` and does not crawl the rest of `adobe/react-spectrum` or `react-spectrum.adobe.com`. Neither seed crawls carbondesignsystem.com or spectrum.adobe.com. Every seed excludes those two hosts. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` only scopes a crawl to its host or GitHub corpus path (uswds, carbon, react-spectrum). No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`, which the CLI uses only when the primary crawl start returns a 4xx or 5xx.
 
 Change the seed, then reindex. There is no admin UI.
 

@@ -6,7 +6,7 @@ import { CURATED_TIP_START_URLS, isAntiSubsetUrl } from "./fixtures/curated-tip-
 const DOCS_ROOTS: Record<SystemId, string> = {
 	paste: "https://paste-dsys.com/",
 	primer: "https://primer.style/",
-	"react-spectrum": "https://react-spectrum.adobe.com/",
+	"react-spectrum": "https://github.com/adobe/react-spectrum/tree/main/packages/dev/s2-docs/pages",
 	carbon: "https://github.com/carbon-design-system/carbon",
 	uswds: "https://designsystem.digital.gov/",
 	govuk: "https://design-system.service.gov.uk/",
@@ -40,14 +40,23 @@ describe("seed registry", () => {
 		}
 	});
 
-	it("keeps carbon on the GitHub corpus and react-spectrum on react-spectrum.adobe.com", () => {
+	it("keeps carbon and react-spectrum on their Apache GitHub corpora", () => {
 		const carbon = SEEDS.find((seed) => seed.id === "carbon");
 		const spectrum = SEEDS.find((seed) => seed.id === "react-spectrum");
 		expect(carbon?.startUrl).toBe("https://github.com/carbon-design-system/carbon");
 		expect(carbon?.startUrl).not.toContain("carbondesignsystem.com");
 		expect(carbon?.render).toBe(false);
 		expect(carbon?.includePatterns?.every((pattern) => pattern.startsWith("https://github.com/carbon-design-system/carbon"))).toBe(true);
-		expect(spectrum?.startUrl).toBe("https://react-spectrum.adobe.com/");
+		expect(spectrum?.startUrl).toBe("https://github.com/adobe/react-spectrum/tree/main/packages/dev/s2-docs/pages");
+		expect(spectrum?.startUrl).not.toContain("react-spectrum.adobe.com");
+		expect(spectrum?.fallbackStartUrl).toBeUndefined();
+		expect(spectrum?.render).toBe(false);
+		expect(spectrum?.includePatterns?.length).toBeGreaterThan(0);
+		for (const pattern of spectrum?.includePatterns ?? []) {
+			expect(pattern.startsWith("https://github.com/adobe/react-spectrum/")).toBe(true);
+			expect(pattern.includes("packages/dev/s2-docs/pages")).toBe(true);
+			expect(pattern).not.toBe("https://github.com/adobe/react-spectrum/**");
+		}
 	});
 
 	it("excludes the SIT-20 hard outs on every seed without eating react-spectrum.adobe.com", () => {
