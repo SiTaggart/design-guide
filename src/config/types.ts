@@ -1,8 +1,6 @@
 export const SYSTEM_IDS = [
 	"paste",
 	"primer",
-	"react-spectrum",
-	"carbon",
 	"uswds",
 	"govuk",
 	"nhs",

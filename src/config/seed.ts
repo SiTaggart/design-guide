@@ -25,29 +25,6 @@ export const SEEDS: readonly Seed[] = [
 		excludePatterns: HARD_OUTS,
 	},
 	{
-		id: "react-spectrum",
-		source: "React Spectrum",
-		startUrl: "https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/",
-		includePatterns: [
-			"https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/",
-			"https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/**",
-		],
-		excludePatterns: HARD_OUTS,
-		indexUrlSuffixes: [".md", ".mdx"],
-		render: false,
-	},
-	{
-		id: "carbon",
-		source: "Carbon",
-		startUrl: "https://github.com/carbon-design-system/carbon",
-		includePatterns: [
-			"https://github.com/carbon-design-system/carbon",
-			"https://github.com/carbon-design-system/carbon/**",
-		],
-		excludePatterns: HARD_OUTS,
-		render: false,
-	},
-	{
 		id: "uswds",
 		source: "USWDS",
 		startUrl: "https://designsystem.digital.gov/",

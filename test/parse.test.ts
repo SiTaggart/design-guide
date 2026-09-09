@@ -27,5 +27,11 @@ describe("parseSearchFields", () => {
 		expect(parseSearchFields({ query: "focus", system: "bootstrap" })).toEqual({
 			kind: "empty",
 		});
+		expect(parseSearchFields({ query: "focus", system: "react-spectrum" })).toEqual({
+			kind: "empty",
+		});
+		expect(parseSearchFields({ query: "focus", system: "carbon" })).toEqual({
+			kind: "empty",
+		});
 	});
 });

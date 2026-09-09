@@ -1,6 +1,6 @@
 # design-guide
 
-HTTP retrieval over nine ToS-safe design systems. The Worker returns citation JSON only. It does not rewrite queries, generate answers, or invent passages.
+HTTP retrieval over seven ToS-safe design systems. The Worker returns citation JSON only. It does not rewrite queries, generate answers, or invent passages.
 
 ## BASE URL
 
@@ -34,15 +34,13 @@ Config lives in `src/config/seed.ts`. A seed is one full-site crawl from a docs 
 | --- | --- |
 | paste | https://paste-dsys.com/ |
 | primer | https://primer.style/ |
-| react-spectrum | https://cdn.jsdelivr.net/gh/adobe/react-spectrum@main/packages/dev/s2-docs/pages/ |
-| carbon | https://github.com/carbon-design-system/carbon |
 | uswds | https://designsystem.digital.gov/ |
 | govuk | https://design-system.service.gov.uk/ |
 | nhs | https://service-manual.nhs.uk/ |
 | antd | https://ant.design/ |
 | gitlab-pajamas | https://design.gitlab.com/ |
 
-Carbon crawls the Apache GitHub repository with `render: false`. react-spectrum starts at the jsDelivr `s2-docs/pages/` listing, includes that prefix only, and indexes only `.md` / `.mdx` URLs. It does not fall back to GitHub tree or blob URLs or to `react-spectrum.adobe.com`. Neither seed crawls carbondesignsystem.com or spectrum.adobe.com. Every seed excludes those two hosts. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` only scopes a crawl to its host or corpus path (uswds, carbon, react-spectrum). No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`, which the CLI uses only when the primary crawl start returns a 4xx or 5xx.
+Spectrum and Carbon are parked as crawl misses. Their items are deleted. They are not in the seed. Every remaining seed excludes spectrum.adobe.com and carbondesignsystem.com. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` only scopes a crawl to its host (uswds). No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`, which the CLI uses only when the primary crawl start returns a 4xx or 5xx.
 
 Change the seed, then reindex. There is no admin UI.
 
@@ -80,7 +78,7 @@ The CLI prints a JSON array with one result per system:
 
 `startUrl` is the URL the crawl started from, primary or fallback. `crawl.total` and `crawl.finished` come from the job status. `crawl.skipped`, `crawl.disallowed`, and `crawl.errored` count the job's records by status. robots.txt blocked the `disallowed` pages, and the CLI never uploads them. `indexed` is the number of pages swapped in. It is 0 whenever the CLI kept the previous generation. `hitLimit` is true when `finished` reached `CRAWL_LIMIT`, when the usable page count would fill the index to `CRAWL_LIMIT`, or when Cloudflare ended the job as `cancelled_due_to_limits`. A system with `hitLimit` keeps its previous generation.
 
-The CLI exits 1 when any system has `hitLimit`, or when every web system (every system except carbon) has `indexed: 0`. Carbon with `indexed: 0` and `keptPrevious: true` is a documented miss and does not fail the run. GitHub's robots.txt disallows `/*/tree/` for generic crawlers, so most of the carbon repository is unreachable.
+The CLI exits 1 when any system has `hitLimit`, or when the run has results and every result has `indexed: 0`.
 
 ## Develop
 

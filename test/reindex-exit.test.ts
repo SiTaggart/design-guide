@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SystemId } from "../src/config/types.ts";
+import type { Seed, SystemId } from "../src/config/types.ts";
 import { fitsItem, reindexExitCode, type SystemReindexResult } from "../src/index/reindex.ts";
 import { seedById } from "../src/config/seed.ts";
 
@@ -19,35 +19,25 @@ describe("reindexExitCode", () => {
 		expect(reindexExitCode([result("primer", 900), result("govuk", 0, true)])).toBe(1);
 	});
 
-	it("fails when every web system kept its previous generation", () => {
-		expect(reindexExitCode([result("primer", 0), result("govuk", 0), result("carbon", 0)])).toBe(1);
+	it("fails when every system kept its previous generation", () => {
+		expect(reindexExitCode([result("primer", 0), result("govuk", 0)])).toBe(1);
 		expect(reindexExitCode([result("primer", 0)])).toBe(1);
 	});
 
-	it("allows carbon to miss while a web system indexed", () => {
-		expect(reindexExitCode([result("primer", 900), result("carbon", 0)])).toBe(0);
-	});
-
-	it("allows a carbon-only run to miss", () => {
-		expect(reindexExitCode([result("carbon", 0)])).toBe(0);
+	it("succeeds when at least one system indexed", () => {
+		expect(reindexExitCode([result("primer", 900), result("govuk", 0)])).toBe(0);
 	});
 });
 
 describe("fitsItem", () => {
-	const spectrum = seedById("react-spectrum");
+	const filtered: Seed = { ...seedById("primer"), indexUrlSuffixes: [".md", ".mdx"] };
 	const primer = seedById("primer");
 	const page = (url: string) => ({ url, status: "completed", markdown: "# docs" });
 
-	it("indexes only md and mdx urls for react-spectrum", () => {
-		expect(fitsItem(page("https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages/index.mdx"), spectrum)).toBe(
-			true,
-		);
-		expect(fitsItem(page("https://raw.githubusercontent.com/adobe/react-spectrum/main/packages/dev/s2-docs/pages/s2/ComboBox.md"), spectrum)).toBe(
-			true,
-		);
-		expect(fitsItem(page("https://github.com/adobe/react-spectrum/blob/main/packages/dev/s2-docs/pages/WelcomeHeader.tsx"), spectrum)).toBe(
-			false,
-		);
+	it("indexes only md and mdx urls when a seed sets indexUrlSuffixes", () => {
+		expect(fitsItem(page("https://primer.style/index.mdx"), filtered)).toBe(true);
+		expect(fitsItem(page("https://primer.style/ComboBox.md"), filtered)).toBe(true);
+		expect(fitsItem(page("https://primer.style/WelcomeHeader.tsx"), filtered)).toBe(false);
 	});
 
 	it("does not apply suffix filters to other seeds", () => {

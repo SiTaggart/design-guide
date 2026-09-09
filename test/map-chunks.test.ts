@@ -6,9 +6,9 @@ describe("mapChunks", () => {
 	it("copies passage text and https metadata without rewriting", () => {
 		const [first] = mapChunks(fixtureChunks);
 		expect(first.passage).toBe(fixtureChunks[0].text);
-		expect(first.source).toBe("React Spectrum");
-		expect(first.url).toBe("https://react-spectrum.adobe.com/react-aria/ComboBox.html");
-		expect(first.system).toBe("react-spectrum");
+		expect(first.source).toBe("Paste");
+		expect(first.url).toBe("https://paste-dsys.com/");
+		expect(first.system).toBe("paste");
 	});
 
 	it("drops empty passages, empty sources, and non-https urls", () => {

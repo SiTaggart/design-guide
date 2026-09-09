@@ -4,11 +4,11 @@ export const fixtureChunks: SearchChunk[] = [
 	{
 		text: "ComboBox supports arrow keys, Enter to select, and Escape to close. Focus stays on the input while the listbox is open.",
 		item: {
-			key: "react-spectrum/gen/aaaa.md",
+			key: "paste/gen/aaaa.md",
 			metadata: {
-				system: "react-spectrum",
-				source: "React Spectrum",
-				source_url: "https://react-spectrum.adobe.com/react-aria/ComboBox.html",
+				system: "paste",
+				source: "Paste",
+				source_url: "https://paste-dsys.com/",
 			},
 		},
 	},

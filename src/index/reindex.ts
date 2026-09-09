@@ -155,8 +155,7 @@ export function reindexExitCode(results: readonly SystemReindexResult[]): 0 | 1 
 	if (results.some((result) => result.hitLimit)) {
 		return 1;
 	}
-	const web = results.filter((result) => result.system !== "carbon");
-	if (web.length > 0 && web.every((result) => result.indexed === 0)) {
+	if (results.length > 0 && results.every((result) => result.indexed === 0)) {
 		return 1;
 	}
 	return 0;
