@@ -2,6 +2,8 @@
 
 HTTP retrieval over seven ToS-safe design systems. The Worker returns citation JSON only. It does not rewrite queries, generate answers, or invent passages.
 
+See [docs/architecture.md](docs/architecture.md).
+
 ## BASE URL
 
 `https://design-guide.<your-subdomain>.workers.dev`
