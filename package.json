@@ -17,5 +17,6 @@
 		"typescript": "latest",
 		"vitest": "latest",
 		"wrangler": "latest"
-	}
+	},
+	"packageManager": "bun@1.4.2"
 }
