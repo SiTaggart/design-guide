@@ -1,0 +1,21 @@
+{
+	"name": "design-guide",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy",
+		"reindex": "tsx scripts/reindex.ts",
+		"test": "vitest run",
+		"typecheck": "tsc --noEmit",
+		"cf-typegen": "wrangler types"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "latest",
+		"@types/node": "latest",
+		"tsx": "latest",
+		"typescript": "latest",
+		"vitest": "latest",
+		"wrangler": "latest"
+	}
+}
