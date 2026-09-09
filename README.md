@@ -60,7 +60,7 @@ Reindex one system with `SYSTEM=primer npm run reindex`.
 
 Each system runs one Browser Run `/crawl` job from its `startUrl` with `source: "all"` and the Cloudflare maximum `limit` and `depth`. Both are 100000, defined once as `CRAWL_LIMIT` and `CRAWL_DEPTH` in `src/config/instance.ts`. The CLI polls the job every 15 seconds for up to the seven days Cloudflare allows a job to run. A full-site crawl takes hours.
 
-Each system uploads a new generation, then deletes that system's old keys only after every upload succeeds. A failed generation is deleted. The previous good items stay. A crawl that fails, returns no usable records, or hits the limit does not swap. DIY Vectorize is not on this path.
+Reindex deletes items whose key prefix is not a current `SYSTEM_IDS` seed. Each system uploads a new generation, then deletes that system's old keys only after every upload succeeds. A failed generation is deleted. The previous good items stay. A crawl that fails, returns no usable records, or hits the limit does not swap. DIY Vectorize is not on this path.
 
 The CLI prints a JSON array with one result per system:
 

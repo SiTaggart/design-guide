@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { CRAWL_LIMIT, INSTANCE_ID, MAX_ITEM_BYTES } from "../config/instance.ts";
 import { SEEDS, seedById } from "../config/seed.ts";
-import type { CrawlCounts, Seed, SystemId } from "../config/types.ts";
+import { isSystemId, type CrawlCounts, type Seed, type SystemId } from "../config/types.ts";
 import {
 	crawlSeed,
 	hitCrawlLimit,
@@ -67,6 +67,15 @@ async function deleteItems(auth: ItemsAuth, shouldDelete: (key: string) => boole
 		}
 	}
 	return deleted;
+}
+
+export function isDroppedSystemKey(key: string): boolean {
+	const prefix = key.split("/")[0] ?? "";
+	return prefix !== "" && !isSystemId(prefix);
+}
+
+export async function deleteDroppedSystemItems(auth: ItemsAuth): Promise<number> {
+	return deleteItems(auth, isDroppedSystemKey);
 }
 
 export async function reindexSystem(
@@ -143,6 +152,7 @@ export async function reindex(
 		instanceId: auth.instanceId ?? INSTANCE_ID,
 	};
 	await ensureInstance(itemsAuth);
+	await deleteDroppedSystemItems(itemsAuth);
 	const seeds = only ? [seedById(only)] : [...SEEDS];
 	const results: SystemReindexResult[] = [];
 	for (const seed of seeds) {
