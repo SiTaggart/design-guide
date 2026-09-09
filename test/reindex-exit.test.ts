@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Seed, SystemId } from "../src/config/types.ts";
-import { fitsItem, reindexExitCode, type SystemReindexResult } from "../src/index/reindex.ts";
+import { SYSTEM_IDS, type Seed, type SystemId } from "../src/config/types.ts";
+import { fitsItem, isDroppedSystemKey, reindexExitCode, type SystemReindexResult } from "../src/index/reindex.ts";
 import { seedById } from "../src/config/seed.ts";
 
 function result(system: SystemId, indexed: number, hitLimit = false): SystemReindexResult {
@@ -42,5 +42,24 @@ describe("fitsItem", () => {
 
 	it("does not apply suffix filters to other seeds", () => {
 		expect(fitsItem(page("https://primer.style/components/button"), primer)).toBe(true);
+	});
+});
+
+describe("isDroppedSystemKey", () => {
+	it("matches keys whose prefix is a parked system", () => {
+		expect(isDroppedSystemKey("react-spectrum/20260908t061435z/8506864cbf332c6e.md")).toBe(true);
+		expect(isDroppedSystemKey("carbon/gen/deadbeef.md")).toBe(true);
+	});
+
+	it("does not match keys whose prefix is a seeded system", () => {
+		for (const id of SYSTEM_IDS) {
+			expect(isDroppedSystemKey(`${id}/gen/aaaa.md`)).toBe(false);
+		}
+	});
+
+	it("matches a non-system prefix and ignores an empty or slash-only key", () => {
+		expect(isDroppedSystemKey("bootstrap/docs.md")).toBe(true);
+		expect(isDroppedSystemKey("")).toBe(false);
+		expect(isDroppedSystemKey("/orphan.md")).toBe(false);
 	});
 });
