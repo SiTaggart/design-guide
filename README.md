@@ -55,10 +55,10 @@ The token needs **Browser Rendering - Edit**, **AI Search:Edit**, **AI Search:Ru
 ```bash
 export CLOUDFLARE_ACCOUNT_ID=...
 export CLOUDFLARE_API_TOKEN=...
-npm run reindex
+bun run reindex
 ```
 
-Reindex one system with `SYSTEM=primer npm run reindex`.
+Reindex one system with `SYSTEM=primer bun run reindex`.
 
 Each system runs one Browser Run `/crawl` job from its `startUrl` with `source: "all"` and the Cloudflare maximum `limit` and `depth`. Both are 100000, defined once as `CRAWL_LIMIT` and `CRAWL_DEPTH` in `src/config/instance.ts`. The CLI polls the job every 15 seconds for up to the seven days Cloudflare allows a job to run. A full-site crawl takes hours.
 
@@ -85,6 +85,6 @@ The CLI exits 1 when any system has `hitLimit`, or when the run has results and 
 ## Develop
 
 ```bash
-npm test
-npx wrangler deploy
+bun run test
+bunx wrangler deploy
 ```
