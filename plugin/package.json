@@ -1,0 +1,10 @@
+{
+  "name": "design-guide",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.0",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "check": "bun build src/server.ts --outdir=/tmp/dg-plugin-check --target=bun"
+  }
+}

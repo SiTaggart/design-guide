@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "design-guide": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["run", "src/server.ts"],
+      "cwd": "${PLUGIN_ROOT}",
+      "env": {
+        "DESIGN_GUIDE_BASE_URL": "${DESIGN_GUIDE_BASE_URL}"
+      }
+    }
+  }
+}
