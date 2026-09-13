@@ -23,19 +23,22 @@ Reindex runs on config change. Upload the new generation for a system, then dele
 flowchart LR
   q["POST /v1/search\nquery, k?, system?"] --> worker["Worker\nsearch() only"]
   items["AI Search Items"] --> worker
-  worker --> json["results\npassage, source, url, system?"]
+  worker --> filter["drop score < 0.6"]
+  filter --> json["results\npassage, source, url, system, score"]
 ```
 
 `query` required. `k` default 8, max 20. `system` optional, a seed id.
 
 ```json
-{ "results": [{ "passage": "…", "source": "Primer", "url": "https://…", "system": "primer" }] }
+{ "results": [{ "passage": "…", "source": "Primer", "url": "https://…", "system": "primer", "score": 0.72 }] }
 ```
 
-`passage` is the chunk text, verbatim. `url` is the page https URL. `source` is the label. `system` is the seed id.
+`passage` is the chunk text, verbatim. `url` is the page https URL. `source` is the label. `system` is the seed id. `score` is the AI Search chunk score, passed through. The worker drops hits with `score` < 0.6 before the response.
 
-No matches: `{ "results": [] }`. Missing query: `400` `{ "error": "query_required" }`.
+No matches after the filter: `{ "results": [] }`. Missing query: `400` `{ "error": "query_required" }`.
 
 The query path calls `search()` only. No rewrite. No chat completions.
+
+The golden query is `accessible combobox or listbox keyboard and focus guidance`. A pass is HTTP 200 with at least two distinct `system` values. Each hit has `passage`, `source`, `url`, and `score` of 0.6 or greater. A human spot-check confirms the passages are about combobox or listbox keyboard and focus accessibility.
 
 `GET /health` is `200` when the index is ready.
