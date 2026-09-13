@@ -17,14 +17,14 @@ Deploy prints the live URL. There is no auth on `/health` or `/v1/search`.
 ```bash
 curl -sS -X POST "$BASE_URL/v1/search" \
   -H 'content-type: application/json' \
-  -d '{"query":"accessible combobox listbox keyboard focus","k":8}'
+  -d '{"query":"accessible combobox or listbox keyboard and focus guidance","k":8}'
 ```
 
 ```bash
-curl -sS "$BASE_URL/v1/search?query=accessible+combobox+listbox+keyboard+focus&k=8"
+curl -sS "$BASE_URL/v1/search?query=accessible+combobox+or+listbox+keyboard+and+focus+guidance&k=8"
 ```
 
-A missing query returns `400` with `{ "error": "query_required" }`. No matches returns `{ "results": [] }`. Each result is `{ passage, source, url, system }`. `passage` is the AI Search chunk text. `url` is the https `source_url` stored on the item.
+A missing query returns `400` with `{ "error": "query_required" }`. No matches after the score filter returns `{ "results": [] }`. Each result is `{ passage, source, url, system, score }`. `passage` is the AI Search chunk text. `url` is the https `source_url` stored on the item. `score` is the AI Search chunk score, passed through. Hits below 0.6 are dropped.
 
 `GET /health` returns `200` when at least one completed item exists. Otherwise it returns `503`.
 
