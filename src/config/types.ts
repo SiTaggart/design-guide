@@ -35,6 +35,7 @@ export type Citation = {
 	source: string;
 	url: string;
 	system: string;
+	score: number;
 };
 
 export type SearchParams = {
@@ -49,6 +50,7 @@ export type SearchResponse = {
 
 export type SearchChunk = {
 	text?: string;
+	score?: unknown;
 	item?: {
 		key?: string;
 		metadata?: Record<string, unknown>;

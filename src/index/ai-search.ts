@@ -1,6 +1,6 @@
 import { INSTANCE_ID } from "../config/instance.ts";
 import type { SearchChunk, SearchParams, SearchResponse } from "../config/types.ts";
-import { mapChunks } from "../serve/map-chunks.ts";
+import { keepScoredChunks, mapChunks } from "../serve/map-chunks.ts";
 
 export type SearchCall = {
 	query: string;
@@ -51,7 +51,7 @@ export async function searchCitations(
 			},
 		},
 	});
-	return { results: mapChunks(result.chunks ?? []) };
+	return { results: mapChunks(keepScoredChunks(result.chunks ?? [])) };
 }
 
 export async function indexHasCompletedItems(env: WorkerEnv): Promise<boolean> {
