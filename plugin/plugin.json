@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "design-guide",
+  "version": "0.1.0",
+  "description": "Search indexed design-system docs and return cited passages (passage, source, url, system, score).",
+  "author": {
+    "name": "SiTaggart"
+  }
+}
