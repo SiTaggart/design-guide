@@ -109,10 +109,10 @@ This server has no auth. Do not add a bearer token or an OAuth login.
 The only tool is `search_design_guidance`.
 
 - `query` is required.
-- `k` is optional. The Worker defaults `k` to 8 and clamps it to 1 through 20.
+- `k` is optional. Omit it for 8. When set, it must be 1 through 20.
 - `system` is optional. When set, it must be one of `paste`, `primer`, `uswds`, `govuk`, `nhs`, `antd`, or `gitlab-pajamas`.
 
-A golden-style example query:
+The golden query:
 
 ```text
 accessible combobox or listbox keyboard and focus guidance
