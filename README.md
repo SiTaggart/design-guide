@@ -6,9 +6,34 @@ See [docs/architecture.md](docs/architecture.md).
 
 ## BASE URL
 
-`https://design-guide.<your-subdomain>.workers.dev`
+`https://design-guide.me-2c5.workers.dev`
 
-Deploy prints the live URL. There is no auth on `/health` or `/v1/search`.
+Deploy prints the live URL. There is no auth on `/health`, `/v1/search`, or `/mcp`.
+
+## MCP
+
+Paste this URL into Cursor as a remote Streamable HTTP server. You do not clone the repo, install bun, or copy `plugin/`.
+
+`https://design-guide.me-2c5.workers.dev/mcp`
+
+1. Open **Cursor Settings**, then **MCP**.
+2. Add a global MCP server.
+3. Set the URL to the path above.
+4. Reload MCP if the tool list is empty.
+
+Or write `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "design-guide": {
+      "url": "https://design-guide.me-2c5.workers.dev/mcp"
+    }
+  }
+}
+```
+
+The only tool is `search_design_guidance`. `query` is required. `k` is 1 to 20. `system` is one of the seven seed ids. The tool text is the same citation JSON as `POST /v1/search`.
 
 ## Search
 
