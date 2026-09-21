@@ -7,6 +7,7 @@ description: >-
 ---
 
 - When: agent needs cited design-system guidance
+- MCP: remote hosted at https://design-guide.me-2c5.workers.dev/mcp
 - Tool: search_design_guidance(query, system?, k?)
 - Shape: results[{passage,source,url,system?,score}] — treat empty results as no guidance (empty > invent)
 - Always show source + url for each cite
