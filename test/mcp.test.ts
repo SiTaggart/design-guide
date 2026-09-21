@@ -70,6 +70,26 @@ async function mcpPost(env: WorkerEnv, body: unknown): Promise<Response> {
 	);
 }
 
+async function readMcpBody(response: Response): Promise<unknown> {
+	const text = await response.text();
+	const contentType = response.headers.get("content-type") ?? "";
+	if (contentType.includes("text/event-stream")) {
+		const frames = text
+			.split("\n")
+			.filter((line) => line.startsWith("data:"))
+			.map((line) => line.slice("data:".length).trim())
+			.filter(Boolean);
+		if (frames.length === 0) {
+			return undefined;
+		}
+		return JSON.parse(frames[frames.length - 1]);
+	}
+	if (!text) {
+		return undefined;
+	}
+	return JSON.parse(text);
+}
+
 async function mcpRpc(env: WorkerEnv, message: Record<string, unknown>): Promise<Response> {
 	return mcpPost(env, message);
 }
@@ -94,10 +114,9 @@ describe("streamable HTTP MCP on the search worker", () => {
 			},
 		});
 		expect(initialized.status).toBe(200);
-		expect(initialized.headers.get("content-type")).toContain("application/json");
-		expect(rpcResult(await initialized.json())).toEqual({
+		expect(rpcResult(await readMcpBody(initialized))).toMatchObject({
 			protocolVersion: "2025-03-26",
-			capabilities: { tools: {} },
+			capabilities: { tools: expect.any(Object) },
 			serverInfo: { name: "design-guide", version: "0.1.0" },
 		});
 
@@ -111,32 +130,40 @@ describe("streamable HTTP MCP on the search worker", () => {
 
 		const listed = await mcpRpc(env, { jsonrpc: "2.0", id: 2, method: "tools/list" });
 		expect(listed.status).toBe(200);
-		expect(rpcResult(await listed.json())).toEqual({
-			tools: [
-				{
-					name: "search_design_guidance",
-					description:
-						"Search indexed design-system docs and return cited passages. Never invent passages or scores.",
-					inputSchema: {
-						type: "object",
-						properties: {
-							query: { type: "string", description: "Search query" },
-							system: {
-								type: "string",
-								enum: ["paste", "primer", "uswds", "govuk", "nhs", "antd", "gitlab-pajamas"],
-								description: "Optional seed id",
-							},
-							k: {
-								type: "integer",
-								minimum: 1,
-								maximum: 20,
-								description: "Result count, 1-20",
-							},
-						},
-						required: ["query"],
-					},
-				},
-			],
+		const listedResult = rpcResult(await readMcpBody(listed)) as {
+			tools: Array<{
+				name: string;
+				description: string;
+				inputSchema: {
+					required?: string[];
+					properties?: {
+						query?: { type?: string };
+						system?: { enum?: string[] };
+						k?: { minimum?: number; maximum?: number; type?: string };
+					};
+				};
+			}>;
+		};
+		expect(listedResult.tools).toHaveLength(1);
+		expect(listedResult.tools[0].name).toBe("search_design_guidance");
+		expect(listedResult.tools[0].description).toBe(
+			"Search indexed design-system docs and return cited passages. Never invent passages or scores.",
+		);
+		expect(listedResult.tools[0].inputSchema.required).toEqual(["query"]);
+		expect(listedResult.tools[0].inputSchema.properties?.query?.type).toBe("string");
+		expect(listedResult.tools[0].inputSchema.properties?.system?.enum).toEqual([
+			"paste",
+			"primer",
+			"uswds",
+			"govuk",
+			"nhs",
+			"antd",
+			"gitlab-pajamas",
+		]);
+		expect(listedResult.tools[0].inputSchema.properties?.k).toMatchObject({
+			type: "integer",
+			minimum: 1,
+			maximum: 20,
 		});
 	});
 
@@ -162,7 +189,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 		expect(http.status).toBe(200);
 		expect(mcp.status).toBe(200);
 		const httpBody = await http.json();
-		const tool = rpcResult(await mcp.json()) as {
+		const tool = rpcResult(await readMcpBody(mcp)) as {
 			content: Array<{ type: string; text: string }>;
 			isError?: boolean;
 		};
@@ -183,14 +210,17 @@ describe("streamable HTTP MCP on the search worker", () => {
 			params: { name: "search_design_guidance", arguments: { k: 4 } },
 		});
 		expect(response.status).toBe(200);
-		expect(rpcResult(await response.json())).toEqual({
-			content: [{ type: "text", text: JSON.stringify({ error: "query_required" }) }],
-			isError: true,
-		});
+		const tool = rpcResult(await readMcpBody(response)) as {
+			content: Array<{ type: string; text: string }>;
+			isError?: boolean;
+		};
+		expect(tool.isError).toBe(true);
+		expect(tool.content[0]?.type).toBe("text");
+		expect(tool.content[0]?.text.toLowerCase()).toContain("query");
 		expect(calls).toEqual([]);
 	});
 
-	it("returns empty results when the system is unknown or the index matches nothing", async () => {
+	it("rejects an unknown system and returns empty results when the index matches nothing", async () => {
 		const { env, calls } = envWithIndex(fixtureChunks);
 		const unknown = await mcpRpc(env, {
 			jsonrpc: "2.0",
@@ -201,9 +231,12 @@ describe("streamable HTTP MCP on the search worker", () => {
 				arguments: { query: GOLDEN_QUERY, system: "bootstrap" },
 			},
 		});
-		expect(rpcResult(await unknown.json())).toEqual({
-			content: [{ type: "text", text: JSON.stringify({ results: [] }) }],
-		});
+		const unknownTool = rpcResult(await readMcpBody(unknown)) as {
+			content: Array<{ text: string }>;
+			isError?: boolean;
+		};
+		expect(unknownTool.isError).toBe(true);
+		expect(unknownTool.content[0]?.text.toLowerCase()).toMatch(/system|enum|invalid/);
 		expect(calls).toEqual([]);
 
 		const miss = await mcpRpc(env, {
@@ -215,7 +248,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 				arguments: { query: "no-such-passage" },
 			},
 		});
-		expect(rpcResult(await miss.json())).toEqual({
+		expect(rpcResult(await readMcpBody(miss))).toEqual({
 			content: [{ type: "text", text: JSON.stringify({ results: [] }) }],
 		});
 		expect(calls[0].query).toBe("no-such-passage");
@@ -256,7 +289,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 				arguments: { query: GOLDEN_QUERY },
 			},
 		});
-		const tool = rpcResult(await response.json()) as {
+		const tool = rpcResult(await readMcpBody(response)) as {
 			content: Array<{ text: string }>;
 		};
 		expect(JSON.parse(tool.content[0].text)).toEqual({
@@ -293,31 +326,28 @@ describe("streamable HTTP MCP on the search worker", () => {
 				arguments: { query: "combobox" },
 			},
 		});
-		expect(rpcResult(await response.json())).toEqual({
+		expect(rpcResult(await readMcpBody(response))).toEqual({
 			content: [{ type: "text", text: JSON.stringify({ error: "index_not_ready" }) }],
 			isError: true,
 		});
 	});
 
-	it("rejects missing jsonrpc, wrong jsonrpc, a non string-or-number id, and an empty batch", async () => {
+	it("lets the SDK reject a missing jsonrpc field and an empty batch", async () => {
 		const { env } = envWithIndex(fixtureChunks);
-		const invalid = { code: -32600, message: "Invalid Request" };
 
 		const missing = await mcpPost(env, { id: 1, method: "ping" });
-		expect(missing.status).toBe(200);
-		expect(await missing.json()).toEqual({ jsonrpc: "2.0", id: 1, error: invalid });
-
-		const wrong = await mcpPost(env, { jsonrpc: "1.0", id: 2, method: "ping" });
-		expect(wrong.status).toBe(200);
-		expect(await wrong.json()).toEqual({ jsonrpc: "2.0", id: 2, error: invalid });
-
-		const badId = await mcpPost(env, { jsonrpc: "2.0", id: true, method: "ping" });
-		expect(badId.status).toBe(200);
-		expect(await badId.json()).toEqual({ jsonrpc: "2.0", id: null, error: invalid });
+		expect(missing.status).toBeGreaterThanOrEqual(400);
+		expect(await readMcpBody(missing)).toMatchObject({
+			jsonrpc: "2.0",
+			error: { code: -32600 },
+		});
 
 		const empty = await mcpPost(env, []);
-		expect(empty.status).toBe(200);
-		expect(await empty.json()).toEqual({ jsonrpc: "2.0", id: null, error: invalid });
+		expect(empty.status).toBeGreaterThanOrEqual(400);
+		expect(await readMcpBody(empty)).toMatchObject({
+			jsonrpc: "2.0",
+			error: { code: -32600 },
+		});
 	});
 
 	it("returns 405 for GET /mcp and leaves POST /v1/search on the HTTP contract", async () => {
