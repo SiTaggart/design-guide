@@ -81,6 +81,14 @@ function accepted(): Response {
 	return new Response(null, { status: 202, headers: MCP_HEADERS });
 }
 
+function isJsonRpcId(value: unknown): value is string | number {
+	return typeof value === "string" || typeof value === "number";
+}
+
+function invalidRequest(id: JsonRpcId): Response {
+	return jsonRpcResponse(id, { error: { code: -32600, message: "Invalid Request" } });
+}
+
 function toolFromOutcome(outcome: SearchOutcome): ToolResult {
 	if (outcome.kind === "query_required") {
 		return {
@@ -150,10 +158,17 @@ async function handleJsonRpc(env: WorkerEnv, message: JsonRpcMessage): Promise<u
 
 async function dispatchOne(env: WorkerEnv, raw: unknown): Promise<Response | null> {
 	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-		return jsonRpcResponse(null, { error: { code: -32600, message: "Invalid Request" } });
+		return invalidRequest(null);
 	}
 	const message = raw as JsonRpcMessage;
-	const id = Object.hasOwn(message, "id") ? message.id : undefined;
+	const rawId = Object.hasOwn(message, "id") ? message.id : undefined;
+	const id = isJsonRpcId(rawId) ? rawId : undefined;
+	if (message.jsonrpc !== "2.0") {
+		return invalidRequest(id ?? null);
+	}
+	if (rawId !== undefined && id === undefined) {
+		return invalidRequest(null);
+	}
 	const isRequest = id !== undefined;
 	try {
 		const result = await handleJsonRpc(env, message);
@@ -201,6 +216,9 @@ export async function handleMcp(request: Request, env: WorkerEnv): Promise<Respo
 		return jsonRpcResponse(null, { error: { code: -32700, message: "Parse error" } });
 	}
 	if (Array.isArray(body)) {
+		if (body.length === 0) {
+			return invalidRequest(null);
+		}
 		const replies: unknown[] = [];
 		for (const item of body) {
 			const response = await dispatchOne(env, item);
