@@ -58,7 +58,7 @@ Check the connection:
 claude mcp list
 ```
 
-The row should show `Connected`. Then start `claude` and ask it to call `search_design_guidance` with the golden query.
+The list should show `design-guide` as connected. Then start `claude` and ask it to call `search_design_guidance` with the golden query.
 
 In a session, `/mcp` lists the same servers. The Claude Code desktop app can also add the URL through the Connectors UI.
 
