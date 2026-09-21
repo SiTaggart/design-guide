@@ -27,7 +27,7 @@ flowchart LR
   filter --> json["results\npassage, source, url, system, score"]
 ```
 
-`query` required. `k` default 8, max 20. `system` optional, a seed id. `POST /mcp` is Streamable HTTP MCP on the same worker. `tools/call` for `search_design_guidance` uses the same parse and `searchCitations` path as `/v1/search`. It does not loop back over HTTP.
+`query` required. `k` default 8, max 20. `system` optional, a seed id. `POST /mcp` is Streamable HTTP MCP on the same worker. `@modelcontextprotocol/server` `createMcpHandler` owns the JSON-RPC envelope. `tools/call` for `search_design_guidance` uses the same parse and `searchCitations` path as `/v1/search`. It does not loop back over HTTP.
 
 ```json
 { "results": [{ "passage": "…", "source": "Primer", "url": "https://…", "system": "primer", "score": 0.72 }] }
