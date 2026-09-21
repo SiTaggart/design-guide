@@ -21,13 +21,13 @@ Reindex runs on config change. Upload the new generation for a system, then dele
 
 ```mermaid
 flowchart LR
-  q["POST /v1/search\nquery, k?, system?"] --> worker["Worker\nsearch() only"]
+  q["POST /v1/search or POST /mcp\nquery, k?, system?"] --> worker["Worker\nsearch() only"]
   items["AI Search Items"] --> worker
   worker --> filter["drop score < 0.6"]
   filter --> json["results\npassage, source, url, system, score"]
 ```
 
-`query` required. `k` default 8, max 20. `system` optional, a seed id.
+`query` required. `k` default 8, max 20. `system` optional, a seed id. `POST /mcp` is Streamable HTTP MCP on the same worker. `tools/call` for `search_design_guidance` uses the same parse and `searchCitations` path as `/v1/search`. It does not loop back over HTTP.
 
 ```json
 { "results": [{ "passage": "…", "source": "Primer", "url": "https://…", "system": "primer", "score": 0.72 }] }
