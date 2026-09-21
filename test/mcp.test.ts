@@ -56,7 +56,7 @@ function envWithIndex(chunks: SearchChunk[], ready = true): { env: WorkerEnv; ca
 	};
 }
 
-async function mcpRpc(env: WorkerEnv, message: Record<string, unknown>): Promise<Response> {
+async function mcpPost(env: WorkerEnv, body: unknown): Promise<Response> {
 	return worker.fetch(
 		new Request("https://example.test/mcp", {
 			method: "POST",
@@ -64,10 +64,14 @@ async function mcpRpc(env: WorkerEnv, message: Record<string, unknown>): Promise
 				accept: "application/json, text/event-stream",
 				"content-type": "application/json",
 			},
-			body: JSON.stringify(message),
+			body: JSON.stringify(body),
 		}),
 		env,
 	);
+}
+
+async function mcpRpc(env: WorkerEnv, message: Record<string, unknown>): Promise<Response> {
+	return mcpPost(env, message);
 }
 
 function rpcResult(body: unknown): unknown {
@@ -293,6 +297,27 @@ describe("streamable HTTP MCP on the search worker", () => {
 			content: [{ type: "text", text: JSON.stringify({ error: "index_not_ready" }) }],
 			isError: true,
 		});
+	});
+
+	it("rejects missing jsonrpc, wrong jsonrpc, a non string-or-number id, and an empty batch", async () => {
+		const { env } = envWithIndex(fixtureChunks);
+		const invalid = { code: -32600, message: "Invalid Request" };
+
+		const missing = await mcpPost(env, { id: 1, method: "ping" });
+		expect(missing.status).toBe(200);
+		expect(await missing.json()).toEqual({ jsonrpc: "2.0", id: 1, error: invalid });
+
+		const wrong = await mcpPost(env, { jsonrpc: "1.0", id: 2, method: "ping" });
+		expect(wrong.status).toBe(200);
+		expect(await wrong.json()).toEqual({ jsonrpc: "2.0", id: 2, error: invalid });
+
+		const badId = await mcpPost(env, { jsonrpc: "2.0", id: true, method: "ping" });
+		expect(badId.status).toBe(200);
+		expect(await badId.json()).toEqual({ jsonrpc: "2.0", id: null, error: invalid });
+
+		const empty = await mcpPost(env, []);
+		expect(empty.status).toBe(200);
+		expect(await empty.json()).toEqual({ jsonrpc: "2.0", id: null, error: invalid });
 	});
 
 	it("returns 405 for GET /mcp and leaves POST /v1/search on the HTTP contract", async () => {
