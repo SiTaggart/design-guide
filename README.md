@@ -134,7 +134,7 @@ The tool text is the same citation JSON as `POST /v1/search`:
 }
 ```
 
-Each hit has `passage`, `source`, `url`, `system`, and `score`. Hits with `score` below 0.6 are dropped. If no matches remain after the filter, the tool returns `{ "results": [] }`. A missing `query` returns `{ "error": "query_required" }`.
+Each hit has `passage`, `source`, `url`, `system`, and `score`. Hits with `score` below 0.6 are dropped. If no matches remain after the filter, the tool returns `{ "results": [] }`. The MCP schema requires `query`. HTTP search returns `400` `{ "error": "query_required" }` when `query` is missing.
 
 If the MCP client cannot call the tool, use HTTP:
 
