@@ -151,6 +151,10 @@ See [Search](#search) for the GET form and the rest of the HTTP contract.
 `query` is required. `k` defaults to 8 and clamps to 1..20. `system` is an optional seed id.
 
 ```bash
+export BASE_URL=https://design-guide.me-2c5.workers.dev
+```
+
+```bash
 curl -sS -X POST "$BASE_URL/v1/search" \
   -H 'content-type: application/json' \
   -d '{"query":"accessible combobox or listbox keyboard and focus guidance","k":8}'
