@@ -11,6 +11,7 @@ import {
 	type ReindexAuth,
 	type SystemReindexResult,
 } from "../index/reindex.ts";
+import { MAIL_STEP_RETRIES, sendFinishIndexMail, sendStartIndexMail } from "../index/mail.ts";
 import { finishStatusRun, startStatusRun, type ReindexParams } from "../index/status.ts";
 import { commitIndexedHashes, persistSystemOutcome, reindexAuth } from "../index/trigger.ts";
 import { waitForCrawlJob } from "../index/workflow-poll.ts";
@@ -36,15 +37,25 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 			return { dropped };
 		});
 
+		await step.do("mail-start", MAIL_STEP_RETRIES, async () => {
+			return sendStartIndexMail(env, params);
+		});
+
 		const results: SystemReindexResult[] = [];
 		for (const system of params.systems) {
 			results.push(await this.indexSystem(step, env, auth, system));
 		}
 
 		await step.do("finish", async () => {
-			await commitIndexedHashes(env);
-			await finishStatusRun(env, results);
+			if (params.systems.length > 0) {
+				await commitIndexedHashes(env);
+				await finishStatusRun(env, results, undefined, params.workflowId);
+			}
 			return { systems: results.length };
+		});
+
+		await step.do("mail-finish", MAIL_STEP_RETRIES, async () => {
+			return sendFinishIndexMail(env, params, results);
 		});
 		return results;
 	}

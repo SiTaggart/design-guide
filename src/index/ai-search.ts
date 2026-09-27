@@ -37,6 +37,7 @@ export type WorkerEnv = {
 	CLOUDFLARE_ACCOUNT_ID?: string;
 	CLOUDFLARE_API_TOKEN?: string;
 	INDEX_WEBHOOK_URL?: string;
+	EMAIL?: SendEmail;
 };
 
 export async function searchCitations(

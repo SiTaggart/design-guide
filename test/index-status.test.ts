@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { SEED_HASH } from "../src/index/seed-hash.ts";
 import { writePark } from "../src/index/parks.ts";
-import { startStatusRun, writeStatus } from "../src/index/status.ts";
+import { finishStatusRun, startStatusRun, writeStatus } from "../src/index/status.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
@@ -83,5 +83,36 @@ describe("GET /v1/index-status", () => {
 		expect(body.counts.parked).toBe(1);
 		expect(body.counts.errors).toBe(1);
 		expect(body.counts.systems).toBe(2);
+	});
+
+	it("does not let a second workflow clobber a running last-run", async () => {
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		await startStatusRun(env, { trigger: "drift", workflowId: "reindex-drift-live" });
+		const started = await startStatusRun(env, { trigger: "recrawl", workflowId: "reindex-mail-proof" });
+		expect(started.workflowId).toBe("reindex-drift-live");
+		expect(started.trigger).toBe("drift");
+		expect(started.state).toBe("running");
+
+		const finished = await finishStatusRun(
+			env,
+			[
+				{
+					system: "primer",
+					startUrl: "https://primer.style/",
+					crawl: { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 },
+					indexed: 0,
+					hitLimit: false,
+					keptPrevious: true,
+					usable: 0,
+					error: "should not write",
+				},
+			],
+			"2026-09-27T01:00:00.000Z",
+			"reindex-mail-proof",
+		);
+		expect(finished.workflowId).toBe("reindex-drift-live");
+		expect(finished.state).toBe("running");
+		expect(finished.systems).toEqual([]);
 	});
 });

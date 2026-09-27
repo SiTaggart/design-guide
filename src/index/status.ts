@@ -159,6 +159,10 @@ export async function startStatusRun(
 	params: Pick<ReindexParams, "trigger" | "workflowId">,
 	startedAt = new Date().toISOString(),
 ): Promise<IndexStatusDocument> {
+	const current = await readStatus(env);
+	if (current.state === "running" && current.workflowId && current.workflowId !== params.workflowId) {
+		return current;
+	}
 	const lastIndexedHash = await readLastIndexedHash(env);
 	const parks = await readParks(env);
 	const document: IndexStatusDocument = {
@@ -202,8 +206,12 @@ export async function finishStatusRun(
 	env: WorkerEnv,
 	results: readonly SystemReindexResult[],
 	finishedAt = new Date().toISOString(),
+	workflowId?: string,
 ): Promise<IndexStatusDocument> {
 	const current = await readStatus(env);
+	if (workflowId && current.workflowId && current.workflowId !== workflowId) {
+		return current;
+	}
 	const parks = await readParks(env);
 	const document: IndexStatusDocument = {
 		...current,

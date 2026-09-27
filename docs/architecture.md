@@ -11,13 +11,14 @@ flowchart LR
   workflow --> crawl["Browser Run /crawl\nmarkdown"]
   crawl --> items["AI Search Items"]
   workflow --> kv["INDEX KV\nparks + last-run"]
+  workflow --> mail["EMAIL send\nstart + finish"]
 ```
 
 Seed ids: `paste`, `primer`, `uswds`, `govuk`, `nhs`, `antd`, `gitlab-pajamas`, `patternfly`, `cloudscape`, `vanilla`, `siemens-ix`, `backpack`, `garden`, `ouds-web`. One `startUrl` each.
 
 Crawl: `source=all`, limit and depth `100000`, `formats: [markdown]`, `render: true`. `hitLimit` must be false. `includePatterns` scopes the crawl when a seed sets them. No page-list filters.
 
-A Cloudflare Workflow is the reindex engine. A 5-minute Worker cron compares the bundle seed hash to `lastIndexedHash` in KV and starts the Workflow for new or changed systems. A daily cron recrawls non-parked seeds. The Workflow polls Browser Run with `step.sleep`, then does the same per-system swap as `src/index/reindex.ts`. A completed crawl with fewer than two usable pages is a stub: it does not swap, and the Workflow writes park state to KV. Catalog, query, and the MCP skill enum read that park map and drop parked systems from the live set. `GET /v1/index-status` returns the last-run JSON. `bun run reindex` stays debug-only.
+A Cloudflare Workflow is the reindex engine. A 5-minute Worker cron compares the bundle seed hash to `lastIndexedHash` in KV and starts the Workflow for new or changed systems. A daily cron recrawls non-parked seeds. The Workflow polls Browser Run with `step.sleep`, then does the same per-system swap as `src/index/reindex.ts`. A completed crawl with fewer than two usable pages is a stub: it does not swap, and the Workflow writes park state to KV. Catalog, query, and the MCP skill enum read that park map and drop parked systems from the live set. `GET /v1/index-status` returns the last-run JSON. The Workflow emails `me@simontaggart.com` on start and on finish via `env.EMAIL.send()`. Finish mail includes systems, counts, parks, errors, and the status URL. `bun run reindex` stays debug-only.
 
 ## Query to citation JSON
 
@@ -43,4 +44,4 @@ The query path calls `search()` only. No rewrite. No chat completions.
 
 The golden query is `accessible combobox or listbox keyboard and focus guidance`. A pass is HTTP 200 with at least two distinct `system` values. Each hit has `passage`, `source`, `url`, and `score` of 0.6 or greater. A human spot-check confirms the passages are about combobox or listbox keyboard and focus accessibility.
 
-`GET /health` is `200` when the index is ready. `GET /v1/index-status` is last-run health: per-system counts, parks, crawl/render/index errors, and the workflow id.
+`GET /health` is `200` when the index is ready. `GET /v1/index-status` is last-run health: per-system counts, parks, crawl/render/index errors, and the workflow id. Email is a push of that same summary, not a replacement for the pull endpoint.
