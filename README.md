@@ -1,6 +1,6 @@
 # design-guide
 
-HTTP retrieval over seven ToS-safe design systems. The Worker returns citation JSON only. It does not rewrite queries, generate answers, or invent passages.
+HTTP retrieval over fourteen ToS-safe design systems. The Worker returns citation JSON only. It does not rewrite queries, generate answers, or invent passages.
 
 See [docs/architecture.md](docs/architecture.md).
 
@@ -110,7 +110,7 @@ The only tool is `search_design_guidance`.
 
 - `query` is required.
 - `k` is optional. Omit it for 8. When set, it must be 1 through 20.
-- `system` is optional. When set, it must be one of `paste`, `primer`, `uswds`, `govuk`, `nhs`, `antd`, or `gitlab-pajamas`.
+- `system` is optional. When set, it must be one of `paste`, `primer`, `uswds`, `govuk`, `nhs`, `antd`, `gitlab-pajamas`, `patternfly`, `cloudscape`, `vanilla`, `siemens-ix`, `backpack`, `garden`, or `ouds-web`.
 
 The golden query:
 
@@ -170,7 +170,7 @@ A missing query returns `400` with `{ "error": "query_required" }`. No matches a
 
 ## Seed
 
-Config lives in `src/config/seed.ts`. A seed is one full-site crawl from a docs root, not a curated page list. The locked systems and their start URLs are:
+Config lives in `src/config/seed.ts`. A seed is one crawl from a single `startUrl`, not a curated page list. The locked systems and their start URLs are:
 
 | system | startUrl |
 | --- | --- |
@@ -181,8 +181,15 @@ Config lives in `src/config/seed.ts`. A seed is one full-site crawl from a docs 
 | nhs | https://service-manual.nhs.uk/ |
 | antd | https://ant.design/ |
 | gitlab-pajamas | https://design.gitlab.com/ |
+| patternfly | https://www.patternfly.org/ |
+| cloudscape | https://cloudscape.design/ |
+| vanilla | https://vanillaframework.io/docs/ |
+| siemens-ix | https://ix.siemens.io/docs/home/overview |
+| backpack | https://www.skyscanner.design/latest/welcome-to-backpack-Mtf5OEo4 |
+| garden | https://garden.zendesk.com/ |
+| ouds-web | https://web.unified-design-system.orange.com/orange/ |
 
-Spectrum and Carbon are parked as crawl misses. Their items are deleted. They are not in the seed. Every remaining seed excludes spectrum.adobe.com and carbondesignsystem.com. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` only scopes a crawl to its host (uswds). No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`, which the CLI uses only when the primary crawl start returns a 4xx or 5xx.
+Spectrum and Carbon are parked as crawl misses. Their items are deleted. They are not in the seed. Every seed excludes spectrum.adobe.com and carbondesignsystem.com. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` scopes uswds to its host, backpack to `/latest/**`, siemens-ix to `/docs/**`, and ouds-web to `/orange/` including `docs/1.5`. ouds-web also excludes `docs/0.4`. No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`. The CLI uses that URL only when the primary crawl start returns a 4xx or 5xx. A `llms.txt` start for siemens-ix finished 1 page and produced 0 usable records, because Browser Run did not follow the markdown links.
 
 Change the seed, then reindex. There is no admin UI.
 
@@ -202,7 +209,7 @@ Reindex one system with `SYSTEM=primer bun run reindex`.
 
 Each system runs one Browser Run `/crawl` job from its `startUrl` with `source: "all"` and the Cloudflare maximum `limit` and `depth`. Both are 100000, defined once as `CRAWL_LIMIT` and `CRAWL_DEPTH` in `src/config/instance.ts`. The CLI polls the job every 15 seconds for up to the seven days Cloudflare allows a job to run. A full-site crawl takes hours.
 
-Reindex deletes items whose key prefix is not a current `SYSTEM_IDS` seed. Each system uploads a new generation, then deletes that system's old keys only after every upload succeeds. A failed generation is deleted. The previous good items stay. A crawl that fails, returns no usable records, or hits the limit does not swap. DIY Vectorize is not on this path.
+Reindex deletes items whose key prefix is not a current `SYSTEM_IDS` seed. Each system uploads a new generation, then deletes that system's old keys only after every upload succeeds. A failed generation is deleted. The previous good items stay. A crawl that fails, returns no usable records, returns a 1-page stub, or hits the limit does not swap. DIY Vectorize is not on this path.
 
 The CLI prints a JSON array with one result per system:
 

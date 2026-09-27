@@ -6,6 +6,13 @@ export const SYSTEM_IDS = [
 	"nhs",
 	"antd",
 	"gitlab-pajamas",
+	"patternfly",
+	"cloudscape",
+	"vanilla",
+	"siemens-ix",
+	"backpack",
+	"garden",
+	"ouds-web",
 ] as const;
 
 export type SystemId = (typeof SYSTEM_IDS)[number];

@@ -119,6 +119,9 @@ export async function reindexSystem(
 	if (usable.length === 0) {
 		return { ...kept, error: "no usable crawl records" };
 	}
+	if (isStubGeneration(usable.length)) {
+		return { ...kept, error: `stub: only ${usable.length} usable page(s)` };
+	}
 	const generation = generationId();
 	const uploadedKeys = new Set<string>();
 	try {
@@ -159,6 +162,10 @@ export async function reindex(
 		results.push(await reindexSystem(auth, seed));
 	}
 	return results;
+}
+
+export function isStubGeneration(usable: number): boolean {
+	return usable < 2;
 }
 
 export function reindexExitCode(results: readonly SystemReindexResult[]): 0 | 1 {

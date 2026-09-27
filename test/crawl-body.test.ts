@@ -48,6 +48,20 @@ describe("crawlRequestBody", () => {
 		]);
 	});
 
+	it("passes includePatterns through for backpack, siemens-ix, and ouds-web", () => {
+		expect(crawlRequestBody(seedById("backpack"), seedById("backpack").startUrl).options.includePatterns).toEqual([
+			"https://www.skyscanner.design/latest/**",
+		]);
+		expect(crawlRequestBody(seedById("siemens-ix"), seedById("siemens-ix").startUrl).options.includePatterns).toEqual([
+			"https://ix.siemens.io/docs/**",
+		]);
+		expect(crawlRequestBody(seedById("ouds-web"), seedById("ouds-web").startUrl).options.includePatterns).toEqual([
+			"https://web.unified-design-system.orange.com/orange/",
+			"https://web.unified-design-system.orange.com/orange/**",
+			"**/orange/docs/1.5/**",
+		]);
+	});
+
 	it("uses the start url it is handed so a fallback crawl reports the fallback", () => {
 		const pajamas = seedById("gitlab-pajamas");
 		const body = crawlRequestBody(pajamas, pajamas.fallbackStartUrl ?? "");

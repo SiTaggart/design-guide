@@ -22,6 +22,46 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 	return (await response.json()) as Record<string, unknown>;
 }
 
+const RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 16_000];
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hasRateLimitError(data: Record<string, unknown>): boolean {
+	const errors = data.errors;
+	if (!Array.isArray(errors)) {
+		return false;
+	}
+	return errors.some((error) => {
+		if (!error || typeof error !== "object") {
+			return false;
+		}
+		return (error as { code?: unknown }).code === 1015;
+	});
+}
+
+async function cfFetch(url: string | URL, init?: RequestInit): Promise<Response> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+		try {
+			const response = await fetch(url, init);
+			if ((response.status === 429 || response.status === 503) && attempt < RETRY_DELAYS_MS.length) {
+				await sleep(RETRY_DELAYS_MS[attempt] ?? 16_000);
+				continue;
+			}
+			return response;
+		} catch (error) {
+			lastError = error;
+			if (attempt === RETRY_DELAYS_MS.length) {
+				throw error;
+			}
+			await sleep(RETRY_DELAYS_MS[attempt] ?? 16_000);
+		}
+	}
+	throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 export async function getInstance(auth: ItemsAuth): Promise<boolean> {
 	const response = await fetch(instanceUrl(auth), {
 		headers: { authorization: `Bearer ${auth.apiToken}` },
@@ -76,16 +116,28 @@ export async function uploadItem(
 	content: string,
 	metadata: Record<string, string>,
 ): Promise<ItemRecord> {
-	const form = new FormData();
-	form.append("file", new Blob([content], { type: "text/markdown" }), key);
-	form.append("metadata", JSON.stringify(metadata));
-	form.append("wait_for_completion", "true");
-	const response = await fetch(itemsUrl(auth), {
+	const form = () => {
+		const body = new FormData();
+		body.append("file", new Blob([content], { type: "text/markdown" }), key);
+		body.append("metadata", JSON.stringify(metadata));
+		body.append("wait_for_completion", "true");
+		return body;
+	};
+	let response = await cfFetch(itemsUrl(auth), {
 		method: "POST",
 		headers: { authorization: `Bearer ${auth.apiToken}` },
-		body: form,
+		body: form(),
 	});
-	const data = await readJson(response);
+	let data = await readJson(response);
+	for (let retry = 0; !response.ok && hasRateLimitError(data) && retry < RETRY_DELAYS_MS.length; retry += 1) {
+		await sleep(RETRY_DELAYS_MS[retry] ?? 16_000);
+		response = await cfFetch(itemsUrl(auth), {
+			method: "POST",
+			headers: { authorization: `Bearer ${auth.apiToken}` },
+			body: form(),
+		});
+		data = await readJson(response);
+	}
 	if (!response.ok) {
 		throw new Error(`item upload failed ${key}: ${JSON.stringify(data.errors ?? data)}`);
 	}
@@ -99,15 +151,21 @@ export async function uploadItem(
 export async function listItems(auth: ItemsAuth): Promise<ItemRecord[]> {
 	const items: ItemRecord[] = [];
 	let page = 1;
+	let pageRetries = 0;
 	for (;;) {
 		const url = new URL(itemsUrl(auth));
 		url.searchParams.set("page", String(page));
 		url.searchParams.set("per_page", "50");
 		url.searchParams.set("source", "builtin");
-		const response = await fetch(url, {
+		const response = await cfFetch(url, {
 			headers: { authorization: `Bearer ${auth.apiToken}` },
 		});
 		const data = await readJson(response);
+		if (!response.ok && hasRateLimitError(data) && pageRetries < RETRY_DELAYS_MS.length) {
+			await sleep(RETRY_DELAYS_MS[pageRetries] ?? 16_000);
+			pageRetries += 1;
+			continue;
+		}
 		if (!response.ok) {
 			throw new Error(`item list failed: ${JSON.stringify(data.errors ?? data)}`);
 		}
@@ -118,12 +176,13 @@ export async function listItems(auth: ItemsAuth): Promise<ItemRecord[]> {
 			break;
 		}
 		page += 1;
+		pageRetries = 0;
 	}
 	return items;
 }
 
 export async function deleteItem(auth: ItemsAuth, itemId: string): Promise<void> {
-	const response = await fetch(itemsUrl(auth, `/${itemId}`), {
+	const response = await cfFetch(itemsUrl(auth, `/${itemId}`), {
 		method: "DELETE",
 		headers: { authorization: `Bearer ${auth.apiToken}` },
 	});

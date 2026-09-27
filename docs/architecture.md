@@ -6,16 +6,16 @@ Cited retrieval over indexed design-system docs. The worker returns stored passa
 
 ```mermaid
 flowchart LR
-  seed["seed.ts\nseven systems"] --> crawl["Browser Run /crawl\nmarkdown"]
+  seed["seed.ts\nfourteen systems"] --> crawl["Browser Run /crawl\nmarkdown"]
   crawl --> items["AI Search Items"]
   reindex["reindex\nswap per system"] --> items
 ```
 
-Seed ids: `paste`, `primer`, `uswds`, `govuk`, `nhs`, `antd`, `gitlab-pajamas`. One docs-root `startUrl` each.
+Seed ids: `paste`, `primer`, `uswds`, `govuk`, `nhs`, `antd`, `gitlab-pajamas`, `patternfly`, `cloudscape`, `vanilla`, `siemens-ix`, `backpack`, `garden`, `ouds-web`. One `startUrl` each.
 
-Crawl: `source=all`, limit and depth `100000`, `formats: [markdown]`, `render: true`. `hitLimit` must be false. Host-scope only. No page-list filters.
+Crawl: `source=all`, limit and depth `100000`, `formats: [markdown]`, `render: true`. `hitLimit` must be false. `includePatterns` scopes the crawl when a seed sets them. No page-list filters.
 
-Reindex runs on config change. Upload the new generation for a system, then delete the previous one. Ids not in the seed are deleted. An empty search is not deletion.
+Reindex runs on config change. Upload the new generation for a system, then delete the previous one. Ids not in the seed are deleted. An empty search is not deletion. A 1-page usable set is a stub and does not swap.
 
 ## Query to citation JSON
 
