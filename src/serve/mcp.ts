@@ -2,7 +2,7 @@ import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/server/validators/cf-worker";
 import { z } from "zod";
 import { MAX_K, MIN_K } from "../config/instance.ts";
-import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
+import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
 import { loadLiveSystemIds } from "../index/parks.ts";
 import { parseSearchFields } from "./parse.ts";
@@ -20,11 +20,16 @@ const MCP_HEADERS = {
 };
 
 function searchInput(live: SystemId[]) {
-	const enumIds = (live.length > 0 ? live : [...SYSTEM_IDS]) as [SystemId, ...SystemId[]];
-	return z.object({
+	const fields = {
 		query: z.string().describe("Search query"),
-		system: z.enum(enumIds).optional().describe("Optional seed id"),
 		k: z.number().int().min(MIN_K).max(MAX_K).optional().describe("Result count, 1-20"),
+	};
+	if (live.length === 0) {
+		return z.object(fields);
+	}
+	return z.object({
+		...fields,
+		system: z.enum(live as [SystemId, ...SystemId[]]).optional().describe("Optional seed id"),
 	});
 }
 

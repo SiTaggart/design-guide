@@ -81,7 +81,7 @@ describe("park state", () => {
 		expect(body.results.map((hit) => hit.system)).toEqual(["primer", "uswds"]);
 	});
 
-	it("does not let parked hits consume k before the live filter", async () => {
+	it("excludes parked systems at retrieval so they do not consume k", async () => {
 		const kv = memoryKV();
 		const { env, calls } = envWithIndex(fixtureChunks, true, { INDEX: kv });
 		await writePark(env, "paste", 0);
@@ -94,7 +94,8 @@ describe("park state", () => {
 			env,
 		);
 		const body = (await response.json()) as { results: Array<{ system: string }> };
-		expect(calls[0]?.ai_search_options.retrieval.max_num_results).toBe(2);
+		expect(calls[0]?.ai_search_options.retrieval.max_num_results).toBe(1);
+		expect(calls[0]?.ai_search_options.retrieval.filters).toEqual({ system: { $nin: ["paste"] } });
 		expect(body.results.map((hit) => hit.system)).toEqual(["primer"]);
 	});
 
@@ -119,5 +120,17 @@ describe("park state", () => {
 		})) as { result: { isError?: boolean } };
 		expect(called.result.isError).toBe(true);
 		expect(calls).toEqual([]);
+	});
+
+	it("omits the system enum when every seed is parked", async () => {
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		for (const id of SYSTEM_IDS) {
+			await writePark(env, id, 0);
+		}
+		const listed = (await mcpRpc(env, { jsonrpc: "2.0", id: 1, method: "tools/list" })) as {
+			result: { tools: Array<{ inputSchema: { properties?: { system?: { enum?: string[] } } } }> };
+		};
+		expect(listed.result.tools[0]?.inputSchema.properties?.system).toBeUndefined();
 	});
 });

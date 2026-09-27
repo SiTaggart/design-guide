@@ -1,6 +1,20 @@
-import type { SearchCall, WorkerEnv } from "../../src/index/ai-search.ts";
+import type { SearchCall, SystemFilter, WorkerEnv } from "../../src/index/ai-search.ts";
 import type { SearchChunk } from "../../src/config/types.ts";
 import type { ReindexParams } from "../../src/index/status.ts";
+
+function matchesSystemFilter(system: unknown, filter?: SystemFilter): boolean {
+	if (filter === undefined) {
+		return true;
+	}
+	const value = typeof system === "string" ? system : "";
+	if (typeof filter === "string") {
+		return value === filter;
+	}
+	if ("$nin" in filter) {
+		return !filter.$nin.includes(value);
+	}
+	return filter.$in.includes(value);
+}
 
 export function memoryKV(init: Record<string, string> = {}): KVNamespace & { store: Map<string, string> } {
 	const store = new Map(Object.entries(init));
@@ -69,7 +83,13 @@ export function envWithIndex(
 							return { chunks: [] };
 						}
 						const limit = input.ai_search_options.retrieval.max_num_results;
-						return { chunks: chunks.slice(0, limit) };
+						const matched = chunks.filter((chunk) =>
+							matchesSystemFilter(
+								chunk.item?.metadata?.system,
+								input.ai_search_options.retrieval.filters?.system,
+							),
+						);
+						return { chunks: matched.slice(0, limit) };
 					},
 					items: {
 						list: async () => ({ result: ready ? [{ status: "completed" }] : [] }),

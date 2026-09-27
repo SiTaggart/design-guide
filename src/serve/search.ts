@@ -1,4 +1,3 @@
-import { MAX_K } from "../config/instance.ts";
 import type { SearchResponse } from "../config/types.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
@@ -28,9 +27,7 @@ export async function resolveSearch(
 	}
 	try {
 		const requested = parsed.params.k;
-		const retrieve =
-			parked?.size && !parsed.params.system ? Math.min(MAX_K, requested + parked.size) : requested;
-		const body = await searchCitations(env, { ...parsed.params, k: retrieve });
+		const body = await searchCitations(env, parsed.params, parked);
 		if (!parked?.size) {
 			return { kind: "ok", body };
 		}
