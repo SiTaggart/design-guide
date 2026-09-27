@@ -11,6 +11,8 @@ export type ParkRecord = {
 
 export type Parks = Partial<Record<SystemId, ParkRecord>>;
 
+export type ParksRead = { kind: "ok"; parks: Parks } | { kind: "unread" };
+
 export function liveSystemIds(parks: Parks): SystemId[] {
 	return SYSTEM_IDS.filter((id) => parks[id] === undefined);
 }
@@ -19,24 +21,31 @@ export function parkedSystemIds(parks: Parks): SystemId[] {
 	return SYSTEM_IDS.filter((id) => parks[id] !== undefined);
 }
 
-export async function readParks(env: WorkerEnv): Promise<Parks> {
+export async function readParks(env: WorkerEnv): Promise<ParksRead> {
 	if (!env.INDEX) {
-		return {};
+		return { kind: "ok", parks: {} };
 	}
 	try {
 		const raw = await env.INDEX.get(PARKS_KEY);
 		if (!raw) {
-			return {};
+			return { kind: "ok", parks: {} };
 		}
-		const parsed = JSON.parse(raw) as Parks;
-		return parsed && typeof parsed === "object" ? parsed : {};
+		const parsed = JSON.parse(raw) as unknown;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return { kind: "unread" };
+		}
+		return { kind: "ok", parks: parsed as Parks };
 	} catch {
-		return {};
+		return { kind: "unread" };
 	}
 }
 
 export async function loadLiveSystemIds(env: WorkerEnv): Promise<Set<SystemId>> {
-	return new Set(liveSystemIds(await readParks(env)));
+	const read = await readParks(env);
+	if (read.kind === "unread") {
+		throw new Error("parks unread");
+	}
+	return new Set(liveSystemIds(read.parks));
 }
 
 export async function writePark(
@@ -45,22 +54,21 @@ export async function writePark(
 	usable: number,
 	at = new Date().toISOString(),
 ): Promise<ParkRecord> {
-	const parks = await readParks(env);
 	const record: ParkRecord = { reason: "stub", usable, at };
-	parks[system] = record;
-	if (env.INDEX) {
-		await env.INDEX.put(PARKS_KEY, JSON.stringify(parks));
+	const read = await readParks(env);
+	if (read.kind === "unread" || !env.INDEX) {
+		return record;
 	}
+	read.parks[system] = record;
+	await env.INDEX.put(PARKS_KEY, JSON.stringify(read.parks));
 	return record;
 }
 
 export async function clearPark(env: WorkerEnv, system: SystemId): Promise<void> {
-	const parks = await readParks(env);
-	if (parks[system] === undefined) {
+	const read = await readParks(env);
+	if (read.kind === "unread" || read.parks[system] === undefined || !env.INDEX) {
 		return;
 	}
-	delete parks[system];
-	if (env.INDEX) {
-		await env.INDEX.put(PARKS_KEY, JSON.stringify(parks));
-	}
+	delete read.parks[system];
+	await env.INDEX.put(PARKS_KEY, JSON.stringify(read.parks));
 }

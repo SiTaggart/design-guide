@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { SEED_HASH } from "../src/index/seed-hash.ts";
-import { writePark } from "../src/index/parks.ts";
-import { finishStatusRun, startStatusRun, writeStatus } from "../src/index/status.ts";
+import { readParks, writePark } from "../src/index/parks.ts";
+import { finishStatusRun, readStatus, runStateFrom, startStatusRun, writeStatus } from "../src/index/status.ts";
+import { persistSystemOutcome } from "../src/index/trigger.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV, mockWorkflow } from "./helpers/index-env.ts";
@@ -17,6 +18,7 @@ describe("GET /v1/index-status", () => {
 			seedHash: SEED_HASH,
 			lastIndexedHash: null,
 			parks: {},
+			unparked: [],
 			systems: [],
 			errors: { crawl: [], render: [], index: [] },
 			counts: { systems: 0, indexed: 0, parked: 0, errors: 0 },
@@ -38,6 +40,7 @@ describe("GET /v1/index-status", () => {
 			seedHash: SEED_HASH,
 			lastIndexedHash: null,
 			parks: {},
+			unparked: [],
 			systems: [
 				{
 					system: "garden",
@@ -145,5 +148,104 @@ describe("GET /v1/index-status", () => {
 		const started = await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-drift-next" });
 		expect(started.workflowId).toBe("reindex-drift-next");
 		expect(started.state).toBe("running");
+	});
+
+	it("clears a park and lists unparked after a recovery swap", async () => {
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
+		await startStatusRun(env, { trigger: "recovery", workflowId: "reindex-recovery-unpark" });
+		await persistSystemOutcome(env, {
+			system: "garden",
+			startUrl: "https://garden.zendesk.com/",
+			crawl: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
+			indexed: 2,
+			hitLimit: false,
+			keptPrevious: false,
+			parked: false,
+			usable: 2,
+		});
+		const finished = await finishStatusRun(
+			env,
+			[
+				{
+					system: "garden",
+					startUrl: "https://garden.zendesk.com/",
+					crawl: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
+					indexed: 2,
+					hitLimit: false,
+					keptPrevious: false,
+					parked: false,
+					usable: 2,
+				},
+			],
+			"2026-09-27T06:10:00.000Z",
+			"reindex-recovery-unpark",
+		);
+		expect(await readParks(env)).toEqual({ kind: "ok", parks: {} });
+		expect((await readStatus(env)).unparked).toEqual(["garden"]);
+		expect(finished.trigger).toBe("recovery");
+		expect(finished.unparked).toEqual(["garden"]);
+		expect(finished.parks).toEqual({});
+		expect(finished.state).toBe("ok");
+		const response = await worker.fetch(new Request("https://example.test/v1/index-status"), env);
+		const body = (await response.json()) as {
+			trigger: string;
+			unparked: string[];
+			parks: Record<string, unknown>;
+		};
+		expect(body.trigger).toBe("recovery");
+		expect(body.unparked).toEqual(["garden"]);
+		expect(body.parks).toEqual({});
+	});
+
+	it("keeps a still-stub recovery parked and does not fail the run", async () => {
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
+		await startStatusRun(env, { trigger: "recovery", workflowId: "reindex-recovery-stub" });
+		const stub = {
+			system: "garden" as const,
+			startUrl: "https://garden.zendesk.com/",
+			crawl: { total: 1, finished: 1, skipped: 0, disallowed: 0, errored: 0 },
+			indexed: 0,
+			hitLimit: false,
+			keptPrevious: true,
+			parked: true,
+			usable: 1,
+			error: "stub: only 1 usable page(s)",
+		};
+		await persistSystemOutcome(env, stub);
+		const finished = await finishStatusRun(env, [stub], "2026-09-27T06:10:00.000Z", "reindex-recovery-stub");
+		expect(await readParks(env)).toEqual({
+			kind: "ok",
+			parks: { garden: expect.objectContaining({ reason: "stub", usable: 1 }) },
+		});
+		expect((await readStatus(env)).unparked).toEqual([]);
+		expect(finished.state).toBe("ok");
+		expect(runStateFrom([stub])).toBe("ok");
+	});
+
+	it("leaves a failed recovery parked", async () => {
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
+		await startStatusRun(env, { trigger: "recovery", workflowId: "reindex-recovery-fail" });
+		const failed = {
+			system: "garden" as const,
+			startUrl: "https://garden.zendesk.com/",
+			crawl: { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 },
+			indexed: 0,
+			hitLimit: false,
+			keptPrevious: true,
+			usable: 0,
+			error: "crawl ended failed",
+		};
+		await persistSystemOutcome(env, failed);
+		expect(await readParks(env)).toEqual({
+			kind: "ok",
+			parks: { garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" } },
+		});
+		expect((await readStatus(env)).unparked).toEqual([]);
 	});
 });

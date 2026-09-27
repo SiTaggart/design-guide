@@ -1,9 +1,11 @@
+import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
-import { readParks, type Parks } from "./parks.ts";
+import type { Parks } from "./parks.ts";
 import type { SystemReindexResult } from "./reindex.ts";
 import {
 	countsFrom,
 	errorsFromResults,
+	readStatus,
 	runStateFrom,
 	type ReindexParams,
 } from "./status.ts";
@@ -42,6 +44,7 @@ export function finishIndexMail(
 	results: readonly SystemReindexResult[],
 	parks: Parks,
 	runError?: string,
+	unparked: readonly SystemId[] = [],
 ): IndexMail {
 	const state = runError ? "fail" : runStateFrom(results);
 	const counts = countsFrom(results, parks);
@@ -85,6 +88,7 @@ export function finishIndexMail(
 			`Workflow: ${params.workflowId}`,
 			`State: ${state}`,
 			`Systems touched: ${touched.length ? touched.join(", ") : "(none)"}`,
+			...(unparked.length ? [`Unparked: ${unparked.join(", ")}`] : []),
 			`Counts: systems=${counts.systems} indexed=${counts.indexed} parked=${counts.parked} errors=${counts.errors}`,
 			"Parks:",
 			...parkLines,
@@ -130,6 +134,7 @@ export async function sendFinishIndexMail(
 	results: readonly SystemReindexResult[],
 	runError?: string,
 ): Promise<{ messageId: string } | { skipped: "unbound" }> {
-	return sendIndexMail(env, finishIndexMail(params, results, await readParks(env), runError));
+	const status = await readStatus(env);
+	return sendIndexMail(env, finishIndexMail(params, results, status.parks, runError, status.unparked));
 }
 

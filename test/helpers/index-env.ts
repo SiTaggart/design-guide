@@ -1,5 +1,6 @@
 import type { SearchCall, SystemFilter, WorkerEnv } from "../../src/index/ai-search.ts";
 import type { SearchChunk } from "../../src/config/types.ts";
+import { PARKS_KEY } from "../../src/index/parks.ts";
 import type { ReindexParams } from "../../src/index/status.ts";
 
 function matchesSystemFilter(system: unknown, filter?: SystemFilter): boolean {
@@ -14,6 +15,34 @@ function matchesSystemFilter(system: unknown, filter?: SystemFilter): boolean {
 		return !filter.$nin.includes(value);
 	}
 	return filter.$in.includes(value);
+}
+
+export function parksKvGetThrows(
+	kv: KVNamespace & { store: Map<string, string> },
+	error: Error = new Error("kv timeout"),
+): KVNamespace & { store: Map<string, string> } {
+	const get = kv.get.bind(kv);
+	kv.get = (async (key: string) => {
+		if (key === PARKS_KEY) {
+			throw error;
+		}
+		return get(key);
+	}) as KVNamespace["get"];
+	return kv;
+}
+
+export function parksKvGetRaw(
+	kv: KVNamespace & { store: Map<string, string> },
+	raw: string | null,
+): KVNamespace & { store: Map<string, string> } {
+	const get = kv.get.bind(kv);
+	kv.get = (async (key: string) => {
+		if (key === PARKS_KEY) {
+			return raw;
+		}
+		return get(key);
+	}) as KVNamespace["get"];
+	return kv;
 }
 
 export function memoryKV(init: Record<string, string> = {}): KVNamespace & { store: Map<string, string> } {

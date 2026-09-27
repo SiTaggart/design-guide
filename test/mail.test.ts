@@ -113,7 +113,7 @@ describe("index mail", () => {
 					error: "item upload failed primer/x.md: boom",
 				},
 			],
-			await readParks(env),
+			{ garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" } },
 		);
 		expect(mail.subject).toBe("design-guide index finished fail (deploy-drift) reindex-deploy-drift-mail");
 		expect(mail.text).toContain("Systems touched: garden, primer");
@@ -124,6 +124,41 @@ describe("index mail", () => {
 		expect(mail.text).toContain("primer indexed=0 usable=0");
 		expect(mail.text).toContain(`Status: ${INDEX_STATUS_URL}`);
 		expect(mail.text).not.toMatch(/records|markdown/);
+		expect(mail.text).not.toContain("Unparked:");
+	});
+
+	it("lists unparked ids on finish mail only when a park cleared", async () => {
+		const mail = finishIndexMail(
+			{ trigger: "recovery", workflowId: "reindex-recovery-mail" },
+			[
+				{
+					system: "garden",
+					startUrl: "https://garden.zendesk.com/",
+					crawl: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
+					indexed: 2,
+					hitLimit: false,
+					keptPrevious: false,
+					usable: 2,
+				},
+			],
+			{},
+			undefined,
+			["garden"],
+		);
+		expect(mail.to).toBe("simon.taggart@gmail.com");
+		expect(mail.from).toBe("design-guide@simontaggart.com");
+		expect(mail.subject).toBe("design-guide index finished ok (recovery) reindex-recovery-mail");
+		expect(mail.text).toContain("Trigger: recovery");
+		expect(mail.text).toContain("Unparked: garden");
+		expect(mail.text).toContain("Parks:\n  (none)");
+		const omitted = finishIndexMail(
+			{ trigger: "recovery", workflowId: "reindex-recovery-mail" },
+			[],
+			{},
+		);
+		expect(omitted.to).toBe("simon.taggart@gmail.com");
+		expect(omitted.from).toBe("design-guide@simontaggart.com");
+		expect(omitted.text).not.toContain("Unparked:");
 	});
 
 	it("sends through env.EMAIL.send and skips when the binding is missing", async () => {
@@ -370,6 +405,87 @@ describe("index mail", () => {
 			state: "fail",
 			runError: "sweep boom",
 			workflowId: "reindex-mail-fail",
+		});
+	});
+
+	it("mails recovery finish with unparked after index writes", async () => {
+		const email = mockEmail();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			EMAIL: email.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
+		const { names, step } = recordingStep();
+		const originalDo = step.do.bind(step);
+		step.do = async <T>(name: string, configOrCb: unknown, maybeCb?: unknown): Promise<T> => {
+			if (name.startsWith("start-")) {
+				names.push(name);
+				return { startUrl: "https://garden.zendesk.com/", jobId: "job-unpark" } as T;
+			}
+			if (name.startsWith("poll-")) {
+				names.push(name);
+				return { status: "completed", total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 } as T;
+			}
+			if (name.startsWith("apply-")) {
+				names.push(name);
+				const result = {
+					system: "garden" as const,
+					startUrl: "https://garden.zendesk.com/",
+					crawl: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
+					indexed: 2,
+					hitLimit: false,
+					keptPrevious: false,
+					parked: false,
+					usable: 2,
+				};
+				await persistSystemOutcome(env, result);
+				return result as T;
+			}
+			return originalDo(name, configOrCb, maybeCb);
+		};
+		const workflow = new ReindexWorkflow({} as ExecutionContext, env);
+		const results = await workflow.run(
+			{
+				payload: {
+					trigger: "recovery",
+					systems: ["garden"],
+					catalogHash: "unused",
+					workflowId: "reindex-recovery-mail-run",
+				},
+				timestamp: new Date("2026-09-27T06:00:00.000Z"),
+				instanceId: "reindex-recovery-mail-run",
+				workflowName: "design-guide-reindex",
+			},
+			step as never,
+		);
+		expect(results[0]).toMatchObject({ system: "garden", indexed: 2 });
+		expect(names).toEqual([
+			"ensure-sweep",
+			"mail-start",
+			"start-garden",
+			"poll-garden-0",
+			"apply-garden",
+			"finish",
+			"mail-finish",
+		]);
+		expect(await readParks(env)).toEqual({ kind: "ok", parks: {} });
+		expect(email.sent).toHaveLength(2);
+		expect(email.sent[0]?.to).toBe("simon.taggart@gmail.com");
+		expect(email.sent[0]?.from).toBe(INDEX_MAIL_FROM);
+		expect(email.sent[0]?.subject).toContain("index started (recovery)");
+		expect(email.sent[1]?.to).toBe("simon.taggart@gmail.com");
+		expect(email.sent[1]?.from).toBe(INDEX_MAIL_FROM);
+		expect(email.sent[1]?.subject).toContain("index finished ok (recovery)");
+		expect(email.sent[1]?.text).toContain("Unparked: garden");
+		expect(email.sent[1]?.text).toContain(`Status: ${INDEX_STATUS_URL}`);
+		expect(JSON.parse(kv.store.get("status") ?? "{}")).toMatchObject({
+			trigger: "recovery",
+			state: "ok",
+			unparked: ["garden"],
+			parks: {},
 		});
 	});
 });

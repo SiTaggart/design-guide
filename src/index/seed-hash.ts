@@ -11,6 +11,7 @@ export function systemSeedHash(seed: Seed): string {
 		.update(
 			JSON.stringify({
 				id: seed.id,
+				source: seed.source,
 				startUrl: seed.startUrl,
 				fallbackStartUrl: seed.fallbackStartUrl ?? null,
 				includePatterns: seed.includePatterns ?? null,
