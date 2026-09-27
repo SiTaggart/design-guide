@@ -6,10 +6,10 @@ import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import { writePark } from "../src/index/parks.ts";
 import { SEED_HASH, systemSeedHash } from "../src/index/seed-hash.ts";
 import { startStatusRun } from "../src/index/status.ts";
-import { DRIFT_CRON, RECRAWL_CRON, RECOVERY_CRON, decideReindex } from "../src/index/trigger.ts";
+import { DRIFT_CRON, RECRAWL_CRON, RECOVERY_CRON, decideReindex, startReindex } from "../src/index/trigger.ts";
 import { handleScheduled } from "../src/schedule.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { envWithIndex, memoryKV, mockWorkflow } from "./helpers/index-env.ts";
+import { envWithIndex, memoryKV, mockWorkflow, parksKvGetThrows } from "./helpers/index-env.ts";
 
 describe("wrangler automation config", () => {
 	const wrangler = readFileSync("wrangler.jsonc", "utf8");
@@ -163,6 +163,43 @@ describe("decideReindex", () => {
 		await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-running" });
 		expect(await decideReindex(env, DRIFT_CRON)).toEqual({ action: "skip", reason: "running" });
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
+		expect(workflow.created).toEqual([]);
+	});
+
+	it("does not create a workflow when startStatusRun leaves the running claim in place", async () => {
+		const kv = memoryKV();
+		const workflow = mockWorkflow({ existingId: "reindex-running", existingStatus: "running" });
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			REINDEX: workflow.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-running" });
+		expect(
+			await startReindex(env, {
+				action: "start",
+				trigger: "recovery",
+				systems: ["garden"],
+				catalogHash: SEED_HASH,
+			}),
+		).toEqual({ skipped: "running" });
+		expect(workflow.created).toEqual([]);
+	});
+
+	it("skips every cron start when parks KV is unread", async () => {
+		const kv = parksKvGetThrows(memoryKV());
+		const workflow = mockWorkflow();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			REINDEX: workflow.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		for (const cron of [DRIFT_CRON, RECRAWL_CRON, RECOVERY_CRON]) {
+			expect(await decideReindex(env, cron)).toEqual({ action: "skip", reason: "unread-parks" });
+			await handleScheduled({ cron } as ScheduledController, env);
+		}
 		expect(workflow.created).toEqual([]);
 	});
 

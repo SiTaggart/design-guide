@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
-import { liveSystemIds, loadLiveSystemIds, readParks, writePark } from "../src/index/parks.ts";
+import { envWithIndex, memoryKV, parksKvGetRaw, parksKvGetThrows } from "./helpers/index-env.ts";
+import { liveSystemIds, loadLiveSystemIds, PARKS_KEY, readParks, writePark } from "../src/index/parks.ts";
 import { persistSystemOutcome } from "../src/index/trigger.ts";
 import { startStatusRun } from "../src/index/status.ts";
 import { parseSearchFields } from "../src/serve/parse.ts";
@@ -223,6 +223,59 @@ describe("park state", () => {
 				},
 			],
 		});
+	});
+
+	it("treats a missing parks key as an empty map", async () => {
+		const kv = parksKvGetRaw(memoryKV(), null);
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		expect(await readParks(env)).toEqual({ kind: "ok", parks: {} });
+	});
+
+	it("treats parks KV get or parse failure as unread, not empty", async () => {
+		const thrown = parksKvGetThrows(memoryKV());
+		const junk = parksKvGetRaw(memoryKV(), "{not-json");
+		expect(await readParks(envWithIndex(fixtureChunks, true, { INDEX: thrown }).env)).toEqual({
+			kind: "unread",
+		});
+		expect(await readParks(envWithIndex(fixtureChunks, true, { INDEX: junk }).env)).toEqual({
+			kind: "unread",
+		});
+	});
+
+	it("does not write parks when the existing map is unread", async () => {
+		const kv = parksKvGetThrows(memoryKV());
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		await writePark(env, "garden", 1);
+		expect(kv.store.get(PARKS_KEY)).toBeUndefined();
+	});
+
+	it("returns 503 index_not_ready from search and MCP when parks are unread", async () => {
+		const kv = parksKvGetThrows(memoryKV());
+		const { env, calls } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		const searched = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: GOLDEN, system: "garden" }),
+			}),
+			env,
+		);
+		expect(searched.status).toBe(503);
+		expect(await searched.json()).toEqual({ error: "index_not_ready" });
+		const listed = await worker.fetch(
+			new Request("https://example.test/mcp", {
+				method: "POST",
+				headers: {
+					accept: "application/json, text/event-stream",
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+			}),
+			env,
+		);
+		expect(listed.status).toBe(503);
+		expect(await listed.json()).toEqual({ error: "index_not_ready" });
+		expect(calls).toEqual([]);
 	});
 
 	it("has no manual unpark HTTP route", async () => {

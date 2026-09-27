@@ -17,6 +17,14 @@ describe("seed hashes", () => {
 		expect(systemSeedHash(seedById("primer"))).not.toBe(systemSeedHash(seedById("govuk")));
 	});
 
+	it("changes the per-seed hash when source is renamed", () => {
+		const primer = seedById("primer");
+		const renamed = systemSeedHash({ ...primer, source: "Primer Renamed" });
+		expect(renamed).not.toBe(systemSeedHash(primer));
+		const indexed = Object.fromEntries(SEEDS.map((seed) => [seed.id, systemSeedHash(seed)]));
+		expect(driftedSystems({ ...indexed, primer: renamed })).toEqual(["primer"]);
+	});
+
 	it("lists systems whose stored hash is missing or different", () => {
 		const primer = systemSeedHash(seedById("primer"));
 		const indexed = Object.fromEntries(SEEDS.map((seed) => [seed.id, systemSeedHash(seed)]));
