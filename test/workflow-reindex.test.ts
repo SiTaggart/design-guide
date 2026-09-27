@@ -186,4 +186,98 @@ describe("swapFromOutcome", () => {
 			expect.stringMatching(new RegExp(`^primer/${generation}/`)),
 		]);
 	});
+
+	it("leaves the prior generation in place on fail, hitLimit, and a one-page stub", async () => {
+		uploadItem.mockReset();
+		deleteItem.mockReset();
+		listItems.mockReset();
+		const prior = { id: "old-1", key: "primer/oldgen/aaaa.md" };
+		const items = [prior];
+		listItems.mockImplementation(async () => [...items]);
+		deleteItem.mockImplementation(async (_auth: unknown, id: string) => {
+			const index = items.findIndex((item) => item.id === id);
+			if (index >= 0) {
+				items.splice(index, 1);
+			}
+		});
+		const seed = seedById("primer");
+		const auth = { accountId: "acct", apiToken: "token" };
+		const counts = { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 };
+		const pages = [
+			{ url: "https://primer.style/", status: "completed", markdown: "# one" },
+			{ url: "https://primer.style/select", status: "completed", markdown: "# two" },
+		];
+		const failed = await swapFromOutcome(auth, seed, {
+			startUrl: seed.startUrl,
+			status: "failed",
+			counts: { ...counts, total: 0, finished: 0 },
+			records: pages,
+		});
+		const limited = await swapFromOutcome(auth, seed, {
+			startUrl: seed.startUrl,
+			status: "cancelled_due_to_limits",
+			counts,
+			records: pages,
+		});
+		const stub = await swapFromOutcome(auth, seed, {
+			startUrl: seed.startUrl,
+			status: "completed",
+			counts: { total: 1, finished: 1, skipped: 0, disallowed: 0, errored: 0 },
+			records: [pages[0]!],
+		});
+		expect(failed).toMatchObject({ indexed: 0, keptPrevious: true, error: "crawl ended failed" });
+		expect(failed.parked).toBeUndefined();
+		expect(limited).toMatchObject({ indexed: 0, keptPrevious: true, hitLimit: true });
+		expect(stub).toMatchObject({ indexed: 0, keptPrevious: true, parked: true, usable: 1 });
+		expect(items).toEqual([prior]);
+		expect(uploadItem).not.toHaveBeenCalled();
+	});
+
+	it("keeps the uploaded generation when a later attempt fails after the prior generation is gone", async () => {
+		uploadItem.mockReset();
+		deleteItem.mockReset();
+		listItems.mockReset();
+		const items: Array<{ id: string; key: string }> = [{ id: "old-1", key: "primer/oldgen/aaaa.md" }];
+		listItems.mockImplementation(async () => [...items]);
+		uploadItem.mockImplementation(async (_auth: unknown, key: string) => {
+			const existing = items.find((item) => item.key === key);
+			if (existing) {
+				return existing;
+			}
+			const created = { id: `new-${items.length}`, key };
+			items.push(created);
+			return created;
+		});
+		deleteItem.mockImplementation(async (_auth: unknown, id: string) => {
+			const index = items.findIndex((item) => item.id === id);
+			if (index >= 0) {
+				items.splice(index, 1);
+			}
+		});
+		const seed = seedById("primer");
+		const generation = swapGeneration("primer", "reindex-wf-committed");
+		const outcome = {
+			startUrl: seed.startUrl,
+			status: "completed" as const,
+			counts: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
+			records: [
+				{ url: "https://primer.style/", status: "completed" as const, markdown: "# one" },
+				{ url: "https://primer.style/select", status: "completed" as const, markdown: "# two" },
+			],
+		};
+		const swapped = await swapFromOutcome({ accountId: "acct", apiToken: "token" }, seed, outcome, {
+			generation,
+		});
+		expect(swapped).toMatchObject({ indexed: 2, keptPrevious: false });
+		expect(items.map((item) => item.key).every((key) => key.startsWith(`primer/${generation}/`))).toBe(true);
+		uploadItem.mockRejectedValue(new Error("item upload failed primer/x.md: [{\"code\":7009}]"));
+		const retried = await swapFromOutcome({ accountId: "acct", apiToken: "token" }, seed, outcome, {
+			generation,
+		});
+		expect(retried.keptPrevious).toBe(false);
+		expect(retried.indexed).toBe(2);
+		expect(retried.error).toContain("7009");
+		expect(items).toHaveLength(2);
+		expect(items.every((item) => item.key.startsWith(`primer/${generation}/`))).toBe(true);
+	});
 });
