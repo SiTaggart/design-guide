@@ -43,8 +43,7 @@
 	},
 	"send_email": [
 		{
-			"name": "EMAIL",
-			"destination_address": "me@simontaggart.com"
+			"name": "EMAIL"
 		}
 	]
 }

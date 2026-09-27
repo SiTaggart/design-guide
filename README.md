@@ -199,7 +199,7 @@ Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cl
 
 The Workflow emails start and finish through the Worker `send_email` binding. Each mail step is its own `step.do` with retries and calls `env.EMAIL.send({ from, to, subject, text })`. There is no REST/SMTP path, no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift` or `recrawl`), workflow id, and systems kicked. Finish mail (success or fail) includes systems, counts, parks, errors, and the status URL. Index swap commits before finish mail.
 
-`wrangler.jsonc` binds `EMAIL` with `destination_address` locked to `me@simontaggart.com` (notify-only). **Ops once:** Simon must verify `me@simontaggart.com` as an Email Routing destination on this Cloudflare account (Email Routing → Destination addresses). Until that verify lands, `env.EMAIL.send()` can fail with “destination address is not a verified address”. Do not point the binding at another inbox and do not add a third-party mailer. `from` is the allowed Email Sending / Routing sender on `simontaggart.com` once that zone is onboarded (`design-guide@simontaggart.com`). `EMAIL` is a binding, not a secret. The Worker secrets stay **CLOUDFLARE_ACCOUNT_ID** and **CLOUDFLARE_API_TOKEN**.
+`wrangler.jsonc` binds `EMAIL` the same way as team-retros: `{ "name": "EMAIL" }` (no `destination_address`). The Workflow sends `to: me@simontaggart.com` and `from: design-guide@simontaggart.com` (same routed zone as this Worker). Email Routing already verifies that inbox. `EMAIL` is a binding, not a secret. There is no Resend, Mailchannels, SES, or agent mailer. The Worker secrets stay **CLOUDFLARE_ACCOUNT_ID** and **CLOUDFLARE_API_TOKEN**.
 
 ## Reindex
 
