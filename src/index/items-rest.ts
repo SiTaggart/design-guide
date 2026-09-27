@@ -26,6 +26,22 @@ const RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 16_000];
 const RETRYABLE_ITEM_CODES = new Set([1015, 7009, 7114]);
 const ALREADY_EXISTS_CODE = 7042;
 
+export class ItemApiError extends Error {
+	readonly code: number | null;
+	readonly overload: boolean;
+
+	constructor(message: string, code: number | null) {
+		super(message);
+		this.name = "ItemApiError";
+		this.code = code;
+		this.overload = code !== null && RETRYABLE_ITEM_CODES.has(code);
+	}
+}
+
+export function isItemOverload(error: unknown): boolean {
+	return error instanceof ItemApiError && error.overload;
+}
+
 export type ItemRequestOptions = {
 	sleep?: (ms: number) => Promise<void>;
 	onOverload?: () => void;
@@ -190,7 +206,10 @@ export async function uploadItem(
 		if (itemErrorCode(data, ALREADY_EXISTS_CODE) === ALREADY_EXISTS_CODE) {
 			return { id: key, key };
 		}
-		throw new Error(`item upload failed ${key}: ${JSON.stringify(data.errors ?? data)}`);
+		throw new ItemApiError(
+			`item upload failed ${key}: ${JSON.stringify(data.errors ?? data)}`,
+			itemErrorCode(data),
+		);
 	}
 	const result = data.result as ItemRecord;
 	if (!result?.id || !result.key) {
@@ -215,7 +234,7 @@ export async function listItems(auth: ItemsAuth, options?: ItemRequestOptions): 
 			options,
 		);
 		if (!response.ok) {
-			throw new Error(`item list failed: ${JSON.stringify(data.errors ?? data)}`);
+			throw new ItemApiError(`item list failed: ${JSON.stringify(data.errors ?? data)}`, itemErrorCode(data));
 		}
 		const result = (data.result as ItemRecord[]) ?? [];
 		items.push(...result);
@@ -242,6 +261,9 @@ export async function deleteItem(
 		options,
 	);
 	if (!response.ok && response.status !== 404) {
-		throw new Error(`item delete failed ${itemId}: ${JSON.stringify(data.errors ?? data)}`);
+		throw new ItemApiError(
+			`item delete failed ${itemId}: ${JSON.stringify(data.errors ?? data)}`,
+			itemErrorCode(data),
+		);
 	}
 }

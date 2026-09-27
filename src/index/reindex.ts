@@ -13,6 +13,7 @@ import {
 	deleteItem,
 	ensureInstance,
 	listItems,
+	isItemOverload,
 	uploadItem,
 	type ItemRequestOptions,
 	type ItemsAuth,
@@ -297,6 +298,12 @@ export type CrawlPage = {
 	cursor: string | number | null;
 };
 
+type SwapStep = <T extends Rpc.Serializable<T>>(name: string, run: () => Promise<T>) => Promise<T>;
+
+function failedStep(error: unknown, overloaded: boolean): { error: string; overloaded: boolean } {
+	return { error: errorMessage(error), overloaded: overloaded || isItemOverload(error) };
+}
+
 export async function streamSwap(
 	auth: ReindexAuth,
 	seed: Seed,
@@ -306,11 +313,11 @@ export async function streamSwap(
 		generation: string;
 		fetchPage: (cursor?: string | number) => Promise<CrawlPage>;
 		countStatuses: () => Promise<CrawlCounts>;
-		step?: <T>(name: string, run: () => Promise<T>) => Promise<T>;
+		step?: SwapStep;
 		onOverload?: () => void;
 	},
 ): Promise<SystemReindexResult> {
-	const step = input.step ?? (async <T>(_name: string, run: () => Promise<T>) => run());
+	const step: SwapStep = input.step ?? (async (_name, run) => run());
 	const rough: CrawlCounts = {
 		total: input.snapshot.total,
 		finished: input.snapshot.finished,
@@ -355,7 +362,7 @@ export async function streamSwap(
 					overloaded,
 				};
 			} catch (error) {
-				return { ok: false as const, error: errorMessage(error), overloaded: true };
+				return { ok: false as const, ...failedStep(error, overloaded) };
 			}
 		});
 		if (batch.overloaded) {
@@ -364,15 +371,31 @@ export async function streamSwap(
 		if (!batch.ok) {
 			const released = await step(`abandon-${seed.id}`, async () => {
 				let overloaded = false;
-				const release = await releaseFailedGeneration(auth, seed.id, input.generation, {
-					onOverload: () => {
-						overloaded = true;
-					},
-				});
-				return { ...release, overloaded };
+				try {
+					const release = await releaseFailedGeneration(auth, seed.id, input.generation, {
+						onOverload: () => {
+							overloaded = true;
+						},
+					});
+					return { ok: true as const, ...release, overloaded };
+				} catch (error) {
+					return { ok: false as const, ...failedStep(error, overloaded), keptPrevious: true, indexed: 0 };
+				}
 			});
 			if (released.overloaded) {
 				input.onOverload?.();
+			}
+			if (!released.ok) {
+				return {
+					system: seed.id,
+					startUrl: input.startUrl,
+					crawl: rough,
+					indexed: 0,
+					hitLimit: false,
+					keptPrevious: true,
+					usable,
+					error: released.error,
+				};
 			}
 			const counts = await step(`counts-failed-${seed.id}`, async () => {
 				try {
@@ -430,8 +453,7 @@ export async function streamSwap(
 				kind: "commit-failed" as const,
 				counts,
 				indexed: usable,
-				error: errorMessage(error),
-				overloaded: true,
+				...failedStep(error, overloaded),
 			};
 		}
 	});

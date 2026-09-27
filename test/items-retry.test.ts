@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { deleteItem, uploadItem } from "../src/index/items-rest.ts";
+import { ItemApiError, deleteItem, uploadItem } from "../src/index/items-rest.ts";
 
 const auth = { accountId: "acct", apiToken: "token", instanceId: "design-guide" };
 
@@ -86,15 +86,15 @@ describe("AI Search upload and delete retries", () => {
 				return jsonResponse(500, { errors: [{ code: 7009, message: "Upstream service unavailable" }] });
 			}),
 		);
-		await expect(
-			uploadItem(
-				auth,
-				"primer/gen/a.md",
-				"# one",
-				{ system: "primer", source: "Primer", source_url: "https://primer.style/" },
-				{ sleep: async () => {} },
-			),
-		).rejects.toThrow(/7009/);
+		const failure = uploadItem(
+			auth,
+			"primer/gen/a.md",
+			"# one",
+			{ system: "primer", source: "Primer", source_url: "https://primer.style/" },
+			{ sleep: async () => {} },
+		);
+		await expect(failure).rejects.toBeInstanceOf(ItemApiError);
+		await expect(failure).rejects.toMatchObject({ code: 7009, overload: true });
 		expect(calls).toBe(5);
 	});
 });

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CLI_POLL_INTERVAL_MS } from "../src/crawl/browser-run.ts";
 import { seedById } from "../src/config/seed.ts";
 import { shouldWriteSeedHash } from "../src/index/trigger.ts";
+import { ItemApiError } from "../src/index/items-rest.ts";
 import { streamSwap, swapFromOutcome, swapGeneration } from "../src/index/reindex.ts";
 import {
 	WORKFLOW_POLL_MAX,
@@ -15,12 +16,10 @@ const uploadItem = vi.hoisted(() => vi.fn());
 const deleteItem = vi.hoisted(() => vi.fn());
 const listItems = vi.hoisted(() => vi.fn());
 
-vi.mock("../src/index/items-rest.ts", () => ({
-	uploadItem,
-	deleteItem,
-	listItems,
-	ensureInstance: vi.fn(),
-}));
+vi.mock("../src/index/items-rest.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/index/items-rest.ts")>();
+	return { ...actual, uploadItem, deleteItem, listItems };
+});
 
 describe("workflow crawl poll", () => {
 	it("sleeps two minutes between Browser Run polls and keeps the CLI at 15s", async () => {
@@ -451,6 +450,50 @@ describe("streamSwap", () => {
 		expect(result).toMatchObject({ indexed: 0, keptPrevious: true, usable: 1 });
 		expect(result.error).toContain("7009");
 		expect(items).toEqual([{ id: "old-1", key: "primer/oldgen/aaaa.md" }]);
+	});
+
+	it("paces only after an AI Search item overload", async () => {
+		uploadItem.mockReset();
+		deleteItem.mockReset();
+		listItems.mockReset();
+		itemStore([{ id: "old-1", key: "primer/oldgen/aaaa.md" }]);
+		const seed = seedById("primer");
+		const base = {
+			startUrl: seed.startUrl,
+			snapshot: { status: "completed" as const, total: 1, finished: 1 },
+			countStatuses: async () => counts,
+		};
+		let networkOverloads = 0;
+		const network = await streamSwap({ accountId: "acct", apiToken: "token" }, seed, {
+			...base,
+			generation: swapGeneration("primer", "reindex-stream-network"),
+			fetchPage: async () => {
+				throw new Error("crawl page failed");
+			},
+			onOverload: () => {
+				networkOverloads += 1;
+			},
+		});
+		expect(network).toMatchObject({ indexed: 0, keptPrevious: true });
+		expect(network.error).toContain("crawl page failed");
+		expect(networkOverloads).toBe(0);
+
+		uploadItem.mockRejectedValue(new ItemApiError("item upload failed primer/x.md: [{\"code\":7009}]", 7009));
+		let itemOverloads = 0;
+		const overloaded = await streamSwap({ accountId: "acct", apiToken: "token" }, seed, {
+			...base,
+			generation: swapGeneration("primer", "reindex-stream-overload"),
+			fetchPage: async () => ({
+				records: [{ url: "https://primer.style/", status: "completed" as const, markdown: "# one" }],
+				cursor: null,
+			}),
+			onOverload: () => {
+				itemOverloads += 1;
+			},
+		});
+		expect(overloaded.error).toContain("7009");
+		expect(overloaded.keptPrevious).toBe(true);
+		expect(itemOverloads).toBe(1);
 	});
 
 	it("does not fetch pages when the crawl failed or hit the page cap", async () => {

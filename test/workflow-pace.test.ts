@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { WorkflowStep, WorkflowStepContext } from "cloudflare:workers";
 import { ReindexWorkflow } from "../src/workflows/reindex.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
@@ -24,20 +25,36 @@ vi.mock("../src/index/items-rest.ts", () => ({
 	uploadItem: vi.fn(async () => ({ id: "1", key: "k" })),
 }));
 
-function stepRecorder() {
-	const sleeps: Array<string | number> = [];
+function stepContext(name: string): WorkflowStepContext {
 	return {
-		sleeps,
-		step: {
-			do: async (_name: string, ...args: unknown[]) => {
-				const callback = args[args.length - 1] as () => Promise<unknown>;
-				return callback();
-			},
-			sleep: async (_name: string, duration: string | number) => {
-				sleeps.push(duration);
-			},
+		step: { name, count: 1 },
+		attempt: 1,
+		config: {},
+	};
+}
+
+function stepRecorder(): { sleeps: Array<string | number>; step: WorkflowStep } {
+	const sleeps: Array<string | number> = [];
+	const step: WorkflowStep = {
+		do(name, configOrCallback, maybeCallback) {
+			const run = typeof configOrCallback === "function" ? configOrCallback : maybeCallback;
+			if (typeof run !== "function") {
+				return Promise.reject(new Error(`missing callback for ${name}`));
+			}
+			return run(stepContext(name));
+		},
+		sleep(_name, duration) {
+			sleeps.push(duration);
+			return Promise.resolve();
+		},
+		sleepUntil() {
+			return Promise.resolve();
+		},
+		waitForEvent() {
+			return Promise.reject(new Error("waitForEvent is unused"));
 		},
 	};
+	return { sleeps, step };
 }
 
 describe("reindex workflow overload gap", () => {
@@ -78,7 +95,7 @@ describe("reindex workflow overload gap", () => {
 				instanceId: "reindex-drift-pace",
 				workflowName: "reindex",
 			},
-			step as never,
+			step,
 		);
 		expect(sleeps).toEqual(["30 seconds"]);
 		expect(streamSwap).toHaveBeenCalledTimes(2);

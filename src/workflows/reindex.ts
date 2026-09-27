@@ -23,9 +23,12 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function mentionsOverload(error: unknown): boolean {
-	const message = errorMessage(error);
-	return message.includes("7009") || message.includes("7114") || message.includes("1015");
+function runStep<T extends Rpc.Serializable<T>>(
+	step: WorkflowStep,
+	name: string,
+	run: () => Promise<T>,
+): Promise<T> {
+	return step.do(name, () => run());
 }
 
 export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams> {
@@ -63,9 +66,6 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 				try {
 					results.push(await this.indexSystem(step, env, auth, system, params.workflowId, overload));
 				} catch (error) {
-					if (mentionsOverload(error)) {
-						overload.seen = true;
-					}
 					const failed = reindexFailure(seedById(system), errorMessage(error));
 					await persistSystemOutcome(env, failed);
 					results.push(failed);
@@ -134,8 +134,7 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 				generation,
 				fetchPage: (cursor) => fetchCrawlPage(auth, started.jobId, "completed", cursor),
 				countStatuses: () => crawlStatusCounts(auth, started.jobId, snapshot),
-				step: async (name, run) =>
-					(await step.do(name, run as () => Promise<never>)) as Awaited<ReturnType<typeof run>>,
+				step: (name, run) => runStep(step, name, run),
 				onOverload: () => {
 					overload.seen = true;
 				},
@@ -146,9 +145,6 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 			});
 			return result;
 		} catch (error) {
-			if (mentionsOverload(error)) {
-				overload.seen = true;
-			}
 			const failed = reindexFailure(seed, errorMessage(error));
 			await step.do(`record-failed-${system}`, async () => {
 				await persistSystemOutcome(env, failed);
