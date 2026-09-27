@@ -77,14 +77,12 @@ export const SEEDS: readonly Seed[] = [
 		startUrl: "https://vanillaframework.io/docs/",
 		excludePatterns: HARD_OUTS,
 	},
-	// HTML /docs is an empty shell. Prefer llms.txt, then *.md (282). Fallback is the HTML overview when the start returns 4xx or 5xx.
+	// llms.txt crawl finished 1 page and 0 usable records. Browser Run did not follow the 282 markdown links. HTML overview + sitemap (383) is the working start.
 	{
 		id: "siemens-ix",
 		source: "Siemens iX",
-		startUrl: "https://ix.siemens.io/llms.txt",
-		fallbackStartUrl: "https://ix.siemens.io/docs/home/overview",
-		includePatterns: ["https://ix.siemens.io/llms.txt", "https://ix.siemens.io/**/*.md"],
-		indexUrlSuffixes: [".md"],
+		startUrl: "https://ix.siemens.io/docs/home/overview",
+		includePatterns: ["https://ix.siemens.io/docs/**"],
 		excludePatterns: HARD_OUTS,
 	},
 	// Include /latest/*. Public sitemap has 393 URLs.

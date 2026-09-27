@@ -53,8 +53,7 @@ describe("crawlRequestBody", () => {
 			"https://www.skyscanner.design/latest/**",
 		]);
 		expect(crawlRequestBody(seedById("siemens-ix"), seedById("siemens-ix").startUrl).options.includePatterns).toEqual([
-			"https://ix.siemens.io/llms.txt",
-			"https://ix.siemens.io/**/*.md",
+			"https://ix.siemens.io/docs/**",
 		]);
 		expect(crawlRequestBody(seedById("ouds-web"), seedById("ouds-web").startUrl).options.includePatterns).toEqual([
 			"https://web.unified-design-system.orange.com/orange/",

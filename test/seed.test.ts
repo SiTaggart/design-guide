@@ -14,7 +14,7 @@ const DOCS_ROOTS: Record<SystemId, string> = {
 	patternfly: "https://www.patternfly.org/",
 	cloudscape: "https://cloudscape.design/",
 	vanilla: "https://vanillaframework.io/docs/",
-	"siemens-ix": "https://ix.siemens.io/llms.txt",
+	"siemens-ix": "https://ix.siemens.io/docs/home/overview",
 	backpack: "https://www.skyscanner.design/latest/welcome-to-backpack-Mtf5OEo4",
 	garden: "https://garden.zendesk.com/components",
 	"ouds-web": "https://web.unified-design-system.orange.com/orange/",
@@ -60,12 +60,10 @@ describe("seed registry", () => {
 		}
 	});
 
-	it("only falls back for gitlab-pajamas and siemens-ix", () => {
+	it("only falls back for gitlab-pajamas", () => {
 		for (const seed of SEEDS) {
 			if (seed.id === "gitlab-pajamas") {
 				expect(seed.fallbackStartUrl).toBe("https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com");
-			} else if (seed.id === "siemens-ix") {
-				expect(seed.fallbackStartUrl).toBe("https://ix.siemens.io/docs/home/overview");
 			} else {
 				expect(seed.fallbackStartUrl).toBeUndefined();
 			}
@@ -74,11 +72,10 @@ describe("seed registry", () => {
 
 	it("locks Archie scope for siemens-ix, backpack, ouds-web, and garden", () => {
 		const siemens = SEEDS.find((seed) => seed.id === "siemens-ix");
-		expect(siemens?.indexUrlSuffixes).toEqual([".md"]);
-		expect(siemens?.includePatterns).toEqual([
-			"https://ix.siemens.io/llms.txt",
-			"https://ix.siemens.io/**/*.md",
-		]);
+		expect(siemens?.startUrl).toBe("https://ix.siemens.io/docs/home/overview");
+		expect(siemens?.fallbackStartUrl).toBeUndefined();
+		expect(siemens?.indexUrlSuffixes).toBeUndefined();
+		expect(siemens?.includePatterns).toEqual(["https://ix.siemens.io/docs/**"]);
 
 		expect(SEEDS.find((seed) => seed.id === "backpack")?.includePatterns).toEqual([
 			"https://www.skyscanner.design/latest/**",

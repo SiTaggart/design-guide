@@ -184,12 +184,12 @@ Config lives in `src/config/seed.ts`. A seed is one crawl from a single `startUr
 | patternfly | https://www.patternfly.org/ |
 | cloudscape | https://cloudscape.design/ |
 | vanilla | https://vanillaframework.io/docs/ |
-| siemens-ix | https://ix.siemens.io/llms.txt |
+| siemens-ix | https://ix.siemens.io/docs/home/overview |
 | backpack | https://www.skyscanner.design/latest/welcome-to-backpack-Mtf5OEo4 |
 | garden | https://garden.zendesk.com/components |
 | ouds-web | https://web.unified-design-system.orange.com/orange/ |
 
-Spectrum and Carbon are parked as crawl misses. Their items are deleted. They are not in the seed. Every seed excludes spectrum.adobe.com and carbondesignsystem.com. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` scopes uswds to its host and backpack to `/latest/**`. It scopes siemens-ix to `llms.txt` and `*.md`, and ouds-web to `/orange/` including `docs/1.5`. ouds-web also excludes `docs/0.4`. No seed filters by page topic. gitlab-pajamas and siemens-ix set `fallbackStartUrl`. The CLI uses that URL only when the primary crawl start returns a 4xx or 5xx.
+Spectrum and Carbon are parked as crawl misses. Their items are deleted. They are not in the seed. Every seed excludes spectrum.adobe.com and carbondesignsystem.com. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` scopes uswds to its host, backpack to `/latest/**`, siemens-ix to `/docs/**`, and ouds-web to `/orange/` including `docs/1.5`. ouds-web also excludes `docs/0.4`. No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`. The CLI uses that URL only when the primary crawl start returns a 4xx or 5xx. A `llms.txt` start for siemens-ix finished 1 page and produced 0 usable records, because Browser Run did not follow the markdown links.
 
 Change the seed, then reindex. There is no admin UI.
 
