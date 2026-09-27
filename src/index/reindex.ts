@@ -43,6 +43,17 @@ function generationId(now = new Date()): string {
 	return now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z").toLowerCase();
 }
 
+export function swapGeneration(system: SystemId, durableId?: string, now = new Date()): string {
+	if (!durableId) {
+		return generationId(now);
+	}
+	return createHash("sha256").update(`${durableId}\0${system}`).digest("hex").slice(0, 16);
+}
+
+function isSystemGenerationKey(key: string, system: SystemId, generation: string): boolean {
+	return key.startsWith(`${system}/${generation}/`);
+}
+
 export function fitsItem(record: CrawlRecord, seed: Seed): boolean {
 	const markdown = record.markdown ?? "";
 	if (!markdown.trim() || new TextEncoder().encode(markdown).byteLength > MAX_ITEM_BYTES) {
@@ -97,6 +108,7 @@ export async function swapFromOutcome(
 	auth: ReindexAuth,
 	seed: Seed,
 	outcome: CrawlOutcome,
+	options?: { generation?: string },
 ): Promise<SystemReindexResult> {
 	const itemsAuth: ItemsAuth = {
 		accountId: auth.accountId,
@@ -122,8 +134,7 @@ export async function swapFromOutcome(
 	if (isStubGeneration(usable.length)) {
 		return { ...kept, parked: true, error: `stub: only ${usable.length} usable page(s)` };
 	}
-	const generation = generationId();
-	const uploadedKeys = new Set<string>();
+	const generation = options?.generation ?? swapGeneration(seed.id);
 	try {
 		for (const record of usable) {
 			const key = itemKey(seed.id, generation, record.url);
@@ -132,17 +143,16 @@ export async function swapFromOutcome(
 				source: seed.source,
 				source_url: record.url,
 			});
-			uploadedKeys.add(key);
 		}
 	} catch (error) {
-		await deleteItems(itemsAuth, (key) => key.startsWith(`${seed.id}/${generation}/`));
+		await deleteItems(itemsAuth, (key) => isSystemGenerationKey(key, seed.id, generation));
 		return { ...kept, error: errorMessage(error) };
 	}
 	const deleted = await deleteItems(
 		itemsAuth,
-		(key) => key.startsWith(`${seed.id}/`) && !uploadedKeys.has(key),
+		(key) => key.startsWith(`${seed.id}/`) && !isSystemGenerationKey(key, seed.id, generation),
 	);
-	return { ...kept, indexed: uploadedKeys.size, deleted, keptPrevious: false };
+	return { ...kept, indexed: usable.length, deleted, keptPrevious: false };
 }
 
 export async function reindexSystem(

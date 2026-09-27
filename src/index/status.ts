@@ -12,7 +12,7 @@ export type IndexRunState = "running" | "ok" | "fail";
 export type IndexErrorChannel = "crawl" | "render" | "index";
 
 export type IndexErrorEntry = {
-	system: SystemId;
+	system?: SystemId;
 	message: string;
 };
 
@@ -36,6 +36,7 @@ export type IndexStatusDocument = {
 	systems: SystemReindexResult[];
 	errors: Record<IndexErrorChannel, IndexErrorEntry[]>;
 	counts: IndexStatusCounts;
+	runError?: string;
 };
 
 export type ReindexParams = {
@@ -68,22 +69,27 @@ export async function isWorkflowLive(
 	}
 }
 
-export function classifyError(result: SystemReindexResult): IndexErrorChannel | null {
-	if (result.parked || !result.error) {
-		return null;
-	}
-	const error = result.error.toLowerCase();
-	if (error.includes("item ") || error.includes("upload") || error.includes("instance ")) {
+export function classifyMessage(error: string): IndexErrorChannel {
+	const lowered = error.toLowerCase();
+	if (lowered.includes("item ") || lowered.includes("upload") || lowered.includes("instance ")) {
 		return "index";
 	}
-	if (error.includes("render")) {
+	if (lowered.includes("render")) {
 		return "render";
 	}
 	return "crawl";
 }
 
+export function classifyError(result: SystemReindexResult): IndexErrorChannel | null {
+	if (result.parked || !result.error) {
+		return null;
+	}
+	return classifyMessage(result.error);
+}
+
 export function errorsFromResults(
 	results: readonly SystemReindexResult[],
+	runError?: string,
 ): Record<IndexErrorChannel, IndexErrorEntry[]> {
 	const errors: Record<IndexErrorChannel, IndexErrorEntry[]> = {
 		crawl: [],
@@ -96,11 +102,18 @@ export function errorsFromResults(
 			errors[channel].push({ system: result.system, message: result.error ?? "error" });
 		}
 	}
+	if (runError) {
+		errors[classifyMessage(runError)].push({ message: runError });
+	}
 	return errors;
 }
 
-export function countsFrom(results: readonly SystemReindexResult[], parks: Parks): IndexStatusCounts {
-	const errorCount = Object.values(errorsFromResults(results)).reduce(
+export function countsFrom(
+	results: readonly SystemReindexResult[],
+	parks: Parks,
+	runError?: string,
+): IndexStatusCounts {
+	const errorCount = Object.values(errorsFromResults(results, runError)).reduce(
 		(sum, entries) => sum + entries.length,
 		0,
 	);
@@ -112,7 +125,10 @@ export function countsFrom(results: readonly SystemReindexResult[], parks: Parks
 	};
 }
 
-export function runStateFrom(results: readonly SystemReindexResult[]): IndexRunState {
+export function runStateFrom(results: readonly SystemReindexResult[], runError?: string): IndexRunState {
+	if (runError) {
+		return "fail";
+	}
 	return results.some((result) => classifyError(result) !== null) ? "fail" : "ok";
 }
 
@@ -149,6 +165,7 @@ export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 		}
 		const parsed = JSON.parse(raw) as IndexStatusDocument;
 		const systems = parsed.systems ?? [];
+		const runError = parsed.runError;
 		return {
 			...emptyStatus(false, lastIndexedHash),
 			...parsed,
@@ -156,8 +173,9 @@ export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 			lastIndexedHash,
 			parks,
 			systems,
-			errors: errorsFromResults(systems),
-			counts: countsFrom(systems, parks),
+			runError,
+			errors: errorsFromResults(systems, runError),
+			counts: countsFrom(systems, parks, runError),
 		};
 	} catch {
 		return { ...emptyStatus(false, lastIndexedHash), parks, counts: countsFrom([], parks) };
@@ -200,6 +218,7 @@ export async function startStatusRun(
 		systems: [],
 		errors: { crawl: [], render: [], index: [] },
 		counts: countsFrom([], parks),
+		runError: undefined,
 	};
 	await writeStatus(env, document);
 	return document;
@@ -229,6 +248,7 @@ export async function finishStatusRun(
 	results: readonly SystemReindexResult[],
 	finishedAt = new Date().toISOString(),
 	workflowId?: string,
+	runError?: string,
 ): Promise<IndexStatusDocument> {
 	const current = await readStatus(env);
 	if (
@@ -243,13 +263,15 @@ export async function finishStatusRun(
 	const document: IndexStatusDocument = {
 		...current,
 		unbound: false,
-		state: runStateFrom(results),
+		workflowId: workflowId ?? current.workflowId,
+		state: runStateFrom(results, runError),
 		finishedAt,
 		lastIndexedHash: await readLastIndexedHash(env),
 		parks,
 		systems: [...results],
-		errors: errorsFromResults(results),
-		counts: countsFrom(results, parks),
+		runError,
+		errors: errorsFromResults(results, runError),
+		counts: countsFrom(results, parks, runError),
 	};
 	await writeStatus(env, document);
 	return document;

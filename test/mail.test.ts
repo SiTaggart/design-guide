@@ -366,5 +366,10 @@ describe("index mail", () => {
 		expect(email.sent[0]?.subject).toContain("index finished fail (deploy-drift)");
 		expect(email.sent[0]?.text).toContain("run: sweep boom");
 		expect(email.sent[0]?.text).toContain(`Status: ${INDEX_STATUS_URL}`);
+		expect(JSON.parse(kv.store.get("status") ?? "{}")).toMatchObject({
+			state: "fail",
+			runError: "sweep boom",
+			workflowId: "reindex-mail-fail",
+		});
 	});
 });

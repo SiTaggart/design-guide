@@ -117,6 +117,26 @@ describe("GET /v1/index-status", () => {
 		expect(finished.systems).toEqual([]);
 	});
 
+	it("records a run-level setup fail as fail, not ok", async () => {
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		const finished = await finishStatusRun(env, [], "2026-09-27T01:00:00.000Z", "reindex-setup-fail", "sweep boom");
+		expect(finished.state).toBe("fail");
+		expect(finished.runError).toBe("sweep boom");
+		expect(finished.workflowId).toBe("reindex-setup-fail");
+		expect(finished.errors.crawl).toEqual([{ message: "sweep boom" }]);
+		expect(finished.counts.errors).toBe(1);
+		const response = await worker.fetch(new Request("https://example.test/v1/index-status"), env);
+		const body = (await response.json()) as {
+			state: string;
+			runError?: string;
+			errors: { crawl: Array<{ message: string }> };
+		};
+		expect(body.state).toBe("fail");
+		expect(body.runError).toBe("sweep boom");
+		expect(body.errors.crawl).toEqual([{ message: "sweep boom" }]);
+	});
+
 	it("replaces last-run when the stored workflow id is no longer live", async () => {
 		const kv = memoryKV();
 		const workflow = mockWorkflow({ existingId: "reindex-drift-dead", existingStatus: "errored" });

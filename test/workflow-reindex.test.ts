@@ -2,8 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { CLI_POLL_INTERVAL_MS } from "../src/crawl/browser-run.ts";
 import { seedById } from "../src/config/seed.ts";
 import { shouldWriteSeedHash } from "../src/index/trigger.ts";
-import { swapFromOutcome } from "../src/index/reindex.ts";
-import { WORKFLOW_POLL_SLEEP, waitForCrawlJob, type WorkflowSleepStep } from "../src/index/workflow-poll.ts";
+import { swapFromOutcome, swapGeneration } from "../src/index/reindex.ts";
+import {
+	WORKFLOW_POLL_MAX,
+	WORKFLOW_POLL_SLEEP,
+	waitForCrawlJob,
+	type WorkflowSleepStep,
+} from "../src/index/workflow-poll.ts";
+import { CRAWL_POLL_DEADLINE_MS } from "../src/crawl/browser-run.ts";
 
 const uploadItem = vi.hoisted(() => vi.fn());
 const deleteItem = vi.hoisted(() => vi.fn());
@@ -44,6 +50,27 @@ describe("workflow crawl poll", () => {
 		expect(snapshot).toEqual({ status: "completed", total: 2, finished: 2 });
 		expect(sleeps).toEqual(["2 minutes"]);
 		expect(polls).toBe(2);
+		pollJob.mockRestore();
+	});
+
+	it("fails a crawl that is still running at the poll deadline", async () => {
+		expect(WORKFLOW_POLL_MAX).toBe(Math.ceil(CRAWL_POLL_DEADLINE_MS / (2 * 60 * 1000)));
+		const sleeps: Array<string | number> = [];
+		const step: WorkflowSleepStep = {
+			do: async (_name, callback) => callback(),
+			sleep: async (_name, duration) => {
+				sleeps.push(duration);
+			},
+		};
+		const pollJob = vi.spyOn(await import("../src/crawl/browser-run.ts"), "pollJob");
+		pollJob.mockResolvedValue({ status: "running", total: 1, finished: 0 });
+		await expect(
+			waitForCrawlJob(step, { accountId: "acct", apiToken: "token" }, "job-late", "primer", {
+				maxPolls: 2,
+			}),
+		).rejects.toThrow("crawl job-late still running at the poll deadline");
+		expect(sleeps).toEqual(["2 minutes"]);
+		expect(pollJob).toHaveBeenCalledTimes(2);
 		pollJob.mockRestore();
 	});
 });
@@ -102,5 +129,61 @@ describe("swapFromOutcome", () => {
 		expect(uploadItem).toHaveBeenCalledTimes(2);
 		expect(JSON.stringify(result)).not.toMatch(/records|markdown/);
 		expect(shouldWriteSeedHash(result)).toBe(true);
+	});
+
+	it("resumes the same generation after a mid-delete failure", async () => {
+		const items: Array<{ id: string; key: string }> = [{ id: "old-1", key: "primer/oldgen/aaaa.md" }];
+		listItems.mockImplementation(async () => [...items]);
+		uploadItem.mockImplementation(async (_auth: unknown, key: string) => {
+			const existing = items.find((item) => item.key === key);
+			if (existing) {
+				return existing;
+			}
+			const created = { id: `new-${items.length}`, key };
+			items.push(created);
+			return created;
+		});
+		let deletes = 0;
+		deleteItem.mockImplementation(async (_auth: unknown, id: string) => {
+			deletes += 1;
+			if (deletes === 1) {
+				throw new Error("item delete failed old-1: boom");
+			}
+			const index = items.findIndex((item) => item.id === id);
+			if (index >= 0) {
+				items.splice(index, 1);
+			}
+		});
+		const seed = seedById("primer");
+		const generation = swapGeneration("primer", "reindex-wf-retry");
+		const outcome = {
+			startUrl: seed.startUrl,
+			status: "completed" as const,
+			counts: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
+			records: [
+				{ url: "https://primer.style/", status: "completed" as const, markdown: "# one" },
+				{ url: "https://primer.style/select", status: "completed" as const, markdown: "# two" },
+			],
+		};
+		await expect(
+			swapFromOutcome({ accountId: "acct", apiToken: "token" }, seed, outcome, { generation }),
+		).rejects.toThrow("item delete failed old-1: boom");
+		expect(items.some((item) => item.key === "primer/oldgen/aaaa.md")).toBe(true);
+		expect(items.filter((item) => item.key.startsWith(`primer/${generation}/`))).toHaveLength(2);
+		const retried = await swapFromOutcome(
+			{ accountId: "acct", apiToken: "token" },
+			seed,
+			outcome,
+			{ generation },
+		);
+		expect(retried).toMatchObject({ indexed: 2, keptPrevious: false });
+		expect(items).toHaveLength(2);
+		expect(items.every((item) => item.key.startsWith(`primer/${generation}/`))).toBe(true);
+		expect(uploadItem.mock.calls.map((call) => call[1])).toEqual([
+			expect.stringMatching(new RegExp(`^primer/${generation}/`)),
+			expect.stringMatching(new RegExp(`^primer/${generation}/`)),
+			expect.stringMatching(new RegExp(`^primer/${generation}/`)),
+			expect.stringMatching(new RegExp(`^primer/${generation}/`)),
+		]);
 	});
 });

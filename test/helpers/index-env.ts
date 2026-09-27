@@ -68,7 +68,8 @@ export function envWithIndex(
 						if (input.query.includes("no-such-passage")) {
 							return { chunks: [] };
 						}
-						return { chunks };
+						const limit = input.ai_search_options.retrieval.max_num_results;
+						return { chunks: chunks.slice(0, limit) };
 					},
 					items: {
 						list: async () => ({ result: ready ? [{ status: "completed" }] : [] }),

@@ -8,6 +8,7 @@ import {
 	deleteDroppedSystemItems,
 	reindexFailure,
 	swapFromOutcome,
+	swapGeneration,
 	type ReindexAuth,
 	type SystemReindexResult,
 } from "../index/reindex.ts";
@@ -52,7 +53,7 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 
 			for (const system of params.systems) {
 				try {
-					results.push(await this.indexSystem(step, env, auth, system));
+					results.push(await this.indexSystem(step, env, auth, system, params.workflowId));
 				} catch (error) {
 					const failed = reindexFailure(seedById(system), errorMessage(error));
 					await persistSystemOutcome(env, failed);
@@ -65,8 +66,10 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 
 		await step.do("finish", async () => {
 			if (params.systems.length > 0) {
-				await commitIndexedHashes(env);
-				await finishStatusRun(env, results, undefined, params.workflowId);
+				if (!runError) {
+					await commitIndexedHashes(env);
+				}
+				await finishStatusRun(env, results, undefined, params.workflowId, runError);
 			}
 			return { systems: results.length, failed: Boolean(runError) };
 		});
@@ -88,6 +91,7 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 		env: WorkerEnv,
 		auth: ReindexAuth,
 		system: ReindexParams["systems"][number],
+		workflowId: string,
 	): Promise<SystemReindexResult> {
 		const seed = seedById(system);
 		const started = await step.do(`start-${system}`, async () => {
@@ -111,7 +115,9 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 		return step.do(`apply-${system}`, async () => {
 			const job = await pollJob(auth, started.jobId);
 			const outcome = await collectOutcome(auth, started.jobId, started.startUrl, job);
-			const result = await swapFromOutcome(auth, seed, outcome);
+			const result = await swapFromOutcome(auth, seed, outcome, {
+				generation: swapGeneration(system, workflowId),
+			});
 			await persistSystemOutcome(env, result);
 			return result;
 		});

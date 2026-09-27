@@ -1,3 +1,4 @@
+import { MAX_K } from "../config/instance.ts";
 import type { SearchResponse } from "../config/types.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
@@ -26,11 +27,19 @@ export async function resolveSearch(
 		return parsed;
 	}
 	try {
-		const body = await searchCitations(env, parsed.params);
-		if (parked?.size) {
-			return { kind: "ok", body: { results: body.results.filter((hit) => !parked.has(hit.system)) } };
+		const requested = parsed.params.k;
+		const retrieve =
+			parked?.size && !parsed.params.system ? Math.min(MAX_K, requested + parked.size) : requested;
+		const body = await searchCitations(env, { ...parsed.params, k: retrieve });
+		if (!parked?.size) {
+			return { kind: "ok", body };
 		}
-		return { kind: "ok", body };
+		return {
+			kind: "ok",
+			body: {
+				results: body.results.filter((hit) => !parked.has(hit.system)).slice(0, requested),
+			},
+		};
 	} catch {
 		return { kind: "index_not_ready" };
 	}

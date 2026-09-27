@@ -81,6 +81,23 @@ describe("park state", () => {
 		expect(body.results.map((hit) => hit.system)).toEqual(["primer", "uswds"]);
 	});
 
+	it("does not let parked hits consume k before the live filter", async () => {
+		const kv = memoryKV();
+		const { env, calls } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		await writePark(env, "paste", 0);
+		const response = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: GOLDEN, k: 1 }),
+			}),
+			env,
+		);
+		const body = (await response.json()) as { results: Array<{ system: string }> };
+		expect(calls[0]?.ai_search_options.retrieval.max_num_results).toBe(2);
+		expect(body.results.map((hit) => hit.system)).toEqual(["primer"]);
+	});
+
 	it("excludes a parked system from the MCP skill enum", async () => {
 		const kv = memoryKV();
 		const { env, calls } = envWithIndex(fixtureChunks, true, { INDEX: kv });

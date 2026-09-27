@@ -53,7 +53,7 @@ export type CrawlJobSnapshot = {
 export type StartResult = { jobId: string } | { httpStatus: number; detail: string };
 
 export const CLI_POLL_INTERVAL_MS = 15_000;
-const CLOUDFLARE_JOB_MAX_RUN_MS = 7 * 24 * 60 * 60 * 1000;
+export const CRAWL_POLL_DEADLINE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CONSECUTIVE_POLL_FAILURES = 5;
 
 function crawlUrl(accountId: string, jobId?: string): string {
@@ -144,7 +144,7 @@ export async function pollJob(auth: CrawlAuth, jobId: string): Promise<CrawlJobR
 }
 
 async function waitForJob(auth: CrawlAuth, jobId: string): Promise<CrawlJobResult> {
-	const deadline = Date.now() + CLOUDFLARE_JOB_MAX_RUN_MS;
+	const deadline = Date.now() + CRAWL_POLL_DEADLINE_MS;
 	let failures = 0;
 	while (Date.now() < deadline) {
 		try {
