@@ -15,7 +15,7 @@ import {
 import { readParks, writePark } from "../src/index/parks.ts";
 import { ReindexWorkflow } from "../src/workflows/reindex.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
+import { envWithIndex, memoryKV, mockWorkflow } from "./helpers/index-env.ts";
 
 vi.mock("../src/index/items-rest.ts", () => ({
 	uploadItem: vi.fn(),
@@ -165,9 +165,11 @@ describe("index mail", () => {
 	it("mails start and finish on an empty-systems run without writing hashes or last-run", async () => {
 		const email = mockEmail();
 		const kv = memoryKV({ [LAST_INDEXED_HASH_KEY]: "keep-me" });
+		const reindex = mockWorkflow({ existingId: "reindex-drift-live", existingStatus: "running" });
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: kv,
 			EMAIL: email.binding,
+			REINDEX: reindex.binding,
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});

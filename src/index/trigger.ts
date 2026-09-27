@@ -6,6 +6,7 @@ import { clearPark, liveSystemIds, readParks, writePark } from "./parks.ts";
 import type { SystemReindexResult } from "./reindex.ts";
 import { SEED_HASH, driftedSystems, systemSeedHash } from "./seed-hash.ts";
 import {
+	isWorkflowLive,
 	notifyFailOrPark,
 	readStatus,
 	recordSystemResult,
@@ -17,8 +18,6 @@ import {
 
 export const DRIFT_CRON = "*/5 * * * *";
 export const RECRAWL_CRON = "0 4 * * *";
-
-const LIVE_WORKFLOW = new Set(["queued", "running", "paused", "waiting", "waitingForPause"]);
 
 export type TriggerSkipReason = "unbound" | "no-auth" | "running" | "no-drift" | "no-systems";
 
@@ -42,16 +41,10 @@ export async function isReindexRunning(env: WorkerEnv): Promise<boolean> {
 		return false;
 	}
 	const status = await readStatus(env);
-	if (status.state !== "running" || !status.workflowId) {
+	if (status.state !== "running") {
 		return false;
 	}
-	try {
-		const instance = await env.REINDEX.get(status.workflowId);
-		const live = await instance.status();
-		return LIVE_WORKFLOW.has(live.status);
-	} catch {
-		return false;
-	}
+	return isWorkflowLive(env, status.workflowId);
 }
 
 export async function decideReindex(env: WorkerEnv, cron: string): Promise<TriggerDecision> {

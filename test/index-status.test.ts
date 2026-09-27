@@ -4,7 +4,7 @@ import { writePark } from "../src/index/parks.ts";
 import { finishStatusRun, startStatusRun, writeStatus } from "../src/index/status.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
+import { envWithIndex, memoryKV, mockWorkflow } from "./helpers/index-env.ts";
 
 describe("GET /v1/index-status", () => {
 	it("returns unbound 200 when INDEX is missing", async () => {
@@ -87,7 +87,8 @@ describe("GET /v1/index-status", () => {
 
 	it("does not let a second workflow clobber a running last-run", async () => {
 		const kv = memoryKV();
-		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		const workflow = mockWorkflow({ existingId: "reindex-drift-live", existingStatus: "running" });
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, REINDEX: workflow.binding });
 		await startStatusRun(env, { trigger: "drift", workflowId: "reindex-drift-live" });
 		const started = await startStatusRun(env, { trigger: "recrawl", workflowId: "reindex-mail-proof" });
 		expect(started.workflowId).toBe("reindex-drift-live");
@@ -114,5 +115,15 @@ describe("GET /v1/index-status", () => {
 		expect(finished.workflowId).toBe("reindex-drift-live");
 		expect(finished.state).toBe("running");
 		expect(finished.systems).toEqual([]);
+	});
+
+	it("replaces last-run when the stored workflow id is no longer live", async () => {
+		const kv = memoryKV();
+		const workflow = mockWorkflow({ existingId: "reindex-drift-dead", existingStatus: "errored" });
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, REINDEX: workflow.binding });
+		await startStatusRun(env, { trigger: "drift", workflowId: "reindex-drift-dead" });
+		const started = await startStatusRun(env, { trigger: "drift", workflowId: "reindex-drift-next" });
+		expect(started.workflowId).toBe("reindex-drift-next");
+		expect(started.state).toBe("running");
 	});
 });

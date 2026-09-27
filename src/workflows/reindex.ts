@@ -37,9 +37,15 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 			return { dropped };
 		});
 
-		await step.do("mail-start", MAIL_STEP_RETRIES, async () => {
-			return sendStartIndexMail(env, params);
-		});
+		try {
+			await step.do("mail-start", MAIL_STEP_RETRIES, async () => {
+				return sendStartIndexMail(env, params);
+			});
+		} catch (error) {
+			console.log(
+				JSON.stringify({ event: "index_mail_failed", phase: "start", error: errorMessage(error) }),
+			);
+		}
 
 		const results: SystemReindexResult[] = [];
 		for (const system of params.systems) {
@@ -54,9 +60,15 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 			return { systems: results.length };
 		});
 
-		await step.do("mail-finish", MAIL_STEP_RETRIES, async () => {
-			return sendFinishIndexMail(env, params, results);
-		});
+		try {
+			await step.do("mail-finish", MAIL_STEP_RETRIES, async () => {
+				return sendFinishIndexMail(env, params, results);
+			});
+		} catch (error) {
+			console.log(
+				JSON.stringify({ event: "index_mail_failed", phase: "finish", error: errorMessage(error) }),
+			);
+		}
 		return results;
 	}
 

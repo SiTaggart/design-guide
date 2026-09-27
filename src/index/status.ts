@@ -51,6 +51,23 @@ const EMPTY_ERRORS: Record<IndexErrorChannel, IndexErrorEntry[]> = {
 	index: [],
 };
 
+const LIVE_WORKFLOW = new Set(["queued", "running", "paused", "waiting", "waitingForPause"]);
+
+export async function isWorkflowLive(
+	env: WorkerEnv,
+	workflowId: string | null | undefined,
+): Promise<boolean> {
+	if (!env.REINDEX || !workflowId) {
+		return false;
+	}
+	try {
+		const live = await (await env.REINDEX.get(workflowId)).status();
+		return LIVE_WORKFLOW.has(live.status);
+	} catch {
+		return false;
+	}
+}
+
 export function classifyError(result: SystemReindexResult): IndexErrorChannel | null {
 	if (result.parked || !result.error) {
 		return null;
@@ -160,7 +177,12 @@ export async function startStatusRun(
 	startedAt = new Date().toISOString(),
 ): Promise<IndexStatusDocument> {
 	const current = await readStatus(env);
-	if (current.state === "running" && current.workflowId && current.workflowId !== params.workflowId) {
+	if (
+		current.state === "running" &&
+		current.workflowId &&
+		current.workflowId !== params.workflowId &&
+		(await isWorkflowLive(env, current.workflowId))
+	) {
 		return current;
 	}
 	const lastIndexedHash = await readLastIndexedHash(env);
@@ -209,7 +231,12 @@ export async function finishStatusRun(
 	workflowId?: string,
 ): Promise<IndexStatusDocument> {
 	const current = await readStatus(env);
-	if (workflowId && current.workflowId && current.workflowId !== workflowId) {
+	if (
+		workflowId &&
+		current.workflowId &&
+		current.workflowId !== workflowId &&
+		(await isWorkflowLive(env, current.workflowId))
+	) {
 		return current;
 	}
 	const parks = await readParks(env);

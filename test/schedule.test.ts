@@ -107,4 +107,17 @@ describe("decideReindex", () => {
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
 		expect(workflow.created).toEqual([]);
 	});
+
+	it("starts after the stored running workflow has errored", async () => {
+		const kv = memoryKV();
+		const workflow = mockWorkflow({ existingId: "reindex-dead", existingStatus: "errored" });
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			REINDEX: workflow.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await startStatusRun(env, { trigger: "drift", workflowId: "reindex-dead" });
+		expect(await decideReindex(env, DRIFT_CRON)).toMatchObject({ action: "start", trigger: "drift" });
+	});
 });
