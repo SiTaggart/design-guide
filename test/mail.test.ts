@@ -146,11 +146,19 @@ describe("index mail", () => {
 			["garden"],
 		);
 		expect(mail.to).toBe("simon.taggart@gmail.com");
-		expect(mail.from).toBe(INDEX_MAIL_FROM);
+		expect(mail.from).toBe("design-guide@simontaggart.com");
 		expect(mail.subject).toBe("design-guide index finished ok (recovery) reindex-recovery-mail");
 		expect(mail.text).toContain("Trigger: recovery");
 		expect(mail.text).toContain("Unparked: garden");
 		expect(mail.text).toContain("Parks:\n  (none)");
+		const omitted = finishIndexMail(
+			{ trigger: "recovery", workflowId: "reindex-recovery-mail" },
+			[],
+			{},
+		);
+		expect(omitted.to).toBe("simon.taggart@gmail.com");
+		expect(omitted.from).toBe("design-guide@simontaggart.com");
+		expect(omitted.text).not.toContain("Unparked:");
 	});
 
 	it("sends through env.EMAIL.send and skips when the binding is missing", async () => {
@@ -430,6 +438,7 @@ describe("index mail", () => {
 					indexed: 2,
 					hitLimit: false,
 					keptPrevious: false,
+					parked: false,
 					usable: 2,
 				};
 				await persistSystemOutcome(env, result);
@@ -476,6 +485,7 @@ describe("index mail", () => {
 			trigger: "recovery",
 			state: "ok",
 			unparked: ["garden"],
+			parks: {},
 		});
 	});
 });

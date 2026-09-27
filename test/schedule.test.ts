@@ -97,8 +97,11 @@ describe("decideReindex", () => {
 		});
 		await handleScheduled({ cron: RECOVERY_CRON } as ScheduledController, env);
 		expect(workflow.created).toHaveLength(1);
-		expect(workflow.created[0]?.params?.trigger).toBe("recovery");
-		expect(workflow.created[0]?.params?.systems).toEqual(["garden"]);
+		expect(workflow.created[0]?.params).toMatchObject({
+			trigger: "recovery",
+			systems: ["garden"],
+			catalogHash: SEED_HASH,
+		});
 	});
 
 	it("skips recovery when nothing is parked", async () => {

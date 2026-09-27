@@ -193,7 +193,7 @@ Config lives in `src/config/seed.ts`. A seed is one crawl from a single `startUr
 
 Spectrum and Carbon are parked as crawl misses. Their items are deleted. They are not in the seed. Every seed excludes spectrum.adobe.com and carbondesignsystem.com. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` scopes uswds to its host, backpack to `/latest/**`, siemens-ix to `/docs/**`, and ouds-web to `/orange/` including `docs/1.5`. ouds-web also excludes `docs/0.4`. No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`. The CLI uses that URL only when the primary crawl start returns a 4xx or 5xx. A `llms.txt` start for siemens-ix finished 1 page and produced 0 usable records, because Browser Run did not follow the markdown links.
 
-Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron compares that hash to `lastIndexedHash` in KV and starts the reindex Workflow for new or changed systems. A daily cron recrawls non-parked systems. A Sunday 06:00 UTC cron recrawls parked systems on the same Workflow. There is no admin UI. There is no GitHub Actions crawl job.
+Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron compares that hash to `lastIndexedHash` in KV and starts the reindex Workflow for new or changed systems. A daily cron recrawls non-parked systems. A Sunday 06:00 UTC recovery recrawls parked seeds via the same Workflow. There is no admin UI. There is no GitHub Actions crawl job.
 
 `GET /v1/index-status` is the last-run record: per-system counts, parks, unparked ids, crawl/render/index errors, and the workflow id. Slack is not the health path.
 

@@ -137,9 +137,32 @@ describe("park state", () => {
 	});
 
 	it("returns a parked system to search and MCP after persist clears the park", async () => {
+		const gardenChunk = {
+			text: "Garden combobox keeps keyboard focus in the input while the listbox is open.",
+			score: 0.84,
+			item: {
+				key: "garden/gen/dddd.md",
+				metadata: {
+					system: "garden",
+					source: "Garden",
+					source_url: "https://garden.zendesk.com/",
+				},
+			},
+		};
 		const kv = memoryKV();
-		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		const { env, calls } = envWithIndex([gardenChunk], true, { INDEX: kv });
 		await writePark(env, "garden", 1);
+		const parked = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: GOLDEN, system: "garden" }),
+			}),
+			env,
+		);
+		expect(parked.status).toBe(200);
+		expect(await parked.json()).toEqual({ results: [] });
+		expect(calls).toEqual([]);
 		await startStatusRun(env, { trigger: "recovery", workflowId: "reindex-recovery-live" });
 		await persistSystemOutcome(env, {
 			system: "garden",
@@ -148,22 +171,66 @@ describe("park state", () => {
 			indexed: 2,
 			hitLimit: false,
 			keptPrevious: false,
+			parked: false,
 			usable: 2,
 		});
-		expect(parseSearchFields({ query: "focus", system: "garden" }, await loadLiveSystemIds(env))).toMatchObject({
+		expect(parseSearchFields({ query: "focus", system: "garden" }, await loadLiveSystemIds(env))).toEqual({
 			kind: "ok",
-			params: { system: "garden" },
+			params: { query: "focus", k: 8, system: "garden" },
+		});
+		const searched = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: GOLDEN, system: "garden" }),
+			}),
+			env,
+		);
+		expect(searched.status).toBe(200);
+		expect(await searched.json()).toEqual({
+			results: [
+				{
+					passage: "Garden combobox keeps keyboard focus in the input while the listbox is open.",
+					source: "Garden",
+					url: "https://garden.zendesk.com/",
+					system: "garden",
+					score: 0.84,
+				},
+			],
 		});
 		const listed = (await mcpRpc(env, { jsonrpc: "2.0", id: 1, method: "tools/list" })) as {
 			result: { tools: Array<{ inputSchema: { properties?: { system?: { enum?: string[] } } } }> };
 		};
 		expect(listed.result.tools[0]?.inputSchema.properties?.system?.enum).toEqual([...SYSTEM_IDS]);
+		const called = (await mcpRpc(env, {
+			jsonrpc: "2.0",
+			id: 2,
+			method: "tools/call",
+			params: {
+				name: "search_design_guidance",
+				arguments: { query: GOLDEN, system: "garden" },
+			},
+		})) as { result: { isError?: boolean; content?: Array<{ text: string }> } };
+		expect(called.result.isError).toBeUndefined();
+		expect(JSON.parse(called.result.content?.[0]?.text ?? "")).toEqual({
+			results: [
+				{
+					passage: "Garden combobox keeps keyboard focus in the input while the listbox is open.",
+					source: "Garden",
+					url: "https://garden.zendesk.com/",
+					system: "garden",
+					score: 0.84,
+				},
+			],
+		});
 	});
 
 	it("has no manual unpark HTTP route", async () => {
 		const { env } = envWithIndex(fixtureChunks);
-		const response = await worker.fetch(new Request("https://example.test/v1/unpark", { method: "POST" }), env);
-		expect(response.status).toBe(404);
-		expect(await response.json()).toEqual({ error: "not_found" });
+		for (const method of ["GET", "POST"] as const) {
+			const response = await worker.fetch(new Request("https://example.test/v1/unpark", { method }), env);
+			expect(response.status).toBe(404);
+			expect(await response.json()).toEqual({ error: "not_found" });
+		}
 	});
 });

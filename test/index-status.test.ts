@@ -162,6 +162,7 @@ describe("GET /v1/index-status", () => {
 			indexed: 2,
 			hitLimit: false,
 			keptPrevious: false,
+			parked: false,
 			usable: 2,
 		});
 		const finished = await finishStatusRun(
@@ -174,6 +175,7 @@ describe("GET /v1/index-status", () => {
 					indexed: 2,
 					hitLimit: false,
 					keptPrevious: false,
+					parked: false,
 					usable: 2,
 				},
 			],
@@ -181,6 +183,7 @@ describe("GET /v1/index-status", () => {
 			"reindex-recovery-unpark",
 		);
 		expect(await readParks(env)).toEqual({});
+		expect((await readStatus(env)).unparked).toEqual(["garden"]);
 		expect(finished.trigger).toBe("recovery");
 		expect(finished.unparked).toEqual(["garden"]);
 		expect(finished.parks).toEqual({});
@@ -214,7 +217,7 @@ describe("GET /v1/index-status", () => {
 		};
 		await persistSystemOutcome(env, stub);
 		const finished = await finishStatusRun(env, [stub], "2026-09-27T06:10:00.000Z", "reindex-recovery-stub");
-		expect((await readParks(env)).garden?.reason).toBe("stub");
+		expect((await readParks(env)).garden).toMatchObject({ reason: "stub", usable: 1 });
 		expect((await readStatus(env)).unparked).toEqual([]);
 		expect(finished.state).toBe("ok");
 		expect(runStateFrom([stub])).toBe("ok");
@@ -236,7 +239,9 @@ describe("GET /v1/index-status", () => {
 			error: "crawl ended failed",
 		};
 		await persistSystemOutcome(env, failed);
-		expect((await readParks(env)).garden?.reason).toBe("stub");
+		expect(await readParks(env)).toEqual({
+			garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" },
+		});
 		expect((await readStatus(env)).unparked).toEqual([]);
 	});
 });
