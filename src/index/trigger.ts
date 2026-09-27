@@ -62,7 +62,7 @@ export async function decideReindex(env: WorkerEnv, cron: string): Promise<Trigg
 		if (systems.length === 0) {
 			return { action: "skip", reason: "no-drift" };
 		}
-		return { action: "start", trigger: "drift", systems, catalogHash: SEED_HASH };
+		return { action: "start", trigger: "deploy-drift", systems, catalogHash: SEED_HASH };
 	}
 	if (cron === RECRAWL_CRON) {
 		const systems = recrawlSystems(await readParks(env));

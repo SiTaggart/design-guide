@@ -29,27 +29,38 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 			return [];
 		}
 
-		await step.do("ensure-sweep", async () => {
-			const itemsAuth = { ...auth, instanceId: INSTANCE_ID };
-			await ensureInstance(itemsAuth);
-			const dropped = await deleteDroppedSystemItems(itemsAuth);
-			await startStatusRun(env, { trigger: params.trigger, workflowId: params.workflowId });
-			return { dropped };
-		});
-
-		try {
-			await step.do("mail-start", MAIL_STEP_RETRIES, async () => {
-				return sendStartIndexMail(env, params);
-			});
-		} catch (error) {
-			console.log(
-				JSON.stringify({ event: "index_mail_failed", phase: "start", error: errorMessage(error) }),
-			);
-		}
-
 		const results: SystemReindexResult[] = [];
-		for (const system of params.systems) {
-			results.push(await this.indexSystem(step, env, auth, system));
+		let runError: string | undefined;
+		try {
+			await step.do("ensure-sweep", async () => {
+				const itemsAuth = { ...auth, instanceId: INSTANCE_ID };
+				await ensureInstance(itemsAuth);
+				const dropped = await deleteDroppedSystemItems(itemsAuth);
+				await startStatusRun(env, { trigger: params.trigger, workflowId: params.workflowId });
+				return { dropped };
+			});
+
+			try {
+				await step.do("mail-start", MAIL_STEP_RETRIES, async () => {
+					return sendStartIndexMail(env, params);
+				});
+			} catch (error) {
+				console.log(
+					JSON.stringify({ event: "index_mail_failed", phase: "start", error: errorMessage(error) }),
+				);
+			}
+
+			for (const system of params.systems) {
+				try {
+					results.push(await this.indexSystem(step, env, auth, system));
+				} catch (error) {
+					const failed = reindexFailure(seedById(system), errorMessage(error));
+					await persistSystemOutcome(env, failed);
+					results.push(failed);
+				}
+			}
+		} catch (error) {
+			runError = errorMessage(error);
 		}
 
 		await step.do("finish", async () => {
@@ -57,12 +68,12 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 				await commitIndexedHashes(env);
 				await finishStatusRun(env, results, undefined, params.workflowId);
 			}
-			return { systems: results.length };
+			return { systems: results.length, failed: Boolean(runError) };
 		});
 
 		try {
 			await step.do("mail-finish", MAIL_STEP_RETRIES, async () => {
-				return sendFinishIndexMail(env, params, results);
+				return sendFinishIndexMail(env, params, results, runError);
 			});
 		} catch (error) {
 			console.log(

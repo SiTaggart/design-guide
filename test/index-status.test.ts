@@ -27,11 +27,11 @@ describe("GET /v1/index-status", () => {
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
 		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
-		await startStatusRun(env, { trigger: "drift", workflowId: "reindex-drift-test" });
+		await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-drift-test" });
 		await writeStatus(env, {
 			unbound: false,
 			workflowId: "reindex-drift-test",
-			trigger: "drift",
+			trigger: "deploy-drift",
 			state: "fail",
 			startedAt: "2026-09-27T00:00:00.000Z",
 			finishedAt: "2026-09-27T00:10:00.000Z",
@@ -89,10 +89,10 @@ describe("GET /v1/index-status", () => {
 		const kv = memoryKV();
 		const workflow = mockWorkflow({ existingId: "reindex-drift-live", existingStatus: "running" });
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, REINDEX: workflow.binding });
-		await startStatusRun(env, { trigger: "drift", workflowId: "reindex-drift-live" });
+		await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-drift-live" });
 		const started = await startStatusRun(env, { trigger: "recrawl", workflowId: "reindex-mail-proof" });
 		expect(started.workflowId).toBe("reindex-drift-live");
-		expect(started.trigger).toBe("drift");
+		expect(started.trigger).toBe("deploy-drift");
 		expect(started.state).toBe("running");
 
 		const finished = await finishStatusRun(
@@ -121,8 +121,8 @@ describe("GET /v1/index-status", () => {
 		const kv = memoryKV();
 		const workflow = mockWorkflow({ existingId: "reindex-drift-dead", existingStatus: "errored" });
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, REINDEX: workflow.binding });
-		await startStatusRun(env, { trigger: "drift", workflowId: "reindex-drift-dead" });
-		const started = await startStatusRun(env, { trigger: "drift", workflowId: "reindex-drift-next" });
+		await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-drift-dead" });
+		const started = await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-drift-next" });
 		expect(started.workflowId).toBe("reindex-drift-next");
 		expect(started.state).toBe("running");
 	});

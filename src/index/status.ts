@@ -7,7 +7,7 @@ import type { SystemReindexResult } from "./reindex.ts";
 export const STATUS_KEY = "status";
 export const LAST_INDEXED_HASH_KEY = "lastIndexedHash";
 
-export type IndexTrigger = "drift" | "recrawl";
+export type IndexTrigger = "deploy-drift" | "recrawl";
 export type IndexRunState = "running" | "ok" | "fail";
 export type IndexErrorChannel = "crawl" | "render" | "index";
 

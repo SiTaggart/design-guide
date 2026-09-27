@@ -69,11 +69,11 @@ describe("decideReindex", () => {
 		await writeIndexedHash(env, "garden", "stale");
 		await writePark(env, "garden", 1);
 		const decision = await decideReindex(env, DRIFT_CRON);
-		expect(decision).toMatchObject({ action: "start", trigger: "drift", systems: ["garden"] });
+		expect(decision).toMatchObject({ action: "start", trigger: "deploy-drift", systems: ["garden"] });
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
 		expect(workflow.created).toHaveLength(1);
 		expect(workflow.created[0]?.params?.systems).toEqual(["garden"]);
-		expect(workflow.created[0]?.params?.trigger).toBe("drift");
+		expect(workflow.created[0]?.params?.trigger).toBe("deploy-drift");
 	});
 
 	it("recrawls every non-parked seed", async () => {
@@ -102,7 +102,7 @@ describe("decideReindex", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		await startStatusRun(env, { trigger: "drift", workflowId: "reindex-running" });
+		await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-running" });
 		expect(await decideReindex(env, DRIFT_CRON)).toEqual({ action: "skip", reason: "running" });
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
 		expect(workflow.created).toEqual([]);
@@ -117,7 +117,7 @@ describe("decideReindex", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		await startStatusRun(env, { trigger: "drift", workflowId: "reindex-dead" });
-		expect(await decideReindex(env, DRIFT_CRON)).toMatchObject({ action: "start", trigger: "drift" });
+		await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-dead" });
+		expect(await decideReindex(env, DRIFT_CRON)).toMatchObject({ action: "start", trigger: "deploy-drift" });
 	});
 });

@@ -65,8 +65,8 @@ function recordingStep(): {
 }
 
 const params = {
-	trigger: "drift" as const,
-	workflowId: "reindex-drift-mail",
+	trigger: "deploy-drift" as const,
+	workflowId: "reindex-deploy-drift-mail",
 	systems: ["primer", "garden"] as SystemId[],
 };
 
@@ -75,9 +75,9 @@ describe("index mail", () => {
 		const mail = startIndexMail(params);
 		expect(mail.to).toBe(INDEX_MAIL_TO);
 		expect(mail.from).toEqual(INDEX_MAIL_FROM);
-		expect(mail.subject).toBe("design-guide index started (drift) reindex-drift-mail");
-		expect(mail.text).toContain("Trigger: drift");
-		expect(mail.text).toContain("Workflow: reindex-drift-mail");
+		expect(mail.subject).toBe("design-guide index started (deploy-drift) reindex-deploy-drift-mail");
+		expect(mail.text).toContain("Trigger: deploy-drift");
+		expect(mail.text).toContain("Workflow: reindex-deploy-drift-mail");
 		expect(mail.text).toContain("Systems: primer, garden");
 		expect(mail.text).toContain(`Status: ${INDEX_STATUS_URL}`);
 	});
@@ -113,7 +113,7 @@ describe("index mail", () => {
 			],
 			await readParks(env),
 		);
-		expect(mail.subject).toBe("design-guide index finished fail (drift) reindex-drift-mail");
+		expect(mail.subject).toBe("design-guide index finished fail (deploy-drift) reindex-deploy-drift-mail");
 		expect(mail.text).toContain("Systems touched: garden, primer");
 		expect(mail.text).toContain("Counts: systems=2 indexed=0 parked=1 errors=1");
 		expect(mail.text).toContain("garden: stub usable=1");
@@ -131,7 +131,7 @@ describe("index mail", () => {
 		expect(email.sent[0]).toMatchObject({
 			to: INDEX_MAIL_TO,
 			from: INDEX_MAIL_FROM.email,
-			subject: "design-guide index started (drift) reindex-drift-mail",
+			subject: "design-guide index started (deploy-drift) reindex-deploy-drift-mail",
 		});
 		const { env: unbound } = envWithIndex(fixtureChunks);
 		await expect(sendIndexMail(unbound, startIndexMail(params))).resolves.toEqual({ skipped: "unbound" });
@@ -173,13 +173,13 @@ describe("index mail", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		await startStatusRun(env, { trigger: "drift", workflowId: "reindex-drift-live" });
+		await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-drift-live" });
 		const { names, configs, step } = recordingStep();
 		const workflow = new ReindexWorkflow({} as ExecutionContext, env);
 		const results = await workflow.run(
 			{
 				payload: {
-					trigger: "drift",
+					trigger: "deploy-drift",
 					systems: [],
 					catalogHash: "unused",
 					workflowId: "reindex-mail-proof",
@@ -203,5 +203,45 @@ describe("index mail", () => {
 			workflowId: "reindex-drift-live",
 			state: "running",
 		});
+	});
+
+	it("sends finish mail after a run-level fail", async () => {
+		const email = mockEmail();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			EMAIL: email.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const { names, step } = recordingStep();
+		const originalDo = step.do.bind(step);
+		step.do = async (name, configOrCb, maybeCb) => {
+			if (name === "ensure-sweep") {
+				names.push(name);
+				throw new Error("sweep boom");
+			}
+			return originalDo(name, configOrCb, maybeCb);
+		};
+		const workflow = new ReindexWorkflow({} as ExecutionContext, env);
+		await workflow.run(
+			{
+				payload: {
+					trigger: "deploy-drift",
+					systems: ["primer"],
+					catalogHash: "unused",
+					workflowId: "reindex-mail-fail",
+				},
+				timestamp: new Date("2026-09-27T05:00:00.000Z"),
+				instanceId: "reindex-mail-fail",
+				workflowName: "design-guide-reindex",
+			},
+			step as never,
+		);
+		expect(names).toEqual(["ensure-sweep", "finish", "mail-finish"]);
+		expect(email.sent).toHaveLength(1);
+		expect(email.sent[0]?.subject).toContain("index finished fail (deploy-drift)");
+		expect(email.sent[0]?.text).toContain("run: sweep boom");
+		expect(email.sent[0]?.text).toContain(`Status: ${INDEX_STATUS_URL}`);
 	});
 });

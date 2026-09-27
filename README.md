@@ -195,7 +195,11 @@ Spectrum and Carbon are parked as crawl misses. Their items are deleted. They ar
 
 Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron compares that hash to `lastIndexedHash` in KV and starts the reindex Workflow for new or changed systems. A daily cron recrawls non-parked systems. There is no admin UI. There is no GitHub Actions crawl job.
 
-`GET /v1/index-status` is the last-run record: per-system counts, parks, crawl/render/index errors, and the workflow id. The Workflow also emails the verified Email Routing destination for the `me@simontaggart.com` inbox (`simon.taggart@gmail.com`) when a run starts and when it finishes. Finish mail includes systems, counts, parks, errors, and the status URL. Slack is not the health path.
+`GET /v1/index-status` is the last-run record: per-system counts, parks, crawl/render/index errors, and the workflow id. Slack is not the health path.
+
+The Workflow emails start and finish through the Worker `send_email` binding (`env.EMAIL.send()`). There is no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift` or `recrawl`), workflow id, and systems kicked. Finish mail (success or fail) includes systems, counts, parks, errors, and the status URL. Index swap commits before finish mail.
+
+`wrangler.jsonc` binds `EMAIL` with `destination_address` locked to the verified Email Routing destination for Simon’s inbox. That destination must be verified once on the Cloudflare account (Email Routing → Destination addresses). The from-address is whatever Email Sending allows on `simontaggart.com` once that zone is onboarded; this Worker uses `design-guide@simontaggart.com`. `EMAIL` is a binding, not a secret. The Worker secrets stay **CLOUDFLARE_ACCOUNT_ID** and **CLOUDFLARE_API_TOKEN**.
 
 ## Reindex
 

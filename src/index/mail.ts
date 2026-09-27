@@ -45,8 +45,9 @@ export function finishIndexMail(
 	params: Pick<ReindexParams, "trigger" | "workflowId">,
 	results: readonly SystemReindexResult[],
 	parks: Parks,
+	runError?: string,
 ): IndexMail {
-	const state = runStateFrom(results);
+	const state = runError ? "fail" : runStateFrom(results);
 	const counts = countsFrom(results, parks);
 	const errors = errorsFromResults(results);
 	const touched = results.map((result) => result.system);
@@ -57,9 +58,12 @@ export function finishIndexMail(
 					([system, record]) =>
 						`  ${system}: ${record?.reason} usable=${record?.usable} at=${record?.at}`,
 				);
-	const errorLines = (["crawl", "render", "index"] as const).flatMap((channel) =>
-		errors[channel].map((entry) => `  ${channel} ${entry.system}: ${entry.message}`),
-	);
+	const errorLines = [
+		...(runError ? [`  run: ${runError}`] : []),
+		...(["crawl", "render", "index"] as const).flatMap((channel) =>
+			errors[channel].map((entry) => `  ${channel} ${entry.system}: ${entry.message}`),
+		),
+	];
 	const systemLines =
 		results.length === 0
 			? ["  (none)"]
@@ -128,7 +132,8 @@ export async function sendFinishIndexMail(
 	env: WorkerEnv,
 	params: Pick<ReindexParams, "trigger" | "workflowId">,
 	results: readonly SystemReindexResult[],
+	runError?: string,
 ): Promise<{ messageId: string } | { skipped: "unbound" }> {
-	return sendIndexMail(env, finishIndexMail(params, results, await readParks(env)));
+	return sendIndexMail(env, finishIndexMail(params, results, await readParks(env), runError));
 }
 
