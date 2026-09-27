@@ -2,7 +2,7 @@ import { SEEDS } from "../config/seed.ts";
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
-import { clearPark, liveSystemIds, parkedSystemIds, readParks, writePark } from "./parks.ts";
+import { clearPark, liveSystemIds, parkedSystemIds, readParks, writePark, type Parks } from "./parks.ts";
 import type { SystemReindexResult } from "./reindex.ts";
 import { SEED_HASH, driftedSystems, systemSeedHash } from "./seed-hash.ts";
 import {
@@ -20,7 +20,7 @@ export const DRIFT_CRON = "*/5 * * * *";
 export const RECRAWL_CRON = "0 4 * * *";
 export const RECOVERY_CRON = "0 6 * * 0";
 
-export type TriggerSkipReason = "unbound" | "no-auth" | "running" | "no-drift" | "no-systems";
+export type TriggerSkipReason = "unbound" | "no-auth" | "running" | "no-drift" | "no-systems" | "unread-parks";
 
 export type TriggerDecision =
 	| { action: "skip"; reason: TriggerSkipReason }
@@ -33,7 +33,7 @@ export function reindexAuth(env: WorkerEnv): { accountId: string; apiToken: stri
 	return { accountId: env.CLOUDFLARE_ACCOUNT_ID, apiToken: env.CLOUDFLARE_API_TOKEN };
 }
 
-export function recrawlSystems(parks: Awaited<ReturnType<typeof readParks>>): SystemId[] {
+export function recrawlSystems(parks: Parks): SystemId[] {
 	return liveSystemIds(parks);
 }
 
@@ -58,6 +58,10 @@ export async function decideReindex(env: WorkerEnv, cron: string): Promise<Trigg
 	if (await isReindexRunning(env)) {
 		return { action: "skip", reason: "running" };
 	}
+	const parksRead = await readParks(env);
+	if (parksRead.kind === "unread") {
+		return { action: "skip", reason: "unread-parks" };
+	}
 	if (cron === DRIFT_CRON) {
 		const systems = driftedSystems(await readIndexedHashes(env));
 		if (systems.length === 0) {
@@ -66,14 +70,14 @@ export async function decideReindex(env: WorkerEnv, cron: string): Promise<Trigg
 		return { action: "start", trigger: "deploy-drift", systems, catalogHash: SEED_HASH };
 	}
 	if (cron === RECRAWL_CRON) {
-		const systems = recrawlSystems(await readParks(env));
+		const systems = recrawlSystems(parksRead.parks);
 		if (systems.length === 0) {
 			return { action: "skip", reason: "no-systems" };
 		}
 		return { action: "start", trigger: "recrawl", systems, catalogHash: SEED_HASH };
 	}
 	if (cron === RECOVERY_CRON) {
-		const systems = parkedSystemIds(await readParks(env));
+		const systems = parkedSystemIds(parksRead.parks);
 		if (systems.length === 0) {
 			return { action: "skip", reason: "no-systems" };
 		}
@@ -96,7 +100,10 @@ export async function startReindex(
 		catalogHash: decision.catalogHash,
 		workflowId,
 	};
-	await startStatusRun(env, { trigger: decision.trigger, workflowId });
+	const claimed = await startStatusRun(env, { trigger: decision.trigger, workflowId });
+	if (claimed.workflowId !== workflowId) {
+		return { skipped: "running" };
+	}
 	try {
 		await env.REINDEX.create({ id: workflowId, params });
 	} catch (error) {
@@ -133,8 +140,8 @@ export async function persistSystemOutcome(
 			await writeIndexedHash(env, result.system, systemSeedHash(seed));
 		}
 	} else if (result.indexed > 0) {
-		const parks = await readParks(env);
-		if (parks[result.system] !== undefined) {
+		const parksRead = await readParks(env);
+		if (parksRead.kind === "ok" && parksRead.parks[result.system] !== undefined) {
 			unparked = result.system;
 		}
 		await clearPark(env, result.system);

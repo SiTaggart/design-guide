@@ -159,15 +159,17 @@ export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 		return emptyStatus(true);
 	}
 	const lastIndexedHash = await readLastIndexedHash(env);
-	const parks = await readParks(env);
+	const parksRead = await readParks(env);
 	try {
 		const raw = await env.INDEX.get(STATUS_KEY);
 		if (!raw) {
+			const parks = parksRead.kind === "ok" ? parksRead.parks : {};
 			return { ...emptyStatus(false, lastIndexedHash), parks, counts: countsFrom([], parks) };
 		}
 		const parsed = JSON.parse(raw) as IndexStatusDocument;
 		const systems = parsed.systems ?? [];
 		const runError = parsed.runError;
+		const parks = parksRead.kind === "ok" ? parksRead.parks : (parsed.parks ?? {});
 		return {
 			...emptyStatus(false, lastIndexedHash),
 			...parsed,
@@ -181,6 +183,7 @@ export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 			counts: countsFrom(systems, parks, runError),
 		};
 	} catch {
+		const parks = parksRead.kind === "ok" ? parksRead.parks : {};
 		return { ...emptyStatus(false, lastIndexedHash), parks, counts: countsFrom([], parks) };
 	}
 }
@@ -207,7 +210,8 @@ export async function startStatusRun(
 		return current;
 	}
 	const lastIndexedHash = await readLastIndexedHash(env);
-	const parks = await readParks(env);
+	const parksRead = await readParks(env);
+	const parks = parksRead.kind === "ok" ? parksRead.parks : current.parks;
 	const document: IndexStatusDocument = {
 		unbound: false,
 		workflowId: params.workflowId,
@@ -235,7 +239,8 @@ export async function recordSystemResult(
 ): Promise<IndexStatusDocument> {
 	const current = await readStatus(env);
 	const systems = [...current.systems.filter((entry) => entry.system !== result.system), result];
-	const parks = await readParks(env);
+	const parksRead = await readParks(env);
+	const parks = parksRead.kind === "ok" ? parksRead.parks : current.parks;
 	const nextUnparked = unparked
 		? [...new Set([...(current.unparked ?? []), unparked])]
 		: (current.unparked ?? []);
@@ -268,7 +273,8 @@ export async function finishStatusRun(
 	) {
 		return current;
 	}
-	const parks = await readParks(env);
+	const parksRead = await readParks(env);
+	const parks = parksRead.kind === "ok" ? parksRead.parks : current.parks;
 	const document: IndexStatusDocument = {
 		...current,
 		unbound: false,

@@ -182,7 +182,7 @@ describe("GET /v1/index-status", () => {
 			"2026-09-27T06:10:00.000Z",
 			"reindex-recovery-unpark",
 		);
-		expect(await readParks(env)).toEqual({});
+		expect(await readParks(env)).toEqual({ kind: "ok", parks: {} });
 		expect((await readStatus(env)).unparked).toEqual(["garden"]);
 		expect(finished.trigger).toBe("recovery");
 		expect(finished.unparked).toEqual(["garden"]);
@@ -217,7 +217,10 @@ describe("GET /v1/index-status", () => {
 		};
 		await persistSystemOutcome(env, stub);
 		const finished = await finishStatusRun(env, [stub], "2026-09-27T06:10:00.000Z", "reindex-recovery-stub");
-		expect((await readParks(env)).garden).toMatchObject({ reason: "stub", usable: 1 });
+		expect(await readParks(env)).toEqual({
+			kind: "ok",
+			parks: { garden: expect.objectContaining({ reason: "stub", usable: 1 }) },
+		});
 		expect((await readStatus(env)).unparked).toEqual([]);
 		expect(finished.state).toBe("ok");
 		expect(runStateFrom([stub])).toBe("ok");
@@ -240,7 +243,8 @@ describe("GET /v1/index-status", () => {
 		};
 		await persistSystemOutcome(env, failed);
 		expect(await readParks(env)).toEqual({
-			garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" },
+			kind: "ok",
+			parks: { garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" } },
 		});
 		expect((await readStatus(env)).unparked).toEqual([]);
 	});

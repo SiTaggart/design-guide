@@ -1,6 +1,6 @@
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
-import { readParks, type Parks } from "./parks.ts";
+import type { Parks } from "./parks.ts";
 import type { SystemReindexResult } from "./reindex.ts";
 import {
 	countsFrom,
@@ -135,6 +135,6 @@ export async function sendFinishIndexMail(
 	runError?: string,
 ): Promise<{ messageId: string } | { skipped: "unbound" }> {
 	const status = await readStatus(env);
-	return sendIndexMail(env, finishIndexMail(params, results, await readParks(env), runError, status.unparked));
+	return sendIndexMail(env, finishIndexMail(params, results, status.parks, runError, status.unparked));
 }
 

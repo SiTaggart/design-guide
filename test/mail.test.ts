@@ -113,7 +113,7 @@ describe("index mail", () => {
 					error: "item upload failed primer/x.md: boom",
 				},
 			],
-			await readParks(env),
+			{ garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" } },
 		);
 		expect(mail.subject).toBe("design-guide index finished fail (deploy-drift) reindex-deploy-drift-mail");
 		expect(mail.text).toContain("Systems touched: garden, primer");
@@ -471,7 +471,7 @@ describe("index mail", () => {
 			"finish",
 			"mail-finish",
 		]);
-		expect(await readParks(env)).toEqual({});
+		expect(await readParks(env)).toEqual({ kind: "ok", parks: {} });
 		expect(email.sent).toHaveLength(2);
 		expect(email.sent[0]?.to).toBe("simon.taggart@gmail.com");
 		expect(email.sent[0]?.from).toBe(INDEX_MAIL_FROM);

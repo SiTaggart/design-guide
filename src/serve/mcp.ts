@@ -4,7 +4,7 @@ import { z } from "zod";
 import { MAX_K, MIN_K } from "../config/instance.ts";
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
-import { loadLiveSystemIds } from "../index/parks.ts";
+import { liveSystemIds, readParks } from "../index/parks.ts";
 import { parseSearchFields } from "./parse.ts";
 import { parkedFromLive, resolveSearch, type SearchOutcome } from "./search.ts";
 
@@ -93,7 +93,16 @@ export async function handleMcp(request: Request, env: WorkerEnv): Promise<Respo
 	if (request.method === "OPTIONS") {
 		return new Response(null, { status: 204, headers: MCP_HEADERS });
 	}
-	const live = await loadLiveSystemIds(env);
+	const parksRead = await readParks(env);
+	if (parksRead.kind === "unread") {
+		return withCors(
+			new Response(JSON.stringify({ error: "index_not_ready" }), {
+				status: 503,
+				headers: { "content-type": "application/json; charset=utf-8" },
+			}),
+		);
+	}
+	const live = new Set(liveSystemIds(parksRead.parks));
 	const handler = createMcpHandler(() => createDesignGuideServer(env, live));
 	return withCors(await handler.fetch(request));
 }

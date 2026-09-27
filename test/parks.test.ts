@@ -34,7 +34,7 @@ const GOLDEN = "accessible combobox or listbox keyboard and focus guidance";
 describe("park state", () => {
 	it("treats a missing INDEX as an empty park map and the full live set", async () => {
 		const { env } = envWithIndex(fixtureChunks);
-		expect(await readParks(env)).toEqual({});
+		expect(await readParks(env)).toEqual({ kind: "ok", parks: {} });
 		expect(await loadLiveSystemIds(env)).toEqual(new Set(SYSTEM_IDS));
 		expect(liveSystemIds({})).toEqual([...SYSTEM_IDS]);
 	});
@@ -44,7 +44,8 @@ describe("park state", () => {
 		const { env, calls } = envWithIndex(fixtureChunks, true, { INDEX: kv });
 		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
 		expect(await readParks(env)).toEqual({
-			garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" },
+			kind: "ok",
+			parks: { garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" } },
 		});
 		expect(parseSearchFields({ query: "focus", system: "garden" }, await loadLiveSystemIds(env))).toEqual({
 			kind: "empty",
