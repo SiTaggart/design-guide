@@ -41,7 +41,7 @@ function hasRateLimitError(data: Record<string, unknown>): boolean {
 	});
 }
 
-async function cfFetch(url: string, init?: RequestInit): Promise<Response> {
+async function cfFetch(url: string | URL, init?: RequestInit): Promise<Response> {
 	let lastError: unknown;
 	for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
 		try {
