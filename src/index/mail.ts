@@ -8,7 +8,7 @@ import {
 	type ReindexParams,
 } from "./status.ts";
 
-export const INDEX_MAIL_TO = "me@simontaggart.com";
+export const INDEX_MAIL_TO = "simon.taggart@gmail.com";
 export const INDEX_MAIL_FROM = "design-guide@simontaggart.com";
 export const INDEX_STATUS_URL = "https://design-guide.me-2c5.workers.dev/v1/index-status";
 export const MAIL_STEP_RETRIES = {

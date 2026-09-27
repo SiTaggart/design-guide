@@ -74,8 +74,8 @@ const params = {
 describe("index mail", () => {
 	it("composes start mail with trigger, systems, and status URL", () => {
 		const mail = startIndexMail(params);
-		expect(INDEX_MAIL_TO).toBe("me@simontaggart.com");
-		expect(mail.to).toBe("me@simontaggart.com");
+		expect(INDEX_MAIL_TO).toBe("simon.taggart@gmail.com");
+		expect(mail.to).toBe("simon.taggart@gmail.com");
 		expect(mail.from).toEqual(INDEX_MAIL_FROM);
 		expect(mail.subject).toBe("design-guide index started (deploy-drift) reindex-deploy-drift-mail");
 		expect(mail.text).toContain("Trigger: deploy-drift");
@@ -272,9 +272,9 @@ describe("index mail", () => {
 			"mail-finish",
 		]);
 		expect(email.sent).toHaveLength(2);
-		expect(email.sent[0]?.to).toBe("me@simontaggart.com");
+		expect(email.sent[0]?.to).toBe("simon.taggart@gmail.com");
 		expect(email.sent[0]?.subject).toContain("index started");
-		expect(email.sent[1]?.to).toBe("me@simontaggart.com");
+		expect(email.sent[1]?.to).toBe("simon.taggart@gmail.com");
 		expect(email.sent[1]?.subject).toContain("index finished ok");
 		expect(email.sent[1]?.text).toContain("garden: stub usable=1");
 		expect(email.sent[1]?.text).toContain("Counts: systems=1 indexed=0 parked=1 errors=0");
@@ -319,10 +319,10 @@ describe("index mail", () => {
 		expect(email.sent).toHaveLength(2);
 		expect(email.sent[0]).toMatchObject({
 			from: INDEX_MAIL_FROM,
-			to: "me@simontaggart.com",
+			to: "simon.taggart@gmail.com",
 			subject: expect.stringContaining("index started"),
 		});
-		expect(email.sent[1]?.to).toBe("me@simontaggart.com");
+		expect(email.sent[1]?.to).toBe("simon.taggart@gmail.com");
 		expect(email.sent[1]?.subject).toContain("index finished fail");
 		expect(email.sent[1]?.text).toContain("garden");
 		expect(email.sent[1]?.text).toContain(`Status: ${INDEX_STATUS_URL}`);
