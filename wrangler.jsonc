@@ -44,7 +44,7 @@
 	"send_email": [
 		{
 			"name": "EMAIL",
-			"destination_address": "simon.taggart@gmail.com"
+			"destination_address": "me@simontaggart.com"
 		}
 	]
 }

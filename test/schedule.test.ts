@@ -23,10 +23,11 @@ describe("wrangler automation config", () => {
 		expect(RECRAWL_CRON).toBe("0 4 * * *");
 	});
 
-	it("binds send_email EMAIL to the verified destination inbox", () => {
+	it("binds send_email EMAIL to me@simontaggart.com", () => {
 		expect(wrangler).toContain('"send_email"');
 		expect(wrangler).toContain('"name": "EMAIL"');
-		expect(wrangler).toContain('"destination_address": "simon.taggart@gmail.com"');
+		expect(wrangler).toContain('"destination_address": "me@simontaggart.com"');
+		expect(wrangler).not.toContain("simon.taggart@gmail.com");
 	});
 });
 

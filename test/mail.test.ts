@@ -73,7 +73,8 @@ const params = {
 describe("index mail", () => {
 	it("composes start mail with trigger, systems, and status URL", () => {
 		const mail = startIndexMail(params);
-		expect(mail.to).toBe(INDEX_MAIL_TO);
+		expect(INDEX_MAIL_TO).toBe("me@simontaggart.com");
+		expect(mail.to).toBe("me@simontaggart.com");
 		expect(mail.from).toEqual(INDEX_MAIL_FROM);
 		expect(mail.subject).toBe("design-guide index started (deploy-drift) reindex-deploy-drift-mail");
 		expect(mail.text).toContain("Trigger: deploy-drift");
