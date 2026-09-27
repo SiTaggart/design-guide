@@ -8,20 +8,18 @@ import {
 	type ReindexParams,
 } from "./status.ts";
 
-/** Verified Email Routing destination for the me@simontaggart.com inbox. */
+/** Verified Email Routing destination (notify-only). */
 export const INDEX_MAIL_TO = "simon.taggart@gmail.com";
-export const INDEX_MAIL_FROM = {
-	email: "design-guide@simontaggart.com",
-	name: "design-guide",
-} as const;
+/** Allowed sender on simontaggart.com once Email Sending / Routing is onboarded. */
+export const INDEX_MAIL_FROM = "design-guide@simontaggart.com";
 export const INDEX_STATUS_URL = "https://design-guide.me-2c5.workers.dev/v1/index-status";
 export const MAIL_STEP_RETRIES = {
 	retries: { limit: 5, delay: "10 seconds" as const, backoff: "exponential" as const },
 };
 
 export type IndexMail = {
-	to: typeof INDEX_MAIL_TO;
 	from: typeof INDEX_MAIL_FROM;
+	to: typeof INDEX_MAIL_TO;
 	subject: string;
 	text: string;
 };
@@ -110,8 +108,8 @@ export async function sendIndexMail(
 		return { skipped: "unbound" };
 	}
 	const result = await env.EMAIL.send({
+		from: mail.from,
 		to: mail.to,
-		from: mail.from.email,
 		subject: mail.subject,
 		text: mail.text,
 	});

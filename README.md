@@ -197,9 +197,9 @@ Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cl
 
 `GET /v1/index-status` is the last-run record: per-system counts, parks, crawl/render/index errors, and the workflow id. Slack is not the health path.
 
-The Workflow emails start and finish through the Worker `send_email` binding (`env.EMAIL.send()`). There is no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift` or `recrawl`), workflow id, and systems kicked. Finish mail (success or fail) includes systems, counts, parks, errors, and the status URL. Index swap commits before finish mail.
+The Workflow emails start and finish through the Worker `send_email` binding. Each mail step is its own `step.do` with retries and calls `env.EMAIL.send({ from, to, subject, text })`. There is no REST/SMTP path, no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift` or `recrawl`), workflow id, and systems kicked. Finish mail (success or fail) includes systems, counts, parks, errors, and the status URL. Index swap commits before finish mail.
 
-`wrangler.jsonc` binds `EMAIL` with `destination_address` locked to the verified Email Routing destination for Simon’s inbox. That destination must be verified once on the Cloudflare account (Email Routing → Destination addresses). The from-address is whatever Email Sending allows on `simontaggart.com` once that zone is onboarded; this Worker uses `design-guide@simontaggart.com`. `EMAIL` is a binding, not a secret. The Worker secrets stay **CLOUDFLARE_ACCOUNT_ID** and **CLOUDFLARE_API_TOKEN**.
+`wrangler.jsonc` binds `EMAIL` with `destination_address` locked to the verified Email Routing destination (notify-only). That destination must be verified once on the Cloudflare account (Email Routing → Destination addresses). `from` is the allowed Email Sending / Routing sender on `simontaggart.com` once that zone is onboarded (`design-guide@simontaggart.com`). If send fails with an unverified destination, verify Simon’s inbox on that destination list — do not add a third-party key. `EMAIL` is a binding, not a secret. The Worker secrets stay **CLOUDFLARE_ACCOUNT_ID** and **CLOUDFLARE_API_TOKEN**.
 
 ## Reindex
 

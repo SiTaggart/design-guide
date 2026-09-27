@@ -128,10 +128,11 @@ describe("index mail", () => {
 		const email = mockEmail();
 		const { env } = envWithIndex(fixtureChunks, true, { EMAIL: email.binding });
 		await expect(sendStartIndexMail(env, params)).resolves.toEqual({ messageId: "msg-1" });
-		expect(email.sent[0]).toMatchObject({
+		expect(email.sent[0]).toEqual({
+			from: INDEX_MAIL_FROM,
 			to: INDEX_MAIL_TO,
-			from: INDEX_MAIL_FROM.email,
 			subject: "design-guide index started (deploy-drift) reindex-deploy-drift-mail",
+			text: expect.stringContaining("Trigger: deploy-drift"),
 		});
 		const { env: unbound } = envWithIndex(fixtureChunks);
 		await expect(sendIndexMail(unbound, startIndexMail(params))).resolves.toEqual({ skipped: "unbound" });
