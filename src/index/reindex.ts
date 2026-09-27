@@ -88,6 +88,35 @@ async function deleteItems(
 	return deleted;
 }
 
+const CLEANUP_PASSES = 3;
+
+async function deleteMatching(
+	auth: ItemsAuth,
+	shouldDelete: (key: string) => boolean,
+	options?: ItemRequestOptions,
+): Promise<void> {
+	let lastError: unknown;
+	for (let pass = 0; pass < CLEANUP_PASSES; pass += 1) {
+		const pending = (await listItems(auth, options)).filter((item) => shouldDelete(item.key));
+		if (pending.length === 0) {
+			return;
+		}
+		lastError = undefined;
+		for (const item of pending) {
+			try {
+				await deleteItem(auth, item.id, options);
+			} catch (error) {
+				lastError = error;
+			}
+		}
+	}
+	const left = (await listItems(auth, options)).some((item) => shouldDelete(item.key));
+	if (!left) {
+		return;
+	}
+	throw lastError instanceof Error ? lastError : new Error("generation cleanup left items");
+}
+
 export function isDroppedSystemKey(key: string): boolean {
 	const prefix = key.split("/")[0] ?? "";
 	return prefix !== "" && !isSystemId(prefix);
@@ -220,11 +249,9 @@ async function releaseFailedGeneration(
 	const prefix = `${system}/${generation}/`;
 	const prior = items.some((item) => item.key.startsWith(`${system}/`) && !item.key.startsWith(prefix));
 	if (prior) {
-		await deleteItems(itemsAuth, (key) => key.startsWith(prefix), options);
-		return { keptPrevious: true, indexed: 0 };
+		await deleteMatching(itemsAuth, (key) => key.startsWith(prefix), options);
 	}
-	const indexed = items.filter((item) => item.key.startsWith(prefix)).length;
-	return { keptPrevious: indexed === 0, indexed };
+	return { keptPrevious: prior, indexed: 0 };
 }
 
 async function deleteGeneration(
@@ -233,7 +260,11 @@ async function deleteGeneration(
 	generation: string,
 	options?: ItemRequestOptions,
 ): Promise<void> {
-	await deleteItems(itemsAuthFrom(auth), (key) => isSystemGenerationKey(key, system, generation), options);
+	await deleteMatching(
+		itemsAuthFrom(auth),
+		(key) => isSystemGenerationKey(key, system, generation),
+		options,
+	);
 }
 
 async function deletePreviousGeneration(
@@ -341,23 +372,34 @@ export async function streamSwap(
 	}
 
 	let cursor: string | number | undefined;
+	let seen: string[] = [];
 	let usable = 0;
 	let page = 0;
 	let truncated = false;
 	for (;;) {
+		const known = seen;
 		const batch = await step(`upload-${seed.id}-${page}`, async () => {
 			let overloaded = false;
 			try {
 				const fetched = await input.fetchPage(cursor);
-				const fitted = indexableRecords(fetched.records, seed);
-				await uploadFittedRecords(auth, seed, input.generation, fitted, {
+				const fresh: CrawlRecord[] = [];
+				const urls = new Set(known);
+				for (const record of indexableRecords(fetched.records, seed)) {
+					if (urls.has(record.url)) {
+						continue;
+					}
+					urls.add(record.url);
+					fresh.push(record);
+				}
+				await uploadFittedRecords(auth, seed, input.generation, fresh, {
 					onOverload: () => {
 						overloaded = true;
 					},
 				});
 				return {
 					ok: true as const,
-					uploaded: fitted.length,
+					uploaded: fresh.length,
+					urls: fresh.map((record) => record.url),
 					cursor: fetched.cursor,
 					overloaded,
 				};
@@ -415,6 +457,7 @@ export async function streamSwap(
 				error: batch.error,
 			};
 		}
+		seen = [...seen, ...batch.urls];
 		usable += batch.uploaded;
 		page += 1;
 		if (batch.cursor === null) {
@@ -442,8 +485,12 @@ export async function streamSwap(
 			truncated,
 		});
 		if (decision.action === "keep") {
-			await deleteGeneration(auth, seed.id, input.generation, options);
-			return { kind: "keep" as const, counts, decision, overloaded };
+			try {
+				await deleteGeneration(auth, seed.id, input.generation, options);
+				return { kind: "keep" as const, counts, decision, overloaded };
+			} catch (error) {
+				return { kind: "cleanup-failed" as const, counts, ...failedStep(error, overloaded) };
+			}
 		}
 		try {
 			const deleted = await deletePreviousGeneration(auth, seed.id, input.generation, options);
@@ -452,7 +499,6 @@ export async function streamSwap(
 			return {
 				kind: "commit-failed" as const,
 				counts,
-				indexed: usable,
 				...failedStep(error, overloaded),
 			};
 		}
@@ -463,14 +509,14 @@ export async function streamSwap(
 	if (committed.kind === "keep") {
 		return keepResult(seed, input.startUrl, committed.counts, usable, committed.decision);
 	}
-	if (committed.kind === "commit-failed") {
+	if (committed.kind === "commit-failed" || committed.kind === "cleanup-failed") {
 		return {
 			system: seed.id,
 			startUrl: input.startUrl,
 			crawl: committed.counts,
-			indexed: committed.indexed,
+			indexed: 0,
 			hitLimit: false,
-			keptPrevious: false,
+			keptPrevious: committed.kind === "cleanup-failed",
 			usable,
 			error: committed.error,
 		};

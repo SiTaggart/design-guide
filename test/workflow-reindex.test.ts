@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { CLI_POLL_INTERVAL_MS } from "../src/crawl/browser-run.ts";
 import { seedById } from "../src/config/seed.ts";
-import { shouldWriteSeedHash } from "../src/index/trigger.ts";
+import { readIndexedHashes } from "../src/index/indexed-hashes.ts";
+import { driftedSystems } from "../src/index/seed-hash.ts";
+import { persistSystemOutcome, shouldWriteSeedHash } from "../src/index/trigger.ts";
+import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 import { ItemApiError } from "../src/index/items-rest.ts";
 import { streamSwap, swapFromOutcome, swapGeneration } from "../src/index/reindex.ts";
 import {
@@ -274,7 +277,8 @@ describe("swapFromOutcome", () => {
 			generation,
 		});
 		expect(retried.keptPrevious).toBe(false);
-		expect(retried.indexed).toBe(2);
+		expect(retried.indexed).toBe(0);
+		expect(shouldWriteSeedHash(retried)).toBe(false);
 		expect(retried.error).toContain("7009");
 		expect(items).toHaveLength(2);
 		expect(items.every((item) => item.key.startsWith(`primer/${generation}/`))).toBe(true);
@@ -494,6 +498,144 @@ describe("streamSwap", () => {
 		expect(overloaded.error).toContain("7009");
 		expect(overloaded.keptPrevious).toBe(true);
 		expect(itemOverloads).toBe(1);
+	});
+
+	it("does not write the seed hash when the first index fails mid-upload", async () => {
+		uploadItem.mockReset();
+		deleteItem.mockReset();
+		listItems.mockReset();
+		const items = itemStore([]);
+		const seed = seedById("primer");
+		let fetched = 0;
+		uploadItem.mockImplementation(async (_auth: unknown, key: string) => {
+			if (items.length > 0) {
+				throw new Error("item upload failed primer/x.md: [{\"code\":7009}]");
+			}
+			const created = { id: "partial-1", key };
+			items.push(created);
+			return created;
+		});
+		const result = await streamSwap({ accountId: "acct", apiToken: "token" }, seed, {
+			startUrl: seed.startUrl,
+			snapshot: { status: "completed", total: 2, finished: 2 },
+			generation: swapGeneration("primer", "reindex-first-partial"),
+			fetchPage: async () => {
+				fetched += 1;
+				if (fetched === 1) {
+					return {
+						records: [{ url: "https://primer.style/", status: "completed", markdown: "# one" }],
+						cursor: "2",
+					};
+				}
+				return {
+					records: [{ url: "https://primer.style/select", status: "completed", markdown: "# two" }],
+					cursor: null,
+				};
+			},
+			countStatuses: async () => counts,
+		});
+		expect(result).toMatchObject({ indexed: 0, keptPrevious: false });
+		expect(result.error).toContain("7009");
+		expect(shouldWriteSeedHash(result)).toBe(false);
+		expect(items).toEqual([{ id: "partial-1", key: expect.stringMatching(/^primer\//) }]);
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, { INDEX: kv });
+		await persistSystemOutcome(env, result);
+		const indexed = await readIndexedHashes(env);
+		expect(indexed.primer).toBeUndefined();
+		expect(driftedSystems(indexed)).toContain("primer");
+	});
+
+	it("does not write the seed hash when the previous generation delete fails", async () => {
+		uploadItem.mockReset();
+		deleteItem.mockReset();
+		listItems.mockReset();
+		const items = itemStore([{ id: "old-1", key: "primer/oldgen/aaaa.md" }]);
+		deleteItem.mockImplementation(async () => {
+			throw new Error("item delete failed old-1: boom");
+		});
+		const seed = seedById("primer");
+		const result = await streamSwap({ accountId: "acct", apiToken: "token" }, seed, {
+			startUrl: seed.startUrl,
+			snapshot: { status: "completed", total: 2, finished: 2 },
+			generation: swapGeneration("primer", "reindex-commit-failed"),
+			fetchPage: async () => ({
+				records: [
+					{ url: "https://primer.style/", status: "completed", markdown: "# one" },
+					{ url: "https://primer.style/select", status: "completed", markdown: "# two" },
+				],
+				cursor: null,
+			}),
+			countStatuses: async () => counts,
+		});
+		expect(result).toMatchObject({ indexed: 0, keptPrevious: false });
+		expect(result.error).toContain("boom");
+		expect(shouldWriteSeedHash(result)).toBe(false);
+		expect(items.some((item) => item.id === "old-1")).toBe(true);
+		expect(items.some((item) => item.id !== "old-1")).toBe(true);
+	});
+
+	it("finishes deleting the new generation when a stub cleanup delete fails once", async () => {
+		uploadItem.mockReset();
+		deleteItem.mockReset();
+		listItems.mockReset();
+		const prior = { id: "old-1", key: "primer/oldgen/aaaa.md" };
+		const items = itemStore([prior]);
+		let deletes = 0;
+		deleteItem.mockImplementation(async (_auth: unknown, id: string) => {
+			deletes += 1;
+			if (deletes === 1) {
+				throw new Error("item delete failed mid-generation");
+			}
+			const index = items.findIndex((item) => item.id === id);
+			if (index >= 0) {
+				items.splice(index, 1);
+			}
+		});
+		const seed = seedById("primer");
+		const generation = swapGeneration("primer", "reindex-stub-cleanup");
+		const result = await streamSwap({ accountId: "acct", apiToken: "token" }, seed, {
+			startUrl: seed.startUrl,
+			snapshot: { status: "completed", total: 1, finished: 1 },
+			generation,
+			fetchPage: async () => ({
+				records: [{ url: "https://primer.style/", status: "completed", markdown: "# one" }],
+				cursor: null,
+			}),
+			countStatuses: async () => ({ total: 1, finished: 1, skipped: 0, disallowed: 0, errored: 0 }),
+		});
+		expect(result).toMatchObject({ indexed: 0, keptPrevious: true, parked: true, usable: 1 });
+		expect(deletes).toBeGreaterThan(1);
+		expect(items).toEqual([prior]);
+		expect(items.some((item) => item.key.startsWith(`primer/${generation}/`))).toBe(false);
+	});
+
+	it("stays a stub and keeps the previous generation when one url is repeated", async () => {
+		uploadItem.mockReset();
+		deleteItem.mockReset();
+		listItems.mockReset();
+		const prior = { id: "old-1", key: "primer/oldgen/aaaa.md" };
+		const items = itemStore([prior]);
+		const seed = seedById("primer");
+		const generation = swapGeneration("primer", "reindex-dup-url");
+		let fetched = 0;
+		const result = await streamSwap({ accountId: "acct", apiToken: "token" }, seed, {
+			startUrl: seed.startUrl,
+			snapshot: { status: "completed", total: 2, finished: 2 },
+			generation,
+			fetchPage: async () => {
+				fetched += 1;
+				return {
+					records: [{ url: "https://primer.style/", status: "completed", markdown: "# one" }],
+					cursor: fetched === 1 ? "2" : null,
+				};
+			},
+			countStatuses: async () => counts,
+		});
+		expect(result).toMatchObject({ indexed: 0, keptPrevious: true, parked: true, usable: 1 });
+		expect(uploadItem).toHaveBeenCalledTimes(1);
+		expect(items).toEqual([prior]);
+		expect(items.some((item) => item.key.startsWith(`primer/${generation}/`))).toBe(false);
 	});
 
 	it("does not fetch pages when the crawl failed or hit the page cap", async () => {

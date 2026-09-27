@@ -264,7 +264,13 @@ describe("index mail", () => {
 			}
 			if (name.startsWith("upload-")) {
 				names.push(name);
-				return { ok: true, uploaded: 1, cursor: null, overloaded: false } as T;
+				return {
+					ok: true,
+					uploaded: 1,
+					urls: ["https://garden.zendesk.com/"],
+					cursor: null,
+					overloaded: false,
+				} as T;
 			}
 			if (name.startsWith("commit-")) {
 				names.push(name);
@@ -434,7 +440,13 @@ describe("index mail", () => {
 			}
 			if (name.startsWith("upload-")) {
 				names.push(name);
-				return { ok: true, uploaded: 2, cursor: null, overloaded: false } as T;
+				return {
+					ok: true,
+					uploaded: 2,
+					urls: ["https://garden.zendesk.com/a", "https://garden.zendesk.com/b"],
+					cursor: null,
+					overloaded: false,
+				} as T;
 			}
 			if (name.startsWith("commit-")) {
 				names.push(name);
