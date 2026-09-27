@@ -168,7 +168,7 @@ A missing query returns `400` with `{ "error": "query_required" }`. No matches a
 
 `GET /health` returns `200` when at least one completed item exists. Otherwise it returns `503`.
 
-`GET /v1/index-status` returns last-run JSON: workflow id, parks, per-system counts, and crawl/render/index errors.
+`GET /v1/index-status` returns last-run JSON: workflow id, parks, unparked ids, per-system counts, and crawl/render/index errors.
 
 ## Seed
 
@@ -193,11 +193,11 @@ Config lives in `src/config/seed.ts`. A seed is one crawl from a single `startUr
 
 Spectrum and Carbon are parked as crawl misses. Their items are deleted. They are not in the seed. Every seed excludes spectrum.adobe.com and carbondesignsystem.com. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` scopes uswds to its host, backpack to `/latest/**`, siemens-ix to `/docs/**`, and ouds-web to `/orange/` including `docs/1.5`. ouds-web also excludes `docs/0.4`. No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`. The CLI uses that URL only when the primary crawl start returns a 4xx or 5xx. A `llms.txt` start for siemens-ix finished 1 page and produced 0 usable records, because Browser Run did not follow the markdown links.
 
-Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron compares that hash to `lastIndexedHash` in KV and starts the reindex Workflow for new or changed systems. A daily cron recrawls non-parked systems. There is no admin UI. There is no GitHub Actions crawl job.
+Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron compares that hash to `lastIndexedHash` in KV and starts the reindex Workflow for new or changed systems. A daily cron recrawls non-parked systems. A Sunday 06:00 UTC cron recrawls parked systems on the same Workflow. There is no admin UI. There is no GitHub Actions crawl job.
 
-`GET /v1/index-status` is the last-run record: per-system counts, parks, crawl/render/index errors, and the workflow id. Slack is not the health path.
+`GET /v1/index-status` is the last-run record: per-system counts, parks, unparked ids, crawl/render/index errors, and the workflow id. Slack is not the health path.
 
-The Workflow emails start and finish through the Worker `send_email` binding. Each mail step is its own `step.do` with retries and calls `env.EMAIL.send({ from, to, subject, text })`. There is no REST/SMTP path, no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift` or `recrawl`), workflow id, and systems kicked. Finish mail (success or fail) includes systems, counts, parks, errors, and the status URL. Index swap commits before finish mail.
+The Workflow emails start and finish through the Worker `send_email` binding. Each mail step is its own `step.do` with retries and calls `env.EMAIL.send({ from, to, subject, text })`. There is no REST/SMTP path, no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift`, `recrawl`, or `recovery`), workflow id, and systems kicked. Finish mail (success or fail) includes systems, counts, parks, unparked ids when a park cleared, errors, and the status URL. Index swap commits before finish mail.
 
 `wrangler.jsonc` binds `EMAIL` the same way as team-retros: `{ "name": "EMAIL" }` (no `destination_address`). The Workflow sends `to: simon.taggart@gmail.com` (the verified Email Routing destination for this account; `me@simontaggart.com` is not a send destination) and `from: design-guide@simontaggart.com` (same routed zone as this Worker). `EMAIL` is a binding, not a secret. There is no Resend, Mailchannels, SES, or agent mailer. The Worker secrets stay **CLOUDFLARE_ACCOUNT_ID** and **CLOUDFLARE_API_TOKEN**.
 

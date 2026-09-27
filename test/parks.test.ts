@@ -3,6 +3,8 @@ import { SYSTEM_IDS } from "../src/config/types.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 import { liveSystemIds, loadLiveSystemIds, readParks, writePark } from "../src/index/parks.ts";
+import { persistSystemOutcome } from "../src/index/trigger.ts";
+import { startStatusRun } from "../src/index/status.ts";
 import { parseSearchFields } from "../src/serve/parse.ts";
 import worker from "../src/worker.ts";
 
@@ -132,5 +134,36 @@ describe("park state", () => {
 			result: { tools: Array<{ inputSchema: { properties?: { system?: { enum?: string[] } } } }> };
 		};
 		expect(listed.result.tools[0]?.inputSchema.properties?.system).toBeUndefined();
+	});
+
+	it("returns a parked system to search and MCP after persist clears the park", async () => {
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		await writePark(env, "garden", 1);
+		await startStatusRun(env, { trigger: "recovery", workflowId: "reindex-recovery-live" });
+		await persistSystemOutcome(env, {
+			system: "garden",
+			startUrl: "https://garden.zendesk.com/",
+			crawl: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
+			indexed: 2,
+			hitLimit: false,
+			keptPrevious: false,
+			usable: 2,
+		});
+		expect(parseSearchFields({ query: "focus", system: "garden" }, await loadLiveSystemIds(env))).toMatchObject({
+			kind: "ok",
+			params: { system: "garden" },
+		});
+		const listed = (await mcpRpc(env, { jsonrpc: "2.0", id: 1, method: "tools/list" })) as {
+			result: { tools: Array<{ inputSchema: { properties?: { system?: { enum?: string[] } } } }> };
+		};
+		expect(listed.result.tools[0]?.inputSchema.properties?.system?.enum).toEqual([...SYSTEM_IDS]);
+	});
+
+	it("has no manual unpark HTTP route", async () => {
+		const { env } = envWithIndex(fixtureChunks);
+		const response = await worker.fetch(new Request("https://example.test/v1/unpark", { method: "POST" }), env);
+		expect(response.status).toBe(404);
+		expect(await response.json()).toEqual({ error: "not_found" });
 	});
 });

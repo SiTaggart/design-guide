@@ -2,7 +2,7 @@ import { SEEDS } from "../config/seed.ts";
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
-import { clearPark, liveSystemIds, readParks, writePark } from "./parks.ts";
+import { clearPark, liveSystemIds, parkedSystemIds, readParks, writePark } from "./parks.ts";
 import type { SystemReindexResult } from "./reindex.ts";
 import { SEED_HASH, driftedSystems, systemSeedHash } from "./seed-hash.ts";
 import {
@@ -18,6 +18,7 @@ import {
 
 export const DRIFT_CRON = "*/5 * * * *";
 export const RECRAWL_CRON = "0 4 * * *";
+export const RECOVERY_CRON = "0 6 * * 0";
 
 export type TriggerSkipReason = "unbound" | "no-auth" | "running" | "no-drift" | "no-systems";
 
@@ -71,6 +72,13 @@ export async function decideReindex(env: WorkerEnv, cron: string): Promise<Trigg
 		}
 		return { action: "start", trigger: "recrawl", systems, catalogHash: SEED_HASH };
 	}
+	if (cron === RECOVERY_CRON) {
+		const systems = parkedSystemIds(await readParks(env));
+		if (systems.length === 0) {
+			return { action: "skip", reason: "no-systems" };
+		}
+		return { action: "start", trigger: "recovery", systems, catalogHash: SEED_HASH };
+	}
 	return { action: "skip", reason: "no-systems" };
 }
 
@@ -118,18 +126,23 @@ export async function persistSystemOutcome(
 	result: SystemReindexResult,
 ): Promise<void> {
 	const seed = SEEDS.find((entry) => entry.id === result.system);
+	let unparked: SystemId | undefined;
 	if (result.parked) {
 		await writePark(env, result.system, result.usable ?? 0);
 		if (seed) {
 			await writeIndexedHash(env, result.system, systemSeedHash(seed));
 		}
 	} else if (result.indexed > 0) {
+		const parks = await readParks(env);
+		if (parks[result.system] !== undefined) {
+			unparked = result.system;
+		}
 		await clearPark(env, result.system);
 		if (seed) {
 			await writeIndexedHash(env, result.system, systemSeedHash(seed));
 		}
 	}
-	const document = await recordSystemResult(env, result);
+	const document = await recordSystemResult(env, result, unparked);
 	if (result.parked) {
 		await notifyFailOrPark(env, document, "park");
 	} else if (result.error) {

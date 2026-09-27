@@ -7,7 +7,7 @@ import type { SystemReindexResult } from "./reindex.ts";
 export const STATUS_KEY = "status";
 export const LAST_INDEXED_HASH_KEY = "lastIndexedHash";
 
-export type IndexTrigger = "deploy-drift" | "recrawl";
+export type IndexTrigger = "deploy-drift" | "recrawl" | "recovery";
 export type IndexRunState = "running" | "ok" | "fail";
 export type IndexErrorChannel = "crawl" | "render" | "index";
 
@@ -33,6 +33,7 @@ export type IndexStatusDocument = {
 	seedHash: string;
 	lastIndexedHash: string | null;
 	parks: Parks;
+	unparked: SystemId[];
 	systems: SystemReindexResult[];
 	errors: Record<IndexErrorChannel, IndexErrorEntry[]>;
 	counts: IndexStatusCounts;
@@ -139,6 +140,7 @@ export function emptyStatus(unbound: boolean, lastIndexedHash: string | null = n
 		seedHash: SEED_HASH,
 		lastIndexedHash,
 		parks: {},
+		unparked: [],
 		systems: [],
 		errors: { ...EMPTY_ERRORS, crawl: [], render: [], index: [] },
 		counts: { systems: 0, indexed: 0, parked: 0, errors: 0 },
@@ -172,6 +174,7 @@ export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 			unbound: false,
 			lastIndexedHash,
 			parks,
+			unparked: parsed.unparked ?? [],
 			systems,
 			runError,
 			errors: errorsFromResults(systems, runError),
@@ -215,6 +218,7 @@ export async function startStatusRun(
 		seedHash: SEED_HASH,
 		lastIndexedHash,
 		parks,
+		unparked: [],
 		systems: [],
 		errors: { crawl: [], render: [], index: [] },
 		counts: countsFrom([], parks),
@@ -227,14 +231,19 @@ export async function startStatusRun(
 export async function recordSystemResult(
 	env: WorkerEnv,
 	result: SystemReindexResult,
+	unparked?: SystemId,
 ): Promise<IndexStatusDocument> {
 	const current = await readStatus(env);
 	const systems = [...current.systems.filter((entry) => entry.system !== result.system), result];
 	const parks = await readParks(env);
+	const nextUnparked = unparked
+		? [...new Set([...(current.unparked ?? []), unparked])]
+		: (current.unparked ?? []);
 	const document: IndexStatusDocument = {
 		...current,
 		unbound: false,
 		parks,
+		unparked: nextUnparked,
 		systems,
 		errors: errorsFromResults(systems),
 		counts: countsFrom(systems, parks),
@@ -268,6 +277,7 @@ export async function finishStatusRun(
 		finishedAt,
 		lastIndexedHash: await readLastIndexedHash(env),
 		parks,
+		unparked: current.unparked ?? [],
 		systems: [...results],
 		runError,
 		errors: errorsFromResults(results, runError),
