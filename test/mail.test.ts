@@ -130,7 +130,7 @@ describe("index mail", () => {
 		await expect(sendStartIndexMail(env, params)).resolves.toEqual({ messageId: "msg-1" });
 		expect(email.sent[0]).toMatchObject({
 			to: INDEX_MAIL_TO,
-			from: INDEX_MAIL_FROM,
+			from: INDEX_MAIL_FROM.email,
 			subject: "design-guide index started (drift) reindex-drift-mail",
 		});
 		const { env: unbound } = envWithIndex(fixtureChunks);

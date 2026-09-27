@@ -106,7 +106,7 @@ export async function sendIndexMail(
 	}
 	const result = await env.EMAIL.send({
 		to: mail.to,
-		from: mail.from,
+		from: mail.from.email,
 		subject: mail.subject,
 		text: mail.text,
 	});

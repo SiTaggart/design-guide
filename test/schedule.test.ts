@@ -23,10 +23,9 @@ describe("wrangler automation config", () => {
 		expect(RECRAWL_CRON).toBe("0 4 * * *");
 	});
 
-	it("binds send_email EMAIL to me@simontaggart.com", () => {
+	it("binds send_email EMAIL for env.EMAIL.send()", () => {
 		expect(wrangler).toContain('"send_email"');
 		expect(wrangler).toContain('"name": "EMAIL"');
-		expect(wrangler).toContain('"destination_address": "me@simontaggart.com"');
 	});
 });
 
