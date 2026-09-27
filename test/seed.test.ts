@@ -11,14 +11,21 @@ const DOCS_ROOTS: Record<SystemId, string> = {
 	nhs: "https://service-manual.nhs.uk/",
 	antd: "https://ant.design/",
 	"gitlab-pajamas": "https://design.gitlab.com/",
+	patternfly: "https://www.patternfly.org/",
+	cloudscape: "https://cloudscape.design/",
+	vanilla: "https://vanillaframework.io/docs/",
+	"siemens-ix": "https://ix.siemens.io/llms.txt",
+	backpack: "https://www.skyscanner.design/latest/welcome-to-backpack-Mtf5OEo4",
+	garden: "https://garden.zendesk.com/components",
+	"ouds-web": "https://web.unified-design-system.orange.com/orange/",
 };
 
 const A11Y_FILTER = /combo|listbox|list-box|select|accessib|a11y|keyboard|focus|dropdown/i;
 
 describe("seed registry", () => {
-	it("lists all seven locked systems and no others", () => {
+	it("lists all fourteen locked systems and no others", () => {
 		expect(SEEDS.map((seed) => seed.id)).toEqual([...SYSTEM_IDS]);
-		expect(SEEDS).toHaveLength(7);
+		expect(SEEDS).toHaveLength(14);
 	});
 
 	it("gives every system exactly one docs-root startUrl", () => {
@@ -53,14 +60,47 @@ describe("seed registry", () => {
 		}
 	});
 
-	it("only falls back for gitlab-pajamas", () => {
+	it("only falls back for gitlab-pajamas and siemens-ix", () => {
 		for (const seed of SEEDS) {
 			if (seed.id === "gitlab-pajamas") {
 				expect(seed.fallbackStartUrl).toBe("https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com");
+			} else if (seed.id === "siemens-ix") {
+				expect(seed.fallbackStartUrl).toBe("https://ix.siemens.io/docs/home/overview");
 			} else {
 				expect(seed.fallbackStartUrl).toBeUndefined();
 			}
 		}
+	});
+
+	it("locks Archie scope for siemens-ix, backpack, ouds-web, and garden", () => {
+		const siemens = SEEDS.find((seed) => seed.id === "siemens-ix");
+		expect(siemens?.indexUrlSuffixes).toEqual([".md"]);
+		expect(siemens?.includePatterns).toEqual([
+			"https://ix.siemens.io/llms.txt",
+			"https://ix.siemens.io/**/*.md",
+		]);
+
+		expect(SEEDS.find((seed) => seed.id === "backpack")?.includePatterns).toEqual([
+			"https://www.skyscanner.design/latest/**",
+		]);
+
+		const ouds = SEEDS.find((seed) => seed.id === "ouds-web");
+		expect(ouds?.includePatterns).toEqual([
+			"https://web.unified-design-system.orange.com/orange/",
+			"https://web.unified-design-system.orange.com/orange/**",
+			"**/orange/docs/1.5/**",
+		]);
+		expect(ouds?.excludePatterns?.slice(0, -1)).toEqual(
+			SEEDS.find((seed) => seed.id === "paste")?.excludePatterns,
+		);
+		expect(ouds?.excludePatterns?.at(-1)).toBe("**/docs/0.4/**");
+
+		expect(SEEDS.find((seed) => seed.id === "garden")?.startUrl).toBe("https://garden.zendesk.com/components");
+
+		const ids = SEEDS.map((seed) => seed.id);
+		expect(ids).not.toContain("carbon");
+		expect(ids).not.toContain("fluent2");
+		expect(ids).not.toContain("bootstrap");
 	});
 
 	it("starts every web system except paste outside the old curated tip pages", () => {

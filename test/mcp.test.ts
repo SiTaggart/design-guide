@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SearchCall, WorkerEnv } from "../src/index/ai-search.ts";
-import type { SearchChunk } from "../src/config/types.ts";
+import { SYSTEM_IDS, type SearchChunk } from "../src/config/types.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 
@@ -151,15 +151,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 		);
 		expect(listedResult.tools[0].inputSchema.required).toEqual(["query"]);
 		expect(listedResult.tools[0].inputSchema.properties?.query?.type).toBe("string");
-		expect(listedResult.tools[0].inputSchema.properties?.system?.enum).toEqual([
-			"paste",
-			"primer",
-			"uswds",
-			"govuk",
-			"nhs",
-			"antd",
-			"gitlab-pajamas",
-		]);
+		expect(listedResult.tools[0].inputSchema.properties?.system?.enum).toEqual([...SYSTEM_IDS]);
 		expect(listedResult.tools[0].inputSchema.properties?.k).toMatchObject({
 			type: "integer",
 			minimum: 1,
