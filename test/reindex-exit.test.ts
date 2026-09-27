@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SYSTEM_IDS, type Seed, type SystemId } from "../src/config/types.ts";
-import { fitsItem, isDroppedSystemKey, reindexExitCode, type SystemReindexResult } from "../src/index/reindex.ts";
+import { fitsItem, isDroppedSystemKey, isStubGeneration, reindexExitCode, type SystemReindexResult } from "../src/index/reindex.ts";
 import { seedById } from "../src/config/seed.ts";
 
 function result(system: SystemId, indexed: number, hitLimit = false): SystemReindexResult {
@@ -26,6 +26,15 @@ describe("reindexExitCode", () => {
 
 	it("succeeds when at least one system indexed", () => {
 		expect(reindexExitCode([result("primer", 900), result("govuk", 0)])).toBe(0);
+	});
+});
+
+describe("isStubGeneration", () => {
+	it("rejects a 0-page or 1-page usable set", () => {
+		expect(isStubGeneration(0)).toBe(true);
+		expect(isStubGeneration(1)).toBe(true);
+		expect(isStubGeneration(2)).toBe(false);
+		expect(isStubGeneration(40)).toBe(false);
 	});
 });
 

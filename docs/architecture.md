@@ -15,7 +15,7 @@ Seed ids: `paste`, `primer`, `uswds`, `govuk`, `nhs`, `antd`, `gitlab-pajamas`, 
 
 Crawl: `source=all`, limit and depth `100000`, `formats: [markdown]`, `render: true`. `hitLimit` must be false. `includePatterns` scopes the crawl when a seed sets them. No page-list filters.
 
-Reindex runs on config change. Upload the new generation for a system, then delete the previous one. Ids not in the seed are deleted. An empty search is not deletion.
+Reindex runs on config change. Upload the new generation for a system, then delete the previous one. Ids not in the seed are deleted. An empty search is not deletion. A 1-page usable set is a stub and does not swap.
 
 ## Query to citation JSON
 

@@ -16,7 +16,7 @@ const DOCS_ROOTS: Record<SystemId, string> = {
 	vanilla: "https://vanillaframework.io/docs/",
 	"siemens-ix": "https://ix.siemens.io/docs/home/overview",
 	backpack: "https://www.skyscanner.design/latest/welcome-to-backpack-Mtf5OEo4",
-	garden: "https://garden.zendesk.com/components",
+	garden: "https://garden.zendesk.com/",
 	"ouds-web": "https://web.unified-design-system.orange.com/orange/",
 };
 
@@ -92,7 +92,7 @@ describe("seed registry", () => {
 		);
 		expect(ouds?.excludePatterns?.at(-1)).toBe("**/docs/0.4/**");
 
-		expect(SEEDS.find((seed) => seed.id === "garden")?.startUrl).toBe("https://garden.zendesk.com/components");
+		expect(SEEDS.find((seed) => seed.id === "garden")?.startUrl).toBe("https://garden.zendesk.com/");
 
 		const ids = SEEDS.map((seed) => seed.id);
 		expect(ids).not.toContain("carbon");

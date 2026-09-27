@@ -93,11 +93,11 @@ export const SEEDS: readonly Seed[] = [
 		includePatterns: ["https://www.skyscanner.design/latest/**"],
 		excludePatterns: HARD_OUTS,
 	},
-	// Sitemap is 79 from /. Start at /components. Product check on reindex output is at least half the sitemap, and at least 40 when that half is under 50.
+	// Sitemap is 79. A /components start finished 1 of 66 and swapped a stub. Start at / so source=all can use the sitemap. Product check is at least half the sitemap, and at least 40 when that half is under 50.
 	{
 		id: "garden",
 		source: "Zendesk Garden",
-		startUrl: "https://garden.zendesk.com/components",
+		startUrl: "https://garden.zendesk.com/",
 		excludePatterns: HARD_OUTS,
 	},
 	// Include */orange/docs/1.5/*. Exclude */docs/0.4/*.
