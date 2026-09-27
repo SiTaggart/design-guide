@@ -32,6 +32,11 @@ export type AiSearchNamespace = {
 
 export type WorkerEnv = {
 	AI_SEARCH: AiSearchNamespace;
+	INDEX?: KVNamespace;
+	REINDEX?: Workflow;
+	CLOUDFLARE_ACCOUNT_ID?: string;
+	CLOUDFLARE_API_TOKEN?: string;
+	INDEX_WEBHOOK_URL?: string;
 };
 
 export async function searchCitations(

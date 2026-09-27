@@ -28,6 +28,8 @@ export type SystemReindexResult = {
 	keptPrevious: boolean;
 	deleted?: number;
 	error?: string;
+	parked?: boolean;
+	usable?: number;
 };
 
 const EMPTY_COUNTS: CrawlCounts = { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 };
@@ -78,29 +80,29 @@ export async function deleteDroppedSystemItems(auth: ItemsAuth): Promise<number>
 	return deleteItems(auth, isDroppedSystemKey);
 }
 
-export async function reindexSystem(
+export function reindexFailure(seed: Seed, error: string): SystemReindexResult {
+	return {
+		system: seed.id,
+		startUrl: seed.startUrl,
+		crawl: EMPTY_COUNTS,
+		indexed: 0,
+		hitLimit: false,
+		keptPrevious: true,
+		usable: 0,
+		error,
+	};
+}
+
+export async function swapFromOutcome(
 	auth: ReindexAuth,
 	seed: Seed,
+	outcome: CrawlOutcome,
 ): Promise<SystemReindexResult> {
 	const itemsAuth: ItemsAuth = {
 		accountId: auth.accountId,
 		apiToken: auth.apiToken,
 		instanceId: auth.instanceId ?? INSTANCE_ID,
 	};
-	let outcome: CrawlOutcome;
-	try {
-		outcome = await crawlSeed(auth, seed);
-	} catch (error) {
-		return {
-			system: seed.id,
-			startUrl: seed.startUrl,
-			crawl: EMPTY_COUNTS,
-			indexed: 0,
-			hitLimit: false,
-			keptPrevious: true,
-			error: errorMessage(error),
-		};
-	}
 	const usable = outcome.records.filter((record) => fitsItem(record, seed));
 	const kept: SystemReindexResult = {
 		system: seed.id,
@@ -109,6 +111,7 @@ export async function reindexSystem(
 		indexed: 0,
 		hitLimit: hitCrawlLimit(outcome, usable.length),
 		keptPrevious: true,
+		usable: usable.length,
 	};
 	if (kept.hitLimit) {
 		return { ...kept, error: `crawl hit the ${CRAWL_LIMIT} page limit` };
@@ -116,11 +119,8 @@ export async function reindexSystem(
 	if (outcome.status !== "completed") {
 		return { ...kept, error: `crawl ended ${outcome.status}` };
 	}
-	if (usable.length === 0) {
-		return { ...kept, error: "no usable crawl records" };
-	}
 	if (isStubGeneration(usable.length)) {
-		return { ...kept, error: `stub: only ${usable.length} usable page(s)` };
+		return { ...kept, parked: true, error: `stub: only ${usable.length} usable page(s)` };
 	}
 	const generation = generationId();
 	const uploadedKeys = new Set<string>();
@@ -143,6 +143,19 @@ export async function reindexSystem(
 		(key) => key.startsWith(`${seed.id}/`) && !uploadedKeys.has(key),
 	);
 	return { ...kept, indexed: uploadedKeys.size, deleted, keptPrevious: false };
+}
+
+export async function reindexSystem(
+	auth: ReindexAuth,
+	seed: Seed,
+): Promise<SystemReindexResult> {
+	let outcome: CrawlOutcome;
+	try {
+		outcome = await crawlSeed(auth, seed);
+	} catch (error) {
+		return reindexFailure(seed, errorMessage(error));
+	}
+	return swapFromOutcome(auth, seed, outcome);
 }
 
 export async function reindex(

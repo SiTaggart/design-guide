@@ -2,10 +2,11 @@ import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/server/validators/cf-worker";
 import { z } from "zod";
 import { MAX_K, MIN_K } from "../config/instance.ts";
-import { SYSTEM_IDS } from "../config/types.ts";
+import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
+import { loadLiveSystemIds } from "../index/parks.ts";
 import { parseSearchFields } from "./parse.ts";
-import { resolveSearch, type SearchOutcome } from "./search.ts";
+import { parkedFromLive, resolveSearch, type SearchOutcome } from "./search.ts";
 
 const SERVER_NAME = "design-guide";
 const SERVER_VERSION = "0.1.0";
@@ -18,11 +19,14 @@ const MCP_HEADERS = {
 	"access-control-expose-headers": "mcp-session-id, mcp-protocol-version",
 };
 
-const SEARCH_INPUT = z.object({
-	query: z.string().describe("Search query"),
-	system: z.enum(SYSTEM_IDS).optional().describe("Optional seed id"),
-	k: z.number().int().min(MIN_K).max(MAX_K).optional().describe("Result count, 1-20"),
-});
+function searchInput(live: SystemId[]) {
+	const enumIds = (live.length > 0 ? live : [...SYSTEM_IDS]) as [SystemId, ...SystemId[]];
+	return z.object({
+		query: z.string().describe("Search query"),
+		system: z.enum(enumIds).optional().describe("Optional seed id"),
+		k: z.number().int().min(MIN_K).max(MAX_K).optional().describe("Result count, 1-20"),
+	});
+}
 
 type ToolResult = {
 	content: Array<{ type: "text"; text: string }>;
@@ -48,7 +52,9 @@ function toolFromOutcome(outcome: SearchOutcome): ToolResult {
 	};
 }
 
-function createDesignGuideServer(env: WorkerEnv): McpServer {
+function createDesignGuideServer(env: WorkerEnv, live: Set<SystemId>): McpServer {
+	const liveIds = [...live];
+	const parked = parkedFromLive(live);
 	const server = new McpServer(
 		{ name: SERVER_NAME, version: SERVER_VERSION },
 		{ jsonSchemaValidator: new CfWorkerJsonSchemaValidator() },
@@ -58,9 +64,10 @@ function createDesignGuideServer(env: WorkerEnv): McpServer {
 		{
 			description:
 				"Search indexed design-system docs and return cited passages. Never invent passages or scores.",
-			inputSchema: SEARCH_INPUT,
+			inputSchema: searchInput(liveIds),
 		},
-		async (args) => toolFromOutcome(await resolveSearch(env, parseSearchFields(args))),
+		async (args) =>
+			toolFromOutcome(await resolveSearch(env, parseSearchFields(args, live), parked)),
 	);
 	return server;
 }
@@ -81,6 +88,7 @@ export async function handleMcp(request: Request, env: WorkerEnv): Promise<Respo
 	if (request.method === "OPTIONS") {
 		return new Response(null, { status: 204, headers: MCP_HEADERS });
 	}
-	const handler = createMcpHandler(() => createDesignGuideServer(env));
+	const live = await loadLiveSystemIds(env);
+	const handler = createMcpHandler(() => createDesignGuideServer(env, live));
 	return withCors(await handler.fetch(request));
 }
