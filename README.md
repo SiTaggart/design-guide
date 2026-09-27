@@ -195,7 +195,7 @@ Spectrum and Carbon are parked as crawl misses. Their items are deleted. They ar
 
 Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron compares that hash to `lastIndexedHash` in KV and starts the reindex Workflow for new or changed systems. A daily cron recrawls non-parked systems. There is no admin UI. There is no GitHub Actions crawl job.
 
-`GET /v1/index-status` is the last-run record: per-system counts, parks, crawl/render/index errors, and the workflow id. The Workflow also emails `me@simontaggart.com` when a run starts and when it finishes. Finish mail includes systems, counts, parks, errors, and the status URL. Slack is not the health path.
+`GET /v1/index-status` is the last-run record: per-system counts, parks, crawl/render/index errors, and the workflow id. The Workflow also emails the verified Email Routing destination for the `me@simontaggart.com` inbox (`simon.taggart@gmail.com`) when a run starts and when it finishes. Finish mail includes systems, counts, parks, errors, and the status URL. Slack is not the health path.
 
 ## Reindex
 

@@ -8,7 +8,8 @@ import {
 	type ReindexParams,
 } from "./status.ts";
 
-export const INDEX_MAIL_TO = "me@simontaggart.com";
+/** Verified Email Routing destination for the me@simontaggart.com inbox. */
+export const INDEX_MAIL_TO = "simon.taggart@gmail.com";
 export const INDEX_MAIL_FROM = {
 	email: "design-guide@simontaggart.com",
 	name: "design-guide",

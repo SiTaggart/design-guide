@@ -43,7 +43,8 @@
 	},
 	"send_email": [
 		{
-			"name": "EMAIL"
+			"name": "EMAIL",
+			"destination_address": "simon.taggart@gmail.com"
 		}
 	]
 }
