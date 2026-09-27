@@ -13,7 +13,6 @@ import {
 	startIndexMail,
 } from "../src/index/mail.ts";
 import { readParks, writePark } from "../src/index/parks.ts";
-import { persistSystemOutcome } from "../src/index/trigger.ts";
 import { ReindexWorkflow } from "../src/workflows/reindex.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV, mockWorkflow } from "./helpers/index-env.ts";
@@ -263,21 +262,23 @@ describe("index mail", () => {
 				names.push(name);
 				return { status: "completed", total: 1, finished: 1, skipped: 0, disallowed: 0, errored: 0 } as T;
 			}
-			if (name.startsWith("apply-")) {
+			if (name.startsWith("upload-")) {
 				names.push(name);
-				const result = {
-					system: "garden" as const,
-					startUrl: "https://garden.zendesk.com/",
-					crawl: { total: 1, finished: 1, skipped: 0, disallowed: 0, errored: 0 },
-					indexed: 0,
-					hitLimit: false,
-					keptPrevious: true,
-					parked: true,
-					usable: 1,
-					error: "stub: only 1 usable page(s)",
-				};
-				await persistSystemOutcome(env, result);
-				return result as T;
+				return { ok: true, uploaded: 1, cursor: null, overloaded: false } as T;
+			}
+			if (name.startsWith("commit-")) {
+				names.push(name);
+				return {
+					kind: "keep",
+					counts: { total: 1, finished: 1, skipped: 0, disallowed: 0, errored: 0 },
+					decision: {
+						action: "keep",
+						hitLimit: false,
+						parked: true,
+						error: "stub: only 1 usable page(s)",
+					},
+					overloaded: false,
+				} as T;
 			}
 			return originalDo(name, configOrCb, maybeCb);
 		};
@@ -302,7 +303,9 @@ describe("index mail", () => {
 			"mail-start",
 			"start-garden",
 			"poll-garden-0",
-			"apply-garden",
+			"upload-garden-0",
+			"commit-garden",
+			"record-garden",
 			"finish",
 			"mail-finish",
 		]);
@@ -429,20 +432,18 @@ describe("index mail", () => {
 				names.push(name);
 				return { status: "completed", total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 } as T;
 			}
-			if (name.startsWith("apply-")) {
+			if (name.startsWith("upload-")) {
 				names.push(name);
-				const result = {
-					system: "garden" as const,
-					startUrl: "https://garden.zendesk.com/",
-					crawl: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
-					indexed: 2,
-					hitLimit: false,
-					keptPrevious: false,
-					parked: false,
-					usable: 2,
-				};
-				await persistSystemOutcome(env, result);
-				return result as T;
+				return { ok: true, uploaded: 2, cursor: null, overloaded: false } as T;
+			}
+			if (name.startsWith("commit-")) {
+				names.push(name);
+				return {
+					kind: "commit",
+					counts: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
+					deleted: 1,
+					overloaded: false,
+				} as T;
 			}
 			return originalDo(name, configOrCb, maybeCb);
 		};
@@ -467,7 +468,9 @@ describe("index mail", () => {
 			"mail-start",
 			"start-garden",
 			"poll-garden-0",
-			"apply-garden",
+			"upload-garden-0",
+			"commit-garden",
+			"record-garden",
 			"finish",
 			"mail-finish",
 		]);

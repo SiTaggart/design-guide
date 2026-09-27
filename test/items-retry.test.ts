@@ -62,6 +62,21 @@ describe("AI Search upload and delete retries", () => {
 		expect(calls).toBe(2);
 	});
 
+	it("treats error 7042 as the item already stored under that key", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				jsonResponse(409, { errors: [{ code: 7042, message: "item_key_already_exist" }] }),
+			),
+		);
+		const item = await uploadItem(auth, "primer/gen/a.md", "# one", {
+			system: "primer",
+			source: "Primer",
+			source_url: "https://primer.style/",
+		});
+		expect(item).toEqual({ id: "primer/gen/a.md", key: "primer/gen/a.md" });
+	});
+
 	it("throws the 7009 payload after the backoff attempts are used", async () => {
 		let calls = 0;
 		vi.stubGlobal(

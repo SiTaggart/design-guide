@@ -17,6 +17,7 @@ import {
 } from "./status.ts";
 
 export const DRIFT_CRON = "*/5 * * * *";
+const DRIFT_BATCH_LIMIT = 3;
 export const RECRAWL_CRON = "0 4 * * *";
 export const RECOVERY_CRON = "0 6 * * 0";
 
@@ -63,7 +64,7 @@ export async function decideReindex(env: WorkerEnv, cron: string): Promise<Trigg
 		return { action: "skip", reason: "unread-parks" };
 	}
 	if (cron === DRIFT_CRON) {
-		const systems = driftedSystems(await readIndexedHashes(env));
+		const systems = driftedSystems(await readIndexedHashes(env)).slice(0, DRIFT_BATCH_LIMIT);
 		if (systems.length === 0) {
 			return { action: "skip", reason: "no-drift" };
 		}

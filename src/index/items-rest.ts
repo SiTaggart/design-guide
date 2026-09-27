@@ -23,22 +23,75 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 }
 
 const RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 16_000];
+const RETRYABLE_ITEM_CODES = new Set([1015, 7009, 7114]);
+const ALREADY_EXISTS_CODE = 7042;
+
+export type ItemRequestOptions = {
+	sleep?: (ms: number) => Promise<void>;
+	onOverload?: () => void;
+};
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function hasRateLimitError(data: Record<string, unknown>): boolean {
+function errorCode(value: unknown): number | null {
+	if (typeof value === "number" && Number.isFinite(value)) {
+		return value;
+	}
+	if (typeof value === "string" && /^[0-9]+$/.test(value)) {
+		return Number(value);
+	}
+	return null;
+}
+
+function itemErrorCode(data: Record<string, unknown>, expected?: number): number | null {
 	const errors = data.errors;
 	if (!Array.isArray(errors)) {
-		return false;
+		return null;
 	}
-	return errors.some((error) => {
+	for (const error of errors) {
 		if (!error || typeof error !== "object") {
-			return false;
+			continue;
 		}
-		return (error as { code?: unknown }).code === 1015;
-	});
+		const code = errorCode((error as { code?: unknown }).code);
+		if (code === null) {
+			continue;
+		}
+		if (expected === undefined || code === expected) {
+			return code;
+		}
+	}
+	return null;
+}
+
+function retryableItemCode(data: Record<string, unknown>): number | null {
+	const code = itemErrorCode(data);
+	return code !== null && RETRYABLE_ITEM_CODES.has(code) ? code : null;
+}
+
+async function withItemRetries(
+	request: () => Promise<Response>,
+	options?: ItemRequestOptions,
+): Promise<{ response: Response; data: Record<string, unknown> }> {
+	let response: Response | undefined;
+	let data: Record<string, unknown> = {};
+	for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+		response = await request();
+		data = await readJson(response);
+		const code = retryableItemCode(data);
+		if (code !== null) {
+			options?.onOverload?.();
+		}
+		if (response.ok || code === null || attempt === RETRY_DELAYS_MS.length) {
+			return { response, data };
+		}
+		await (options?.sleep ?? sleep)(RETRY_DELAYS_MS[attempt] ?? 16_000);
+	}
+	if (!response) {
+		throw new Error("item request was not sent");
+	}
+	return { response, data };
 }
 
 async function cfFetch(url: string | URL, init?: RequestInit): Promise<Response> {
@@ -115,6 +168,7 @@ export async function uploadItem(
 	key: string,
 	content: string,
 	metadata: Record<string, string>,
+	options?: ItemRequestOptions,
 ): Promise<ItemRecord> {
 	const form = () => {
 		const body = new FormData();
@@ -123,22 +177,19 @@ export async function uploadItem(
 		body.append("wait_for_completion", "true");
 		return body;
 	};
-	let response = await cfFetch(itemsUrl(auth), {
-		method: "POST",
-		headers: { authorization: `Bearer ${auth.apiToken}` },
-		body: form(),
-	});
-	let data = await readJson(response);
-	for (let retry = 0; !response.ok && hasRateLimitError(data) && retry < RETRY_DELAYS_MS.length; retry += 1) {
-		await sleep(RETRY_DELAYS_MS[retry] ?? 16_000);
-		response = await cfFetch(itemsUrl(auth), {
-			method: "POST",
-			headers: { authorization: `Bearer ${auth.apiToken}` },
-			body: form(),
-		});
-		data = await readJson(response);
-	}
+	const { response, data } = await withItemRetries(
+		() =>
+			cfFetch(itemsUrl(auth), {
+				method: "POST",
+				headers: { authorization: `Bearer ${auth.apiToken}` },
+				body: form(),
+			}),
+		options,
+	);
 	if (!response.ok) {
+		if (itemErrorCode(data, ALREADY_EXISTS_CODE) === ALREADY_EXISTS_CODE) {
+			return { id: key, key };
+		}
 		throw new Error(`item upload failed ${key}: ${JSON.stringify(data.errors ?? data)}`);
 	}
 	const result = data.result as ItemRecord;
@@ -148,24 +199,21 @@ export async function uploadItem(
 	return result;
 }
 
-export async function listItems(auth: ItemsAuth): Promise<ItemRecord[]> {
+export async function listItems(auth: ItemsAuth, options?: ItemRequestOptions): Promise<ItemRecord[]> {
 	const items: ItemRecord[] = [];
 	let page = 1;
-	let pageRetries = 0;
 	for (;;) {
 		const url = new URL(itemsUrl(auth));
 		url.searchParams.set("page", String(page));
 		url.searchParams.set("per_page", "50");
 		url.searchParams.set("source", "builtin");
-		const response = await cfFetch(url, {
-			headers: { authorization: `Bearer ${auth.apiToken}` },
-		});
-		const data = await readJson(response);
-		if (!response.ok && hasRateLimitError(data) && pageRetries < RETRY_DELAYS_MS.length) {
-			await sleep(RETRY_DELAYS_MS[pageRetries] ?? 16_000);
-			pageRetries += 1;
-			continue;
-		}
+		const { response, data } = await withItemRetries(
+			() =>
+				cfFetch(url, {
+					headers: { authorization: `Bearer ${auth.apiToken}` },
+				}),
+			options,
+		);
 		if (!response.ok) {
 			throw new Error(`item list failed: ${JSON.stringify(data.errors ?? data)}`);
 		}
@@ -176,17 +224,24 @@ export async function listItems(auth: ItemsAuth): Promise<ItemRecord[]> {
 			break;
 		}
 		page += 1;
-		pageRetries = 0;
 	}
 	return items;
 }
 
-export async function deleteItem(auth: ItemsAuth, itemId: string): Promise<void> {
-	const response = await cfFetch(itemsUrl(auth, `/${itemId}`), {
-		method: "DELETE",
-		headers: { authorization: `Bearer ${auth.apiToken}` },
-	});
+export async function deleteItem(
+	auth: ItemsAuth,
+	itemId: string,
+	options?: ItemRequestOptions,
+): Promise<void> {
+	const { response, data } = await withItemRetries(
+		() =>
+			cfFetch(itemsUrl(auth, `/${itemId}`), {
+				method: "DELETE",
+				headers: { authorization: `Bearer ${auth.apiToken}` },
+			}),
+		options,
+	);
 	if (!response.ok && response.status !== 404) {
-		throw new Error(`item delete failed ${itemId}: ${JSON.stringify(await readJson(response))}`);
+		throw new Error(`item delete failed ${itemId}: ${JSON.stringify(data.errors ?? data)}`);
 	}
 }

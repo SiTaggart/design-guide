@@ -217,9 +217,11 @@ bun run reindex
 
 Debug one system with `SYSTEM=primer bun run reindex`.
 
-Each system runs one Browser Run `/crawl` job from its `startUrl` with `source: "all"` and the Cloudflare maximum `limit` and `depth`. Both are 100000, defined once as `CRAWL_LIMIT` and `CRAWL_DEPTH` in `src/config/instance.ts`. The Workflow polls every two minutes. The debug CLI polls every 15 seconds. A job may run up to the seven days Cloudflare allows. A full-site crawl takes hours.
+Each system runs one Browser Run `/crawl` job from its `startUrl` with `source: "all"`. `CRAWL_LIMIT` is 500 pages and `CRAWL_DEPTH` is 100000, both in `src/config/instance.ts`. A crawl that reaches the page cap fails that system and keeps the previous generation. The Workflow polls every two minutes. It uploads each crawl result page in its own step and does not collect the corpus into one array. The debug CLI polls every 15 seconds and still collects that system's pages in memory. A job may run up to the seven days Cloudflare allows.
 
-Reindex deletes items whose key prefix is not a current `SYSTEM_IDS` seed. Each system uploads a new generation, then deletes that system's old keys only after every upload succeeds. A failed generation is deleted. The previous good items stay. A crawl that fails, hits the limit, or produces a stub (`usable < 2`) does not swap. Stubs are parked in KV. DIY Vectorize is not on this path.
+Upload and delete retry AI Search errors 1015, 7009, and 7114 with backoff. When those retries are exhausted, the system keeps the previous generation and records an error. After a system sees one of those errors, the Workflow sleeps 30 seconds before the next system. Deploy-drift starts at most three stale systems per workflow. The next cron continues the rest. The seed list stays fourteen systems.
+
+Reindex deletes items whose key prefix is not a current `SYSTEM_IDS` seed. Each system uploads a new generation, then deletes that system's old keys only after every upload succeeds. A failed generation is deleted while an older generation is still present. If a retry fails after that older generation is already gone, the uploaded generation stays. A crawl that fails, hits the limit, or produces a stub (`usable < 2`) does not swap. Stubs are parked in KV. DIY Vectorize is not on this path.
 
 The CLI prints a JSON array with one result per system:
 
