@@ -1,6 +1,8 @@
 import type { SearchResponse } from "../config/types.ts";
+import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
 import { searchCitations } from "../index/ai-search.ts";
+import { loadLiveSystemIds } from "../index/parks.ts";
 import { parseSearchRequest, type ParseResult } from "./parse.ts";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
@@ -11,12 +13,30 @@ export type SearchOutcome =
 	| { kind: "ok"; body: SearchResponse }
 	| { kind: "index_not_ready" };
 
-export async function resolveSearch(env: WorkerEnv, parsed: ParseResult): Promise<SearchOutcome> {
+export function parkedFromLive(live: ReadonlySet<SystemId>): Set<string> {
+	return new Set(SYSTEM_IDS.filter((id) => !live.has(id)));
+}
+
+export async function resolveSearch(
+	env: WorkerEnv,
+	parsed: ParseResult,
+	parked?: ReadonlySet<string>,
+): Promise<SearchOutcome> {
 	if (parsed.kind === "query_required" || parsed.kind === "empty") {
 		return parsed;
 	}
 	try {
-		return { kind: "ok", body: await searchCitations(env, parsed.params) };
+		const requested = parsed.params.k;
+		const body = await searchCitations(env, parsed.params, parked);
+		if (!parked?.size) {
+			return { kind: "ok", body };
+		}
+		return {
+			kind: "ok",
+			body: {
+				results: body.results.filter((hit) => !parked.has(hit.system)).slice(0, requested),
+			},
+		};
 	} catch {
 		return { kind: "index_not_ready" };
 	}
@@ -54,5 +74,8 @@ export async function handleSearch(request: Request, env: WorkerEnv, url: URL): 
 			headers: JSON_HEADERS,
 		});
 	}
-	return searchHttpResponse(await resolveSearch(env, await parseSearchRequest(request, url)));
+	const live = await loadLiveSystemIds(env);
+	return searchHttpResponse(
+		await resolveSearch(env, await parseSearchRequest(request, url, live), parkedFromLive(live)),
+	);
 }

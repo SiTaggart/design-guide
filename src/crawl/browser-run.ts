@@ -36,7 +36,7 @@ export type CrawlOutcome = {
 	records: CrawlRecord[];
 };
 
-type CrawlJobResult = {
+export type CrawlJobResult = {
 	status?: string;
 	total?: unknown;
 	finished?: unknown;
@@ -44,10 +44,16 @@ type CrawlJobResult = {
 	cursor?: string | number | null;
 };
 
-type StartResult = { jobId: string } | { httpStatus: number; detail: string };
+export type CrawlJobSnapshot = {
+	status: string;
+	total: number;
+	finished: number;
+};
 
-const POLL_INTERVAL_MS = 15_000;
-const CLOUDFLARE_JOB_MAX_RUN_MS = 7 * 24 * 60 * 60 * 1000;
+export type StartResult = { jobId: string } | { httpStatus: number; detail: string };
+
+export const CLI_POLL_INTERVAL_MS = 15_000;
+export const CRAWL_POLL_DEADLINE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CONSECUTIVE_POLL_FAILURES = 5;
 
 function crawlUrl(accountId: string, jobId?: string): string {
@@ -106,7 +112,15 @@ export function hitCrawlLimit(
 	);
 }
 
-async function startCrawl(auth: CrawlAuth, seed: Seed, startUrl: string): Promise<StartResult> {
+export function snapshotJob(job: Pick<CrawlJobResult, "status" | "total" | "finished">): CrawlJobSnapshot {
+	return {
+		status: job.status ?? "unknown",
+		total: toCount(job.total),
+		finished: toCount(job.finished),
+	};
+}
+
+export async function startCrawl(auth: CrawlAuth, seed: Seed, startUrl: string): Promise<StartResult> {
 	const { ok, status, data } = await cfJson(auth, crawlUrl(auth.accountId), {
 		method: "POST",
 		body: JSON.stringify(crawlRequestBody(seed, startUrl)),
@@ -121,7 +135,7 @@ async function startCrawl(auth: CrawlAuth, seed: Seed, startUrl: string): Promis
 	return { jobId };
 }
 
-async function pollJob(auth: CrawlAuth, jobId: string): Promise<CrawlJobResult> {
+export async function pollJob(auth: CrawlAuth, jobId: string): Promise<CrawlJobResult> {
 	const { ok, status, data } = await cfJson(auth, `${crawlUrl(auth.accountId, jobId)}?limit=1`);
 	if (!ok) {
 		throw new Error(`crawl poll failed ${status}: ${JSON.stringify(data.errors ?? data)}`);
@@ -130,7 +144,7 @@ async function pollJob(auth: CrawlAuth, jobId: string): Promise<CrawlJobResult> 
 }
 
 async function waitForJob(auth: CrawlAuth, jobId: string): Promise<CrawlJobResult> {
-	const deadline = Date.now() + CLOUDFLARE_JOB_MAX_RUN_MS;
+	const deadline = Date.now() + CRAWL_POLL_DEADLINE_MS;
 	let failures = 0;
 	while (Date.now() < deadline) {
 		try {
@@ -145,7 +159,7 @@ async function waitForJob(auth: CrawlAuth, jobId: string): Promise<CrawlJobResul
 				throw error;
 			}
 		}
-		await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+		await new Promise((resolve) => setTimeout(resolve, CLI_POLL_INTERVAL_MS));
 	}
 	throw new Error(`crawl ${jobId} still running at the poll deadline`);
 }
@@ -196,7 +210,10 @@ async function completedRecords(auth: CrawlAuth, jobId: string): Promise<CrawlRe
 	return [...byUrl.values()];
 }
 
-export async function crawlSeed(auth: CrawlAuth, seed: Seed): Promise<CrawlOutcome> {
+export async function startSeedCrawl(
+	auth: CrawlAuth,
+	seed: Seed,
+): Promise<{ startUrl: string; jobId: string }> {
 	let startUrl = seed.startUrl;
 	let started = await startCrawl(auth, seed, startUrl);
 	if (
@@ -211,17 +228,31 @@ export async function crawlSeed(auth: CrawlAuth, seed: Seed): Promise<CrawlOutco
 	if ("httpStatus" in started) {
 		throw new Error(`crawl start for ${startUrl} failed ${started.httpStatus}: ${started.detail}`);
 	}
-	const job = await waitForJob(auth, started.jobId);
+	return { startUrl, jobId: started.jobId };
+}
+
+export async function collectOutcome(
+	auth: CrawlAuth,
+	jobId: string,
+	startUrl: string,
+	job: Pick<CrawlJobResult, "status" | "total" | "finished">,
+): Promise<CrawlOutcome> {
 	return {
 		startUrl,
 		status: job.status ?? "unknown",
 		counts: {
 			total: toCount(job.total),
 			finished: toCount(job.finished),
-			skipped: await countRecords(auth, started.jobId, "skipped"),
-			disallowed: await countRecords(auth, started.jobId, "disallowed"),
-			errored: await countRecords(auth, started.jobId, "errored"),
+			skipped: await countRecords(auth, jobId, "skipped"),
+			disallowed: await countRecords(auth, jobId, "disallowed"),
+			errored: await countRecords(auth, jobId, "errored"),
 		},
-		records: await completedRecords(auth, started.jobId),
+		records: await completedRecords(auth, jobId),
 	};
+}
+
+export async function crawlSeed(auth: CrawlAuth, seed: Seed): Promise<CrawlOutcome> {
+	const started = await startSeedCrawl(auth, seed);
+	const job = await waitForJob(auth, started.jobId);
+	return collectOutcome(auth, started.jobId, started.startUrl, job);
 }

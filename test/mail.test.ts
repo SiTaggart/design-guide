@@ -1,0 +1,375 @@
+import { describe, expect, it, vi } from "vitest";
+import type { SystemId } from "../src/config/types.ts";
+import { LAST_INDEXED_HASH_KEY, startStatusRun } from "../src/index/status.ts";
+import {
+	INDEX_MAIL_FROM,
+	INDEX_MAIL_TO,
+	INDEX_STATUS_URL,
+	MAIL_STEP_RETRIES,
+	finishIndexMail,
+	sendFinishIndexMail,
+	sendIndexMail,
+	sendStartIndexMail,
+	startIndexMail,
+} from "../src/index/mail.ts";
+import { readParks, writePark } from "../src/index/parks.ts";
+import { persistSystemOutcome } from "../src/index/trigger.ts";
+import { ReindexWorkflow } from "../src/workflows/reindex.ts";
+import { fixtureChunks } from "./fixtures/chunks.ts";
+import { envWithIndex, memoryKV, mockWorkflow } from "./helpers/index-env.ts";
+
+vi.mock("../src/index/items-rest.ts", () => ({
+	uploadItem: vi.fn(),
+	deleteItem: vi.fn(),
+	listItems: vi.fn(async () => []),
+	ensureInstance: vi.fn(),
+}));
+
+function mockEmail(): { sent: EmailMessageBuilder[]; binding: SendEmail } {
+	const sent: EmailMessageBuilder[] = [];
+	return {
+		sent,
+		binding: {
+			send: async (message: EmailMessage | EmailMessageBuilder) => {
+				sent.push(message as EmailMessageBuilder);
+				return { messageId: `msg-${sent.length}` };
+			},
+		},
+	};
+}
+
+function recordingStep(): {
+	names: string[];
+	configs: unknown[];
+	step: {
+		do<T>(name: string, configOrCb: unknown, maybeCb?: unknown): Promise<T>;
+		sleep(): Promise<void>;
+	};
+} {
+	const names: string[] = [];
+	const configs: unknown[] = [];
+	return {
+		names,
+		configs,
+		step: {
+			async do<T>(name: string, configOrCb: unknown, maybeCb?: unknown): Promise<T> {
+				names.push(name);
+				const callback = (typeof configOrCb === "function" ? configOrCb : maybeCb) as () => Promise<T>;
+				if (typeof configOrCb !== "function") {
+					configs.push(configOrCb);
+				}
+				return callback();
+			},
+			async sleep() {},
+		},
+	};
+}
+
+const params = {
+	trigger: "deploy-drift" as const,
+	workflowId: "reindex-deploy-drift-mail",
+	systems: ["primer", "garden"] as SystemId[],
+};
+
+describe("index mail", () => {
+	it("composes start mail with trigger, systems, and status URL", () => {
+		const mail = startIndexMail(params);
+		expect(INDEX_MAIL_TO).toBe("simon.taggart@gmail.com");
+		expect(mail.to).toBe("simon.taggart@gmail.com");
+		expect(mail.from).toEqual(INDEX_MAIL_FROM);
+		expect(mail.subject).toBe("design-guide index started (deploy-drift) reindex-deploy-drift-mail");
+		expect(mail.text).toContain("Trigger: deploy-drift");
+		expect(mail.text).toContain("Workflow: reindex-deploy-drift-mail");
+		expect(mail.text).toContain("Systems: primer, garden");
+		expect(mail.text).toContain(`Status: ${INDEX_STATUS_URL}`);
+	});
+
+	it("composes finish mail with systems, counts, parks, errors, and status URL", async () => {
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
+		const mail = finishIndexMail(
+			params,
+			[
+				{
+					system: "garden",
+					startUrl: "https://garden.zendesk.com/",
+					crawl: { total: 1, finished: 1, skipped: 0, disallowed: 0, errored: 0 },
+					indexed: 0,
+					hitLimit: false,
+					keptPrevious: true,
+					parked: true,
+					usable: 1,
+					error: "stub: only 1 usable page(s)",
+				},
+				{
+					system: "primer",
+					startUrl: "https://primer.style/",
+					crawl: { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 },
+					indexed: 0,
+					hitLimit: false,
+					keptPrevious: true,
+					usable: 0,
+					error: "item upload failed primer/x.md: boom",
+				},
+			],
+			await readParks(env),
+		);
+		expect(mail.subject).toBe("design-guide index finished fail (deploy-drift) reindex-deploy-drift-mail");
+		expect(mail.text).toContain("Systems touched: garden, primer");
+		expect(mail.text).toContain("Counts: systems=2 indexed=0 parked=1 errors=1");
+		expect(mail.text).toContain("garden: stub usable=1");
+		expect(mail.text).toContain("index primer: item upload failed primer/x.md: boom");
+		expect(mail.text).toContain("garden indexed=0 usable=1");
+		expect(mail.text).toContain("primer indexed=0 usable=0");
+		expect(mail.text).toContain(`Status: ${INDEX_STATUS_URL}`);
+		expect(mail.text).not.toMatch(/records|markdown/);
+	});
+
+	it("sends through env.EMAIL.send and skips when the binding is missing", async () => {
+		const email = mockEmail();
+		const { env } = envWithIndex(fixtureChunks, true, { EMAIL: email.binding });
+		await expect(sendStartIndexMail(env, params)).resolves.toEqual({ messageId: "msg-1" });
+		expect(email.sent[0]).toEqual({
+			from: INDEX_MAIL_FROM,
+			to: INDEX_MAIL_TO,
+			subject: "design-guide index started (deploy-drift) reindex-deploy-drift-mail",
+			text: expect.stringContaining("Trigger: deploy-drift"),
+		});
+		const { env: unbound } = envWithIndex(fixtureChunks);
+		await expect(sendIndexMail(unbound, startIndexMail(params))).resolves.toEqual({ skipped: "unbound" });
+		expect(email.sent).toHaveLength(1);
+	});
+
+	it("reads parks from KV when sending finish mail", async () => {
+		const email = mockEmail();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, EMAIL: email.binding });
+		await writePark(env, "garden", 0, "2026-09-27T00:00:00.000Z");
+		await expect(
+			sendFinishIndexMail(env, params, [
+				{
+					system: "garden",
+					startUrl: "https://garden.zendesk.com/",
+					crawl: { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 },
+					indexed: 0,
+					hitLimit: false,
+					keptPrevious: true,
+					parked: true,
+					usable: 0,
+					error: "stub: only 0 usable page(s)",
+				},
+			]),
+		).resolves.toEqual({ messageId: "msg-1" });
+		expect(email.sent[0]?.text).toContain("garden: stub usable=0");
+		expect(email.sent[0]?.text).toContain("Errors:\n  (none)");
+	});
+
+	it("mails start and finish on an empty-systems run without writing hashes or last-run", async () => {
+		const email = mockEmail();
+		const kv = memoryKV({ [LAST_INDEXED_HASH_KEY]: "keep-me" });
+		const reindex = mockWorkflow({ existingId: "reindex-drift-live", existingStatus: "running" });
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			EMAIL: email.binding,
+			REINDEX: reindex.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-drift-live" });
+		const { names, configs, step } = recordingStep();
+		const workflow = new ReindexWorkflow({} as ExecutionContext, env);
+		const results = await workflow.run(
+			{
+				payload: {
+					trigger: "deploy-drift",
+					systems: [],
+					catalogHash: "unused",
+					workflowId: "reindex-mail-proof",
+				},
+				timestamp: new Date("2026-09-27T05:00:00.000Z"),
+				instanceId: "reindex-mail-proof",
+				workflowName: "design-guide-reindex",
+			},
+			step as never,
+		);
+		expect(results).toEqual([]);
+		expect(names).toEqual(["ensure-sweep", "mail-start", "finish", "mail-finish"]);
+		expect(configs).toEqual([MAIL_STEP_RETRIES, MAIL_STEP_RETRIES]);
+		expect(email.sent).toHaveLength(2);
+		expect(email.sent[0]?.subject).toContain("index started");
+		expect(email.sent[1]?.subject).toContain("index finished ok");
+		expect(email.sent[1]?.text).toContain("Systems touched: (none)");
+		expect(email.sent[1]?.text).toContain("Counts: systems=0 indexed=0 parked=0 errors=0");
+		expect(kv.store.get(LAST_INDEXED_HASH_KEY)).toBe("keep-me");
+		expect(JSON.parse(kv.store.get("status") ?? "{}")).toMatchObject({
+			workflowId: "reindex-drift-live",
+			state: "running",
+		});
+	});
+
+	it("attempts start and finish mail when a system parks and the run still completes", async () => {
+		const email = mockEmail();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			EMAIL: email.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const { names, step } = recordingStep();
+		const originalDo = step.do.bind(step);
+		step.do = async <T>(name: string, configOrCb: unknown, maybeCb?: unknown): Promise<T> => {
+			if (name.startsWith("start-")) {
+				names.push(name);
+				return { startUrl: "https://garden.zendesk.com/", jobId: "job-park" } as T;
+			}
+			if (name.startsWith("poll-")) {
+				names.push(name);
+				return { status: "completed", total: 1, finished: 1, skipped: 0, disallowed: 0, errored: 0 } as T;
+			}
+			if (name.startsWith("apply-")) {
+				names.push(name);
+				const result = {
+					system: "garden" as const,
+					startUrl: "https://garden.zendesk.com/",
+					crawl: { total: 1, finished: 1, skipped: 0, disallowed: 0, errored: 0 },
+					indexed: 0,
+					hitLimit: false,
+					keptPrevious: true,
+					parked: true,
+					usable: 1,
+					error: "stub: only 1 usable page(s)",
+				};
+				await persistSystemOutcome(env, result);
+				return result as T;
+			}
+			return originalDo(name, configOrCb, maybeCb);
+		};
+		const workflow = new ReindexWorkflow({} as ExecutionContext, env);
+		const results = await workflow.run(
+			{
+				payload: {
+					trigger: "deploy-drift",
+					systems: ["garden"],
+					catalogHash: "unused",
+					workflowId: "reindex-mail-park",
+				},
+				timestamp: new Date("2026-09-27T05:00:00.000Z"),
+				instanceId: "reindex-mail-park",
+				workflowName: "design-guide-reindex",
+			},
+			step as never,
+		);
+		expect(results[0]).toMatchObject({ system: "garden", parked: true, usable: 1 });
+		expect(names).toEqual([
+			"ensure-sweep",
+			"mail-start",
+			"start-garden",
+			"poll-garden-0",
+			"apply-garden",
+			"finish",
+			"mail-finish",
+		]);
+		expect(email.sent).toHaveLength(2);
+		expect(email.sent[0]?.to).toBe("simon.taggart@gmail.com");
+		expect(email.sent[0]?.subject).toContain("index started");
+		expect(email.sent[1]?.to).toBe("simon.taggart@gmail.com");
+		expect(email.sent[1]?.subject).toContain("index finished ok");
+		expect(email.sent[1]?.text).toContain("garden: stub usable=1");
+		expect(email.sent[1]?.text).toContain("Counts: systems=1 indexed=0 parked=1 errors=0");
+		expect(email.sent[1]?.text).toContain(`Status: ${INDEX_STATUS_URL}`);
+	});
+
+	it("attempts start and finish mail when a system fails and the run still completes", async () => {
+		const email = mockEmail();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			EMAIL: email.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const { names, step } = recordingStep();
+		const originalDo = step.do.bind(step);
+		step.do = async <T>(name: string, configOrCb: unknown, maybeCb?: unknown): Promise<T> => {
+			if (name.startsWith("start-")) {
+				names.push(name);
+				return { error: "crawl ended failed" } as T;
+			}
+			return originalDo(name, configOrCb, maybeCb);
+		};
+		const workflow = new ReindexWorkflow({} as ExecutionContext, env);
+		const results = await workflow.run(
+			{
+				payload: {
+					trigger: "deploy-drift",
+					systems: ["garden"],
+					catalogHash: "unused",
+					workflowId: "reindex-mail-system-fail",
+				},
+				timestamp: new Date("2026-09-27T05:00:00.000Z"),
+				instanceId: "reindex-mail-system-fail",
+				workflowName: "design-guide-reindex",
+			},
+			step as never,
+		);
+		expect(results[0]).toMatchObject({ system: "garden", error: "crawl ended failed" });
+		expect(names).toEqual(["ensure-sweep", "mail-start", "start-garden", "record-garden", "finish", "mail-finish"]);
+		expect(email.sent).toHaveLength(2);
+		expect(email.sent[0]).toMatchObject({
+			from: INDEX_MAIL_FROM,
+			to: "simon.taggart@gmail.com",
+			subject: expect.stringContaining("index started"),
+		});
+		expect(email.sent[1]?.to).toBe("simon.taggart@gmail.com");
+		expect(email.sent[1]?.subject).toContain("index finished fail");
+		expect(email.sent[1]?.text).toContain("garden");
+		expect(email.sent[1]?.text).toContain(`Status: ${INDEX_STATUS_URL}`);
+	});
+
+	it("sends finish mail after a run-level fail", async () => {
+		const email = mockEmail();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			EMAIL: email.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const { names, step } = recordingStep();
+		const originalDo = step.do.bind(step);
+		step.do = async (name, configOrCb, maybeCb) => {
+			if (name === "ensure-sweep") {
+				names.push(name);
+				throw new Error("sweep boom");
+			}
+			return originalDo(name, configOrCb, maybeCb);
+		};
+		const workflow = new ReindexWorkflow({} as ExecutionContext, env);
+		await workflow.run(
+			{
+				payload: {
+					trigger: "deploy-drift",
+					systems: ["primer"],
+					catalogHash: "unused",
+					workflowId: "reindex-mail-fail",
+				},
+				timestamp: new Date("2026-09-27T05:00:00.000Z"),
+				instanceId: "reindex-mail-fail",
+				workflowName: "design-guide-reindex",
+			},
+			step as never,
+		);
+		expect(names).toEqual(["ensure-sweep", "finish", "mail-finish"]);
+		expect(email.sent).toHaveLength(1);
+		expect(email.sent[0]?.subject).toContain("index finished fail (deploy-drift)");
+		expect(email.sent[0]?.text).toContain("run: sweep boom");
+		expect(email.sent[0]?.text).toContain(`Status: ${INDEX_STATUS_URL}`);
+		expect(JSON.parse(kv.store.get("status") ?? "{}")).toMatchObject({
+			state: "fail",
+			runError: "sweep boom",
+			workflowId: "reindex-mail-fail",
+		});
+	});
+});

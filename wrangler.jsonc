@@ -14,5 +14,36 @@
 			"namespace": "default",
 			"remote": true
 		}
+	],
+	"triggers": {
+		"crons": ["*/5 * * * *", "0 4 * * *"]
+	},
+	"kv_namespaces": [
+		{
+			"binding": "INDEX",
+			"id": "3f237a1d02004d97be02089dbbf14c16",
+			"preview_id": "eb078c35c3894d2b96370964fa6ac34d"
+		}
+	],
+	"workflows": [
+		{
+			"name": "design-guide-reindex",
+			"binding": "REINDEX",
+			"class_name": "ReindexWorkflow",
+			"limits": {
+				"steps": 25000
+			}
+		}
+	],
+	"limits": {
+		"subrequests": 1000000
+	},
+	"secrets": {
+		"required": ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]
+	},
+	"send_email": [
+		{
+			"name": "EMAIL"
+		}
 	]
 }

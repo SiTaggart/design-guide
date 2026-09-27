@@ -2,6 +2,8 @@ import { INSTANCE_ID } from "../config/instance.ts";
 import type { SearchChunk, SearchParams, SearchResponse } from "../config/types.ts";
 import { keepScoredChunks, mapChunks } from "../serve/map-chunks.ts";
 
+export type SystemFilter = string | { $nin: readonly string[] } | { $in: readonly string[] };
+
 export type SearchCall = {
 	query: string;
 	ai_search_options: {
@@ -10,7 +12,7 @@ export type SearchCall = {
 			max_num_results: number;
 			retrieval_type: "hybrid";
 			keyword_match_mode: "or";
-			filters?: { system: string };
+			filters?: { system: SystemFilter };
 		};
 	};
 };
@@ -32,13 +34,34 @@ export type AiSearchNamespace = {
 
 export type WorkerEnv = {
 	AI_SEARCH: AiSearchNamespace;
+	INDEX?: KVNamespace;
+	REINDEX?: Workflow;
+	CLOUDFLARE_ACCOUNT_ID?: string;
+	CLOUDFLARE_API_TOKEN?: string;
+	INDEX_WEBHOOK_URL?: string;
+	EMAIL?: SendEmail;
 };
+
+function retrievalFilters(
+	params: SearchParams,
+	excludeSystems?: ReadonlySet<string>,
+): { system: SystemFilter } | undefined {
+	if (params.system) {
+		return { system: params.system };
+	}
+	if (excludeSystems?.size) {
+		return { system: { $nin: [...excludeSystems] } };
+	}
+	return undefined;
+}
 
 export async function searchCitations(
 	env: WorkerEnv,
 	params: SearchParams,
+	excludeSystems?: ReadonlySet<string>,
 ): Promise<SearchResponse> {
 	const instance = env.AI_SEARCH.get(INSTANCE_ID);
+	const filters = retrievalFilters(params, excludeSystems);
 	const result = await instance.search({
 		query: params.query,
 		ai_search_options: {
@@ -47,7 +70,7 @@ export async function searchCitations(
 				max_num_results: params.k,
 				retrieval_type: "hybrid",
 				keyword_match_mode: "or",
-				...(params.system ? { filters: { system: params.system } } : {}),
+				...(filters ? { filters } : {}),
 			},
 		},
 	});

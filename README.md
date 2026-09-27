@@ -8,7 +8,7 @@ See [docs/architecture.md](docs/architecture.md).
 
 `https://design-guide.me-2c5.workers.dev`
 
-Deploy prints the live URL. There is no auth on `/health`, `/v1/search`, or `/mcp`.
+Deploy prints the live URL. There is no auth on `/health`, `/v1/index-status`, `/v1/search`, or `/mcp`.
 
 ## MCP
 
@@ -168,6 +168,8 @@ A missing query returns `400` with `{ "error": "query_required" }`. No matches a
 
 `GET /health` returns `200` when at least one completed item exists. Otherwise it returns `503`.
 
+`GET /v1/index-status` returns last-run JSON: workflow id, parks, per-system counts, and crawl/render/index errors.
+
 ## Seed
 
 Config lives in `src/config/seed.ts`. A seed is one crawl from a single `startUrl`, not a curated page list. The locked systems and their start URLs are:
@@ -191,13 +193,21 @@ Config lives in `src/config/seed.ts`. A seed is one crawl from a single `startUr
 
 Spectrum and Carbon are parked as crawl misses. Their items are deleted. They are not in the seed. Every seed excludes spectrum.adobe.com and carbondesignsystem.com. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` scopes uswds to its host, backpack to `/latest/**`, siemens-ix to `/docs/**`, and ouds-web to `/orange/` including `docs/1.5`. ouds-web also excludes `docs/0.4`. No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`. The CLI uses that URL only when the primary crawl start returns a 4xx or 5xx. A `llms.txt` start for siemens-ix finished 1 page and produced 0 usable records, because Browser Run did not follow the markdown links.
 
-Change the seed, then reindex. There is no admin UI.
+Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron compares that hash to `lastIndexedHash` in KV and starts the reindex Workflow for new or changed systems. A daily cron recrawls non-parked systems. There is no admin UI. There is no GitHub Actions crawl job.
+
+`GET /v1/index-status` is the last-run record: per-system counts, parks, crawl/render/index errors, and the workflow id. Slack is not the health path.
+
+The Workflow emails start and finish through the Worker `send_email` binding. Each mail step is its own `step.do` with retries and calls `env.EMAIL.send({ from, to, subject, text })`. There is no REST/SMTP path, no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift` or `recrawl`), workflow id, and systems kicked. Finish mail (success or fail) includes systems, counts, parks, errors, and the status URL. Index swap commits before finish mail.
+
+`wrangler.jsonc` binds `EMAIL` the same way as team-retros: `{ "name": "EMAIL" }` (no `destination_address`). The Workflow sends `to: simon.taggart@gmail.com` (the verified Email Routing destination for this account; `me@simontaggart.com` is not a send destination) and `from: design-guide@simontaggart.com` (same routed zone as this Worker). `EMAIL` is a binding, not a secret. There is no Resend, Mailchannels, SES, or agent mailer. The Worker secrets stay **CLOUDFLARE_ACCOUNT_ID** and **CLOUDFLARE_API_TOKEN**.
 
 ## Reindex
 
-Reindex is an operator CLI. Browser Run `/crawl` is REST-only and long-running, so it does not run on the public Worker.
+The happy path is a Cloudflare Workflow. It reuses the crawl → item-swap logic in `src/index/reindex.ts` and polls Browser Run with Workflow `step.sleep`. A stub (`usable < 2`) does not swap. The Workflow writes park state to KV, and search/MCP drop parked systems from the live set.
 
-The token needs **Browser Rendering - Edit**, **AI Search:Edit**, **AI Search:Run**, and Workers deploy if you also ship the Worker.
+`bun run reindex` is debug-only. Do not use it as the indexing runner.
+
+The Worker secrets are **CLOUDFLARE_ACCOUNT_ID** and **CLOUDFLARE_API_TOKEN**. The token needs **Browser Rendering - Edit**, **AI Search:Edit**, and **AI Search:Run**.
 
 ```bash
 export CLOUDFLARE_ACCOUNT_ID=...
@@ -205,11 +215,11 @@ export CLOUDFLARE_API_TOKEN=...
 bun run reindex
 ```
 
-Reindex one system with `SYSTEM=primer bun run reindex`.
+Debug one system with `SYSTEM=primer bun run reindex`.
 
-Each system runs one Browser Run `/crawl` job from its `startUrl` with `source: "all"` and the Cloudflare maximum `limit` and `depth`. Both are 100000, defined once as `CRAWL_LIMIT` and `CRAWL_DEPTH` in `src/config/instance.ts`. The CLI polls the job every 15 seconds for up to the seven days Cloudflare allows a job to run. A full-site crawl takes hours.
+Each system runs one Browser Run `/crawl` job from its `startUrl` with `source: "all"` and the Cloudflare maximum `limit` and `depth`. Both are 100000, defined once as `CRAWL_LIMIT` and `CRAWL_DEPTH` in `src/config/instance.ts`. The Workflow polls every two minutes. The debug CLI polls every 15 seconds. A job may run up to the seven days Cloudflare allows. A full-site crawl takes hours.
 
-Reindex deletes items whose key prefix is not a current `SYSTEM_IDS` seed. Each system uploads a new generation, then deletes that system's old keys only after every upload succeeds. A failed generation is deleted. The previous good items stay. A crawl that fails, returns no usable records, returns a 1-page stub, or hits the limit does not swap. DIY Vectorize is not on this path.
+Reindex deletes items whose key prefix is not a current `SYSTEM_IDS` seed. Each system uploads a new generation, then deletes that system's old keys only after every upload succeeds. A failed generation is deleted. The previous good items stay. A crawl that fails, hits the limit, or produces a stub (`usable < 2`) does not swap. Stubs are parked in KV. DIY Vectorize is not on this path.
 
 The CLI prints a JSON array with one result per system:
 

@@ -28,6 +28,8 @@ export type SystemReindexResult = {
 	keptPrevious: boolean;
 	deleted?: number;
 	error?: string;
+	parked?: boolean;
+	usable?: number;
 };
 
 const EMPTY_COUNTS: CrawlCounts = { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 };
@@ -39,6 +41,17 @@ function itemKey(system: SystemId, generation: string, pageUrl: string): string 
 
 function generationId(now = new Date()): string {
 	return now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z").toLowerCase();
+}
+
+export function swapGeneration(system: SystemId, durableId?: string, now = new Date()): string {
+	if (!durableId) {
+		return generationId(now);
+	}
+	return createHash("sha256").update(`${durableId}\0${system}`).digest("hex").slice(0, 16);
+}
+
+function isSystemGenerationKey(key: string, system: SystemId, generation: string): boolean {
+	return key.startsWith(`${system}/${generation}/`);
 }
 
 export function fitsItem(record: CrawlRecord, seed: Seed): boolean {
@@ -78,29 +91,30 @@ export async function deleteDroppedSystemItems(auth: ItemsAuth): Promise<number>
 	return deleteItems(auth, isDroppedSystemKey);
 }
 
-export async function reindexSystem(
+export function reindexFailure(seed: Seed, error: string): SystemReindexResult {
+	return {
+		system: seed.id,
+		startUrl: seed.startUrl,
+		crawl: EMPTY_COUNTS,
+		indexed: 0,
+		hitLimit: false,
+		keptPrevious: true,
+		usable: 0,
+		error,
+	};
+}
+
+export async function swapFromOutcome(
 	auth: ReindexAuth,
 	seed: Seed,
+	outcome: CrawlOutcome,
+	options?: { generation?: string },
 ): Promise<SystemReindexResult> {
 	const itemsAuth: ItemsAuth = {
 		accountId: auth.accountId,
 		apiToken: auth.apiToken,
 		instanceId: auth.instanceId ?? INSTANCE_ID,
 	};
-	let outcome: CrawlOutcome;
-	try {
-		outcome = await crawlSeed(auth, seed);
-	} catch (error) {
-		return {
-			system: seed.id,
-			startUrl: seed.startUrl,
-			crawl: EMPTY_COUNTS,
-			indexed: 0,
-			hitLimit: false,
-			keptPrevious: true,
-			error: errorMessage(error),
-		};
-	}
 	const usable = outcome.records.filter((record) => fitsItem(record, seed));
 	const kept: SystemReindexResult = {
 		system: seed.id,
@@ -109,6 +123,7 @@ export async function reindexSystem(
 		indexed: 0,
 		hitLimit: hitCrawlLimit(outcome, usable.length),
 		keptPrevious: true,
+		usable: usable.length,
 	};
 	if (kept.hitLimit) {
 		return { ...kept, error: `crawl hit the ${CRAWL_LIMIT} page limit` };
@@ -116,14 +131,10 @@ export async function reindexSystem(
 	if (outcome.status !== "completed") {
 		return { ...kept, error: `crawl ended ${outcome.status}` };
 	}
-	if (usable.length === 0) {
-		return { ...kept, error: "no usable crawl records" };
-	}
 	if (isStubGeneration(usable.length)) {
-		return { ...kept, error: `stub: only ${usable.length} usable page(s)` };
+		return { ...kept, parked: true, error: `stub: only ${usable.length} usable page(s)` };
 	}
-	const generation = generationId();
-	const uploadedKeys = new Set<string>();
+	const generation = options?.generation ?? swapGeneration(seed.id);
 	try {
 		for (const record of usable) {
 			const key = itemKey(seed.id, generation, record.url);
@@ -132,17 +143,29 @@ export async function reindexSystem(
 				source: seed.source,
 				source_url: record.url,
 			});
-			uploadedKeys.add(key);
 		}
 	} catch (error) {
-		await deleteItems(itemsAuth, (key) => key.startsWith(`${seed.id}/${generation}/`));
+		await deleteItems(itemsAuth, (key) => isSystemGenerationKey(key, seed.id, generation));
 		return { ...kept, error: errorMessage(error) };
 	}
 	const deleted = await deleteItems(
 		itemsAuth,
-		(key) => key.startsWith(`${seed.id}/`) && !uploadedKeys.has(key),
+		(key) => key.startsWith(`${seed.id}/`) && !isSystemGenerationKey(key, seed.id, generation),
 	);
-	return { ...kept, indexed: uploadedKeys.size, deleted, keptPrevious: false };
+	return { ...kept, indexed: usable.length, deleted, keptPrevious: false };
+}
+
+export async function reindexSystem(
+	auth: ReindexAuth,
+	seed: Seed,
+): Promise<SystemReindexResult> {
+	let outcome: CrawlOutcome;
+	try {
+		outcome = await crawlSeed(auth, seed);
+	} catch (error) {
+		return reindexFailure(seed, errorMessage(error));
+	}
+	return swapFromOutcome(auth, seed, outcome);
 }
 
 export async function reindex(
