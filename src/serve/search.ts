@@ -2,7 +2,7 @@ import type { SearchResponse } from "../config/types.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
 import { searchCitations } from "../index/ai-search.ts";
-import { liveSystemIds, readParks } from "../index/parks.ts";
+import { liveSet } from "../index/retrieval-hold.ts";
 import { parseSearchRequest, type ParseResult } from "./parse.ts";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
@@ -74,11 +74,10 @@ export async function handleSearch(request: Request, env: WorkerEnv, url: URL): 
 			headers: JSON_HEADERS,
 		});
 	}
-	const parksRead = await readParks(env);
-	if (parksRead.kind === "unread") {
+	const live = await liveSet(env);
+	if (!live) {
 		return searchHttpResponse({ kind: "index_not_ready" });
 	}
-	const live = new Set(liveSystemIds(parksRead.parks));
 	return searchHttpResponse(
 		await resolveSearch(env, await parseSearchRequest(request, url, live), parkedFromLive(live)),
 	);

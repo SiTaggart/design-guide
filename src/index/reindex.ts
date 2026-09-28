@@ -32,6 +32,7 @@ export type SystemReindexResult = {
 	error?: string;
 	parked?: boolean;
 	usable?: number;
+	held?: boolean;
 };
 
 const EMPTY_COUNTS: CrawlCounts = { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 };
@@ -329,6 +330,8 @@ export type CrawlPage = {
 	cursor: string | number | null;
 };
 
+type StoredUrl = { url: string; id: string };
+
 type SwapStep = <T extends Rpc.Serializable<T>>(name: string, run: () => Promise<T>) => Promise<T>;
 
 function failedStep(error: unknown, overloaded: boolean): { error: string; overloaded: boolean } {
@@ -372,7 +375,7 @@ export async function streamSwap(
 	}
 
 	let cursor: string | number | undefined;
-	let seen: string[] = [];
+	let seen: StoredUrl[] = [];
 	let usable = 0;
 	let page = 0;
 	let truncated = false;
@@ -380,26 +383,46 @@ export async function streamSwap(
 		const known = seen;
 		const batch = await step(`upload-${seed.id}-${page}`, async () => {
 			let overloaded = false;
+			const options: ItemRequestOptions = {
+				onOverload: () => {
+					overloaded = true;
+				},
+			};
 			try {
 				const fetched = await input.fetchPage(cursor);
-				const fresh: CrawlRecord[] = [];
-				const urls = new Set(known);
+				const latest = new Map<string, CrawlRecord>();
 				for (const record of indexableRecords(fetched.records, seed)) {
-					if (urls.has(record.url)) {
-						continue;
-					}
-					urls.add(record.url);
-					fresh.push(record);
+					latest.set(record.url, record);
 				}
-				await uploadFittedRecords(auth, seed, input.generation, fresh, {
-					onOverload: () => {
-						overloaded = true;
-					},
-				});
+				const ids = new Map(known.map((item) => [item.url, item.id]));
+				const stored: StoredUrl[] = [];
+				let uploaded = 0;
+				const itemsAuth = itemsAuthFrom(auth);
+				for (const record of latest.values()) {
+					const previous = ids.get(record.url);
+					if (previous) {
+						await deleteItem(itemsAuth, previous, options);
+					} else {
+						uploaded += 1;
+					}
+					const item = await uploadItem(
+						itemsAuth,
+						itemKey(seed.id, input.generation, record.url),
+						record.markdown ?? "",
+						{
+							system: seed.id,
+							source: seed.source,
+							source_url: record.url,
+						},
+						options,
+					);
+					ids.set(record.url, item.id);
+					stored.push({ url: record.url, id: item.id });
+				}
 				return {
 					ok: true as const,
-					uploaded: fresh.length,
-					urls: fresh.map((record) => record.url),
+					uploaded,
+					urls: stored,
 					cursor: fetched.cursor,
 					overloaded,
 				};
@@ -457,7 +480,11 @@ export async function streamSwap(
 				error: batch.error,
 			};
 		}
-		seen = [...seen, ...batch.urls];
+		const byUrl = new Map(seen.map((item) => [item.url, item.id]));
+		for (const item of batch.urls) {
+			byUrl.set(item.url, item.id);
+		}
+		seen = [...byUrl].map(([url, id]) => ({ url, id }));
 		usable += batch.uploaded;
 		page += 1;
 		if (batch.cursor === null) {
@@ -509,14 +536,27 @@ export async function streamSwap(
 	if (committed.kind === "keep") {
 		return keepResult(seed, input.startUrl, committed.counts, usable, committed.decision);
 	}
-	if (committed.kind === "commit-failed" || committed.kind === "cleanup-failed") {
+	if (committed.kind === "cleanup-failed") {
 		return {
 			system: seed.id,
 			startUrl: input.startUrl,
 			crawl: committed.counts,
 			indexed: 0,
 			hitLimit: false,
-			keptPrevious: committed.kind === "cleanup-failed",
+			keptPrevious: true,
+			usable,
+			held: true,
+			error: committed.error,
+		};
+	}
+	if (committed.kind === "commit-failed") {
+		return {
+			system: seed.id,
+			startUrl: input.startUrl,
+			crawl: committed.counts,
+			indexed: 0,
+			hitLimit: false,
+			keptPrevious: false,
 			usable,
 			error: committed.error,
 		};

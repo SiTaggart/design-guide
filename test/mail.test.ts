@@ -267,7 +267,7 @@ describe("index mail", () => {
 				return {
 					ok: true,
 					uploaded: 1,
-					urls: ["https://garden.zendesk.com/"],
+					urls: [{ url: "https://garden.zendesk.com/", id: "garden-1" }],
 					cursor: null,
 					overloaded: false,
 				} as T;
@@ -443,7 +443,10 @@ describe("index mail", () => {
 				return {
 					ok: true,
 					uploaded: 2,
-					urls: ["https://garden.zendesk.com/a", "https://garden.zendesk.com/b"],
+					urls: [
+						{ url: "https://garden.zendesk.com/a", id: "garden-a" },
+						{ url: "https://garden.zendesk.com/b", id: "garden-b" },
+					],
 					cursor: null,
 					overloaded: false,
 				} as T;

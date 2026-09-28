@@ -3,6 +3,7 @@ import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
 import { clearPark, liveSystemIds, parkedSystemIds, readParks, writePark, type Parks } from "./parks.ts";
+import { clearRetrievalHold, holdRetrieval } from "./retrieval-hold.ts";
 import type { SystemReindexResult } from "./reindex.ts";
 import { SEED_HASH, driftedSystems, systemSeedHash } from "./seed-hash.ts";
 import {
@@ -149,6 +150,10 @@ export async function persistSystemOutcome(
 		if (seed) {
 			await writeIndexedHash(env, result.system, systemSeedHash(seed));
 		}
+		await clearRetrievalHold(env, result.system);
+	}
+	if (result.held) {
+		await holdRetrieval(env, result.system);
 	}
 	const document = await recordSystemResult(env, result, unparked);
 	if (result.parked) {
