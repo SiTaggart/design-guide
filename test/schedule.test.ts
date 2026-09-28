@@ -78,6 +78,27 @@ describe("decideReindex", () => {
 		expect(workflow.created[0]?.params?.trigger).toBe("deploy-drift");
 	});
 
+	it("starts a drift workflow for only the first three stale systems", async () => {
+		const kv = memoryKV();
+		const workflow = mockWorkflow();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			REINDEX: workflow.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const decision = await decideReindex(env, DRIFT_CRON);
+		expect(decision).toEqual({
+			action: "start",
+			trigger: "deploy-drift",
+			systems: ["paste", "primer", "uswds"],
+			catalogHash: SEED_HASH,
+		});
+		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
+		expect(workflow.created).toHaveLength(1);
+		expect(workflow.created[0]?.params?.systems).toEqual(["paste", "primer", "uswds"]);
+	});
+
 	it("recovers only parked seeds", async () => {
 		const kv = memoryKV();
 		const workflow = mockWorkflow();

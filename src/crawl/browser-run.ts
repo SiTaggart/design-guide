@@ -107,8 +107,8 @@ export function hitCrawlLimit(
 ): boolean {
 	return (
 		outcome.status === "cancelled_due_to_limits" ||
-		outcome.counts.finished === CRAWL_LIMIT ||
-		indexed === CRAWL_LIMIT
+		outcome.counts.finished >= CRAWL_LIMIT ||
+		indexed >= CRAWL_LIMIT
 	);
 }
 
@@ -164,6 +164,29 @@ async function waitForJob(auth: CrawlAuth, jobId: string): Promise<CrawlJobResul
 	throw new Error(`crawl ${jobId} still running at the poll deadline`);
 }
 
+export async function fetchCrawlPage(
+	auth: CrawlAuth,
+	jobId: string,
+	recordStatus: string,
+	cursor?: string | number,
+): Promise<{ records: CrawlRecord[]; cursor: string | number | null }> {
+	const query = new URL(crawlUrl(auth.accountId, jobId));
+	query.searchParams.set("status", recordStatus);
+	if (cursor !== undefined) {
+		query.searchParams.set("cursor", String(cursor));
+	}
+	const { ok, status, data } = await cfJson(auth, query.toString());
+	if (!ok) {
+		throw new Error(`crawl results failed ${status}: ${JSON.stringify(data.errors ?? data)}`);
+	}
+	const result = (data.result ?? {}) as CrawlJobResult;
+	const next = result.cursor;
+	if (next === undefined || next === null || next === "" || next === cursor) {
+		return { records: result.records ?? [], cursor: null };
+	}
+	return { records: result.records ?? [], cursor: next };
+}
+
 async function* pageRecords(
 	auth: CrawlAuth,
 	jobId: string,
@@ -171,22 +194,12 @@ async function* pageRecords(
 ): AsyncGenerator<CrawlRecord[]> {
 	let cursor: string | number | undefined;
 	for (;;) {
-		const query = new URL(crawlUrl(auth.accountId, jobId));
-		query.searchParams.set("status", recordStatus);
-		if (cursor !== undefined) {
-			query.searchParams.set("cursor", String(cursor));
-		}
-		const { ok, status, data } = await cfJson(auth, query.toString());
-		if (!ok) {
-			throw new Error(`crawl results failed ${status}: ${JSON.stringify(data.errors ?? data)}`);
-		}
-		const result = (data.result ?? {}) as CrawlJobResult;
-		yield result.records ?? [];
-		const next = result.cursor;
-		if (next === undefined || next === null || next === "" || next === cursor) {
+		const page = await fetchCrawlPage(auth, jobId, recordStatus, cursor);
+		yield page.records;
+		if (page.cursor === null) {
 			return;
 		}
-		cursor = next;
+		cursor = page.cursor;
 	}
 }
 
@@ -231,6 +244,20 @@ export async function startSeedCrawl(
 	return { startUrl, jobId: started.jobId };
 }
 
+export async function crawlStatusCounts(
+	auth: CrawlAuth,
+	jobId: string,
+	job: Pick<CrawlJobResult, "total" | "finished">,
+): Promise<CrawlCounts> {
+	return {
+		total: toCount(job.total),
+		finished: toCount(job.finished),
+		skipped: await countRecords(auth, jobId, "skipped"),
+		disallowed: await countRecords(auth, jobId, "disallowed"),
+		errored: await countRecords(auth, jobId, "errored"),
+	};
+}
+
 export async function collectOutcome(
 	auth: CrawlAuth,
 	jobId: string,
@@ -240,13 +267,7 @@ export async function collectOutcome(
 	return {
 		startUrl,
 		status: job.status ?? "unknown",
-		counts: {
-			total: toCount(job.total),
-			finished: toCount(job.finished),
-			skipped: await countRecords(auth, jobId, "skipped"),
-			disallowed: await countRecords(auth, jobId, "disallowed"),
-			errored: await countRecords(auth, jobId, "errored"),
-		},
+		counts: await crawlStatusCounts(auth, jobId, job),
 		records: await completedRecords(auth, jobId),
 	};
 }

@@ -3,6 +3,7 @@ import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
 import { clearPark, liveSystemIds, parkedSystemIds, readParks, writePark, type Parks } from "./parks.ts";
+import { clearRetrievalHold, holdRetrieval } from "./retrieval-hold.ts";
 import type { SystemReindexResult } from "./reindex.ts";
 import { SEED_HASH, driftedSystems, systemSeedHash } from "./seed-hash.ts";
 import {
@@ -17,6 +18,7 @@ import {
 } from "./status.ts";
 
 export const DRIFT_CRON = "*/5 * * * *";
+const DRIFT_BATCH_LIMIT = 3;
 export const RECRAWL_CRON = "0 4 * * *";
 export const RECOVERY_CRON = "0 6 * * 0";
 
@@ -63,7 +65,7 @@ export async function decideReindex(env: WorkerEnv, cron: string): Promise<Trigg
 		return { action: "skip", reason: "unread-parks" };
 	}
 	if (cron === DRIFT_CRON) {
-		const systems = driftedSystems(await readIndexedHashes(env));
+		const systems = driftedSystems(await readIndexedHashes(env)).slice(0, DRIFT_BATCH_LIMIT);
 		if (systems.length === 0) {
 			return { action: "skip", reason: "no-drift" };
 		}
@@ -148,6 +150,10 @@ export async function persistSystemOutcome(
 		if (seed) {
 			await writeIndexedHash(env, result.system, systemSeedHash(seed));
 		}
+		await clearRetrievalHold(env, result.system);
+	}
+	if (result.held) {
+		await holdRetrieval(env, result.system);
 	}
 	const document = await recordSystemResult(env, result, unparked);
 	if (result.parked) {

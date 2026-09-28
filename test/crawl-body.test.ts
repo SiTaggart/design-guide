@@ -5,14 +5,14 @@ import type { Seed } from "../src/config/types.ts";
 import { crawlRequestBody, hitCrawlLimit } from "../src/crawl/browser-run.ts";
 
 describe("crawlRequestBody", () => {
-	it("asks for one full-site crawl at the Cloudflare maximum", () => {
+	it("asks for one crawl capped at 500 pages and the full depth", () => {
 		const body = crawlRequestBody(seedById("primer"), "https://primer.style/");
-		expect(CRAWL_LIMIT).toBe(100_000);
+		expect(CRAWL_LIMIT).toBeLessThanOrEqual(500);
 		expect(CRAWL_DEPTH).toBe(100_000);
 		expect(body).toEqual({
 			url: "https://primer.style/",
 			source: "all",
-			limit: 100_000,
+			limit: 500,
 			depth: 100_000,
 			formats: ["markdown"],
 			render: true,
@@ -72,12 +72,13 @@ describe("crawlRequestBody", () => {
 describe("hitCrawlLimit", () => {
 	const counts = (finished: number) => ({ total: finished, finished, skipped: 0, disallowed: 0, errored: 0 });
 
-	it("is true when the crawl finished exactly the limit", () => {
-		expect(hitCrawlLimit({ status: "completed", counts: counts(100_000) }, 4)).toBe(true);
+	it("is true when the crawl finished the page cap or more", () => {
+		expect(hitCrawlLimit({ status: "completed", counts: counts(500) }, 4)).toBe(true);
+		expect(hitCrawlLimit({ status: "completed", counts: counts(501) }, 4)).toBe(true);
 	});
 
 	it("is false when the crawl finished below the limit", () => {
-		expect(hitCrawlLimit({ status: "completed", counts: counts(99_999) }, 4)).toBe(false);
+		expect(hitCrawlLimit({ status: "completed", counts: counts(499) }, 4)).toBe(false);
 		expect(hitCrawlLimit({ status: "completed", counts: counts(12) }, 12)).toBe(false);
 	});
 
@@ -86,6 +87,6 @@ describe("hitCrawlLimit", () => {
 	});
 
 	it("is true when the usable page count would fill the index to the limit", () => {
-		expect(hitCrawlLimit({ status: "completed", counts: counts(100_000) }, 100_000)).toBe(true);
+		expect(hitCrawlLimit({ status: "completed", counts: counts(12) }, 500)).toBe(true);
 	});
 });

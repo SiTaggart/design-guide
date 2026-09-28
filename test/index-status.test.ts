@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { SEED_HASH } from "../src/index/seed-hash.ts";
 import { readParks, writePark } from "../src/index/parks.ts";
+import { writeLastIndexedHashIfComplete } from "../src/index/indexed-hashes.ts";
+import { finishIndexMail } from "../src/index/mail.ts";
 import { finishStatusRun, readStatus, runStateFrom, startStatusRun, writeStatus } from "../src/index/status.ts";
 import { persistSystemOutcome } from "../src/index/trigger.ts";
 import worker from "../src/worker.ts";
@@ -247,5 +249,49 @@ describe("GET /v1/index-status", () => {
 			parks: { garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" } },
 		});
 		expect((await readStatus(env)).unparked).toEqual([]);
+	});
+
+	it("reports fail and does not commit the catalog when non-parked systems indexed nothing", async () => {
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
+		await writePark(env, "vanilla", 1, "2026-09-27T00:00:00.000Z");
+		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
+		await startStatusRun(env, { trigger: "deploy-drift", workflowId: "reindex-drift-empty" });
+		const parked = {
+			system: "vanilla" as const,
+			startUrl: "https://vanillaframework.io/docs/",
+			crawl: { total: 1, finished: 1, skipped: 0, disallowed: 0, errored: 0 },
+			indexed: 0,
+			hitLimit: false,
+			keptPrevious: true,
+			parked: true,
+			usable: 1,
+			error: "stub: only 1 usable page(s)",
+		};
+		const failed = {
+			system: "primer" as const,
+			startUrl: "https://primer.style/",
+			crawl: { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 },
+			indexed: 0,
+			hitLimit: false,
+			keptPrevious: true,
+			usable: 0,
+			error: "item upload failed primer/gen/a.md: [{\"code\":7009,\"message\":\"Upstream service unavailable\"}]",
+		};
+		await persistSystemOutcome(env, parked);
+		await persistSystemOutcome(env, failed);
+		await writeLastIndexedHashIfComplete(env);
+		const finished = await finishStatusRun(env, [parked, failed], "2026-09-27T23:00:00.000Z", "reindex-drift-empty");
+		expect(finished.state).toBe("fail");
+		expect(finished.counts).toMatchObject({ indexed: 0, errors: 1 });
+		expect(finished.lastIndexedHash).toBeNull();
+		const mail = finishIndexMail(
+			{ trigger: "deploy-drift", workflowId: "reindex-drift-empty" },
+			[parked, failed],
+			finished.parks,
+		);
+		expect(mail.subject).toBe("design-guide index finished fail (deploy-drift) reindex-drift-empty");
+		expect(mail.text).toContain("State: fail");
+		expect(mail.text).toContain("indexed=0");
 	});
 });
