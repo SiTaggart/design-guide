@@ -204,7 +204,7 @@ export async function uploadItem(
 	);
 	if (!response.ok) {
 		if (itemErrorCode(data, ALREADY_EXISTS_CODE) === ALREADY_EXISTS_CODE) {
-			return { id: key, key };
+			return findItemByKey(auth, key, options);
 		}
 		throw new ItemApiError(
 			`item upload failed ${key}: ${JSON.stringify(data.errors ?? data)}`,
@@ -216,6 +216,33 @@ export async function uploadItem(
 		throw new Error(`item upload returned no id for ${key}`);
 	}
 	return result;
+}
+
+async function findItemByKey(
+	auth: ItemsAuth,
+	key: string,
+	options?: ItemRequestOptions,
+): Promise<ItemRecord> {
+	const url = new URL(itemsUrl(auth));
+	url.searchParams.set("key", key);
+	url.searchParams.set("source", "builtin");
+	url.searchParams.set("per_page", "1");
+	const { response, data } = await withItemRetries(
+		() =>
+			cfFetch(url, {
+				headers: { authorization: `Bearer ${auth.apiToken}` },
+			}),
+		options,
+	);
+	if (!response.ok) {
+		throw new ItemApiError(`item lookup failed ${key}: ${JSON.stringify(data.errors ?? data)}`, itemErrorCode(data));
+	}
+	const result = (data.result as ItemRecord[]) ?? [];
+	const match = result.find((item) => item.key === key && item.id && item.id !== key);
+	if (!match) {
+		throw new Error(`item ${key} already exists but its id was not found`);
+	}
+	return { id: match.id, key: match.key, status: match.status };
 }
 
 export async function listItems(auth: ItemsAuth, options?: ItemRequestOptions): Promise<ItemRecord[]> {
