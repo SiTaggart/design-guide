@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { crawlStatusCounts, fetchCrawlPage, type CrawlJobResult } from "../src/crawl/browser-run.ts";
+import { crawlStatusCounts, fetchCrawlPage } from "../src/crawl/browser-run.ts";
 
 const auth = { accountId: "acct", apiToken: "token" };
 
@@ -8,7 +8,7 @@ afterEach(() => {
 });
 
 describe("crawl step bounds", () => {
-	it("reads skipped, disallowed, and errored from the job instead of paging records", async () => {
+	it("reports skipped, disallowed, and errored from the job totals", () => {
 		const calls: string[] = [];
 		vi.stubGlobal(
 			"fetch",
@@ -24,13 +24,13 @@ describe("crawl step bounds", () => {
 				});
 			}),
 		);
-		const counts = await crawlStatusCounts(auth, "job-1", {
+		const counts = crawlStatusCounts({
 			total: 40,
 			finished: 10,
 			skipped: 20,
 			disallowed: 3,
 			errored: 7,
-		} as CrawlJobResult);
+		});
 		expect(calls).toEqual([]);
 		expect(counts).toEqual({ total: 40, finished: 10, skipped: 20, disallowed: 3, errored: 7 });
 	});

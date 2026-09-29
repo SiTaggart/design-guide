@@ -228,7 +228,7 @@ describe("index mail", () => {
 			step as never,
 		);
 		expect(results).toEqual([]);
-		expect(names).toEqual(["ensure-sweep", "mail-start", "finish", "mail-finish"]);
+		expect(names).toEqual(["ensure-sweep", "drift-batch", "mail-start", "finish", "mail-finish"]);
 		expect(configs).toEqual([MAIL_STEP_RETRIES, MAIL_STEP_RETRIES]);
 		expect(email.sent).toHaveLength(2);
 		expect(email.sent[0]?.subject).toContain("index started");
@@ -306,6 +306,7 @@ describe("index mail", () => {
 		expect(results[0]).toMatchObject({ system: "garden", parked: true, usable: 1 });
 		expect(names).toEqual([
 			"ensure-sweep",
+			"drift-batch",
 			"mail-start",
 			"start-garden",
 			"poll-garden-0",
@@ -359,7 +360,15 @@ describe("index mail", () => {
 			step as never,
 		);
 		expect(results[0]).toMatchObject({ system: "garden", error: "crawl ended failed" });
-		expect(names).toEqual(["ensure-sweep", "mail-start", "start-garden", "record-garden", "finish", "mail-finish"]);
+		expect(names).toEqual([
+			"ensure-sweep",
+			"drift-batch",
+			"mail-start",
+			"start-garden",
+			"record-garden",
+			"finish",
+			"mail-finish",
+		]);
 		expect(email.sent).toHaveLength(2);
 		expect(email.sent[0]).toMatchObject({
 			from: INDEX_MAIL_FROM,

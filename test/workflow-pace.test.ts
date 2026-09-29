@@ -4,7 +4,7 @@ import { SYSTEM_IDS } from "../src/config/types.ts";
 import { writePark } from "../src/index/parks.ts";
 import { ReindexWorkflow } from "../src/workflows/reindex.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
+import { envWithIndex, memoryKV, parksKvGetThrows } from "./helpers/index-env.ts";
 
 const streamSwap = vi.hoisted(() => vi.fn());
 const startSeedCrawl = vi.hoisted(() => vi.fn());
@@ -94,7 +94,7 @@ describe("reindex workflow overload gap", () => {
 					workflowId: "reindex-recrawl-pace",
 				},
 				timestamp: new Date("2026-09-27T00:00:00.000Z"),
-				instanceId: "reindex-drift-pace",
+				instanceId: "reindex-recrawl-pace",
 				workflowName: "reindex",
 			},
 			step,
@@ -205,6 +205,26 @@ describe("deploy-drift one system", () => {
 		expect(results.map((result) => result.system)).toEqual(["govuk"]);
 		expect(email.sent[0]?.text).toContain("Systems: govuk");
 		expect(email.sent[0]?.text).not.toContain("paste");
+	});
+
+	it("runs no deploy-drift system when parks cannot be read", async () => {
+		streamSwap.mockImplementation(async () => {
+			throw new Error("streamSwap should not run");
+		});
+		const email = sentMail();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: parksKvGetThrows(memoryKV()),
+			EMAIL: email.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const workflow = new ReindexWorkflow({} as ExecutionContext, env);
+		const { step } = stepRecorder();
+		const results = await workflow.run(payload(["paste", "primer"], "reindex-deploy-drift-unread"), step);
+		expect(results).toEqual([]);
+		expect(streamSwap).not.toHaveBeenCalled();
+		expect(email.sent[0]?.text).toContain("Systems: (none)");
+		expect(email.sent[1]?.text).toContain("Counts: systems=0 indexed=0");
 	});
 
 	it("keeps the previous generation and cancels the crawl when a step dies", async () => {

@@ -2,7 +2,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import { INSTANCE_ID } from "../config/instance.ts";
 import { seedById } from "../config/seed.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
-import { crawlStatusCounts, fetchCrawlPage, startSeedCrawl } from "../crawl/browser-run.ts";
+import { cancelCrawl, crawlStatusCounts, fetchCrawlPage, startSeedCrawl } from "../crawl/browser-run.ts";
 import { ensureInstance } from "../index/items-rest.ts";
 import {
 	deleteDroppedSystemItems,
@@ -14,7 +14,8 @@ import {
 } from "../index/reindex.ts";
 import { MAIL_STEP_RETRIES, sendFinishIndexMail, sendStartIndexMail } from "../index/mail.ts";
 import { finishStatusRun, startStatusRun, type ReindexParams } from "../index/status.ts";
-import { commitIndexedHashes, persistSystemOutcome, reindexAuth } from "../index/trigger.ts";
+import { readParks } from "../index/parks.ts";
+import { commitIndexedHashes, driftBatch, persistSystemOutcome, reindexAuth } from "../index/trigger.ts";
 import { waitForCrawlJob } from "../index/workflow-poll.ts";
 
 const OVERLOAD_SYSTEM_GAP = "30 seconds";
@@ -51,9 +52,14 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 				return { dropped };
 			});
 
+			const batch =
+				params.trigger === "deploy-drift"
+					? await step.do("drift-batch", async () => driftBatch(params.systems, await readParks(env)))
+					: params.systems;
+
 			try {
 				await step.do("mail-start", MAIL_STEP_RETRIES, async () => {
-					return sendStartIndexMail(env, params);
+					return sendStartIndexMail(env, { ...params, systems: batch });
 				});
 			} catch (error) {
 				console.log(
@@ -61,7 +67,7 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 				);
 			}
 
-			for (const [index, system] of params.systems.entries()) {
+			for (const [index, system] of batch.entries()) {
 				const overload = { seen: false };
 				try {
 					results.push(await this.indexSystem(step, env, auth, system, params.workflowId, overload));
@@ -70,7 +76,7 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 					await persistSystemOutcome(env, failed);
 					results.push(failed);
 				}
-				if (overload.seen && index < params.systems.length - 1) {
+				if (overload.seen && index < batch.length - 1) {
 					await step.sleep(`cool-${system}`, OVERLOAD_SYSTEM_GAP);
 				}
 			}
@@ -127,23 +133,46 @@ export class ReindexWorkflow extends WorkflowEntrypoint<WorkerEnv, ReindexParams
 				return failed;
 			}
 
-			const snapshot = await waitForCrawlJob(step, auth, started.jobId, system);
-			const result = await streamSwap(auth, seed, {
-				startUrl: started.startUrl,
-				snapshot,
-				generation,
-				fetchPage: (cursor) => fetchCrawlPage(auth, started.jobId, "completed", cursor),
-				countStatuses: () => crawlStatusCounts(auth, started.jobId, snapshot),
-				step: (name, run) => runStep(step, name, run),
-				onOverload: () => {
-					overload.seen = true;
-				},
-			});
-			await step.do(`record-${system}`, async () => {
-				await persistSystemOutcome(env, result);
+			try {
+				const snapshot = await waitForCrawlJob(step, auth, started.jobId, system);
+				const result = await streamSwap(auth, seed, {
+					startUrl: started.startUrl,
+					snapshot,
+					generation,
+					fetchPage: (cursor) => fetchCrawlPage(auth, started.jobId, "completed", cursor),
+					countStatuses: () => crawlStatusCounts(snapshot),
+					step: (name, run) => runStep(step, name, run),
+					onOverload: () => {
+						overload.seen = true;
+					},
+				});
+				await step.do(`record-${system}`, async () => {
+					await persistSystemOutcome(env, result);
+					return result;
+				});
 				return result;
-			});
-			return result;
+			} catch (error) {
+				try {
+					await step.do(`cancel-${system}`, async () => {
+						await cancelCrawl(auth, started.jobId);
+						return { cancelled: true };
+					});
+				} catch (cancelError) {
+					console.log(
+						JSON.stringify({
+							event: "crawl_cancel_failed",
+							system,
+							error: errorMessage(cancelError),
+						}),
+					);
+				}
+				const failed = reindexFailure(seed, errorMessage(error));
+				await step.do(`record-failed-${system}`, async () => {
+					await persistSystemOutcome(env, failed);
+					return failed;
+				});
+				return failed;
+			}
 		} catch (error) {
 			const failed = reindexFailure(seed, errorMessage(error));
 			await step.do(`record-failed-${system}`, async () => {

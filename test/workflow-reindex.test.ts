@@ -51,7 +51,14 @@ describe("workflow crawl poll", () => {
 			"job-1",
 			"primer",
 		);
-		expect(snapshot).toEqual({ status: "completed", total: 2, finished: 2 });
+		expect(snapshot).toEqual({
+			status: "completed",
+			total: 2,
+			finished: 2,
+			skipped: 0,
+			disallowed: 0,
+			errored: 0,
+		});
 		expect(sleeps).toEqual(["2 minutes"]);
 		expect(polls).toBe(2);
 		pollJob.mockRestore();

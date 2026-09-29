@@ -343,10 +343,17 @@ export async function streamSwap(
 	seed: Seed,
 	input: {
 		startUrl: string;
-		snapshot: { status: string; total: number; finished: number };
+		snapshot: {
+			status: string;
+			total: number;
+			finished: number;
+			skipped?: number;
+			disallowed?: number;
+			errored?: number;
+		};
 		generation: string;
 		fetchPage: (cursor?: string | number) => Promise<CrawlPage>;
-		countStatuses: () => Promise<CrawlCounts>;
+		countStatuses: () => CrawlCounts | Promise<CrawlCounts>;
 		step?: SwapStep;
 		onOverload?: () => void;
 	},
@@ -355,9 +362,9 @@ export async function streamSwap(
 	const rough: CrawlCounts = {
 		total: input.snapshot.total,
 		finished: input.snapshot.finished,
-		skipped: 0,
-		disallowed: 0,
-		errored: 0,
+		skipped: input.snapshot.skipped ?? 0,
+		disallowed: input.snapshot.disallowed ?? 0,
+		errored: input.snapshot.errored ?? 0,
 	};
 	const early = swapDecision({ status: input.snapshot.status, counts: rough, usable: 0 });
 	if (early.action === "keep" && (early.hitLimit || input.snapshot.status !== "completed")) {
