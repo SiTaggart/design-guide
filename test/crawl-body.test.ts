@@ -5,15 +5,15 @@ import type { Seed } from "../src/config/types.ts";
 import { crawlRequestBody, hitCrawlLimit } from "../src/crawl/browser-run.ts";
 
 describe("crawlRequestBody", () => {
-	it("asks for one crawl capped at 500 pages and the full depth", () => {
+	it("asks for one crawl whose depth does not exceed the page cap", () => {
 		const body = crawlRequestBody(seedById("primer"), "https://primer.style/");
 		expect(CRAWL_LIMIT).toBeLessThanOrEqual(500);
-		expect(CRAWL_DEPTH).toBe(100_000);
+		expect(body.depth).toBeLessThanOrEqual(body.limit);
 		expect(body).toEqual({
 			url: "https://primer.style/",
 			source: "all",
-			limit: 500,
-			depth: 100_000,
+			limit: CRAWL_LIMIT,
+			depth: CRAWL_DEPTH,
 			formats: ["markdown"],
 			render: true,
 			crawlPurposes: ["search"],
