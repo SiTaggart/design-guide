@@ -114,6 +114,10 @@ export type PageQueue = {
 		error: string,
 	): Promise<boolean>;
 	owns(item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt">): Promise<boolean>;
+	releaseForRetry(
+		item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt">,
+		itemKey: string,
+	): Promise<boolean>;
 	depths(): Promise<QueueDepths>;
 	listAbsent(
 		systemId: SystemId,
@@ -613,6 +617,38 @@ export class D1PageQueue implements PageQueue {
 			item.claimedAt,
 		);
 		return row !== null;
+	}
+
+	async releaseForRetry(
+		item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt">,
+		itemKey: string,
+	): Promise<boolean> {
+		if (item.claimedAt === undefined || item.attempts === undefined) {
+			return false;
+		}
+		const changes = await run(
+			this.db,
+			`UPDATE page_work
+			 SET status = 'pending',
+			     attempts = CASE WHEN attempts >= ? THEN ? ELSE attempts END,
+			     claimed_at = NULL,
+			     error = NULL,
+			     item_key = ?
+			 WHERE system_id = ? AND url = ?
+			   AND (
+			     (status = 'claimed' AND attempts = ? AND claimed_at = ?)
+			     OR status = 'pending'
+			     OR status = 'failed'
+			   )`,
+			MAX_ATTEMPTS,
+			MAX_ATTEMPTS - 1,
+			itemKey,
+			item.systemId,
+			item.url,
+			item.attempts,
+			item.claimedAt,
+		);
+		return changes === 1;
 	}
 
 	async recordSeedRefresh(systemId: SystemId, seedHash: string, enqueuedAt: string): Promise<void> {

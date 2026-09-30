@@ -475,6 +475,59 @@ describe("drain claim ownership", () => {
 		expect(row?.claimed_at).toBe("2026-09-30T00:20:00.000Z");
 		expect(row?.item_key).toBe(liveKey);
 	});
+
+	it("keeps the replacement and stays retryable when the last claim expires after the older item is deleted", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/components/select";
+		const liveKey = "primer/page/previous.md";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
+		await pageQueue.complete(
+			{ systemId: "primer", url },
+			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
+			liveKey,
+		);
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET attempts = ? WHERE url = ?")
+			.bind(MAX_ATTEMPTS - 1, url)
+			.run();
+		const deleted: string[] = [];
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({ id: "fresh", key: "primer/page/fresh.md" });
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "legacy",
+				key: liveKey,
+				metadata: { system: "primer", source_url: url },
+			},
+		]);
+		vi.spyOn(itemsRest, "deleteItem").mockImplementation(async (_auth, id) => {
+			deleted.push(id);
+			await pageQueueDb(pageQueue)
+				.prepare("UPDATE page_work SET status = 'failed', claimed_at = NULL, error = 'claim expired' WHERE url = ?")
+				.bind(url)
+				.run();
+		});
+		vi.spyOn(itemsRest, "deleteItemByKey").mockImplementation(async (_auth, key) => {
+			deleted.push(key);
+		});
+		const counts = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => "# select",
+		});
+		const replacement = pageItemKey("primer", url, MAX_ATTEMPTS, NOW);
+		expect(counts).toEqual({ claimed: 1, indexed: 0, failed: 0 });
+		expect(deleted).toEqual(["legacy"]);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, attempts, item_key, error FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; attempts: number; item_key: string; error: string | null }>();
+		expect(row).toMatchObject({ status: "pending", attempts: MAX_ATTEMPTS - 1, item_key: replacement, error: null });
+		const again = await pageQueue.claim(1, "2026-09-30T00:30:00.000Z");
+		expect(again.map((item) => item.url)).toEqual([url]);
+	});
 });
 
 describe("legacy cleanup retry", () => {

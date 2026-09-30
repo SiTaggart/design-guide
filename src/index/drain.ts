@@ -64,7 +64,7 @@ export async function indexQueuedPage(
 	return key;
 }
 
-type CleanupOutcome = "clean" | "failed" | "unowned";
+type CleanupOutcome = "clean" | "failed" | "unowned" | "detached";
 
 async function cleanupReplacedItems(
 	auth: ItemsAuth,
@@ -75,8 +75,10 @@ async function cleanupReplacedItems(
 	catalog?: { items: ItemRecord[] | null },
 	stillOwns?: () => Promise<boolean>,
 ): Promise<CleanupOutcome> {
+	let removedLegacy = false;
+	const lostClaim = (): CleanupOutcome => (removedLegacy ? "detached" : "unowned");
 	if (stillOwns && !(await stillOwns())) {
-		return "unowned";
+		return lostClaim();
 	}
 	const pendingKeys = new Set<string>();
 	if (previousKey && previousKey !== keepKey) {
@@ -104,7 +106,7 @@ async function cleanupReplacedItems(
 		return "failed";
 	}
 	if (stillOwns && !(await stillOwns())) {
-		return "unowned";
+		return lostClaim();
 	}
 	let ok = true;
 	for (const found of items) {
@@ -119,11 +121,12 @@ async function cleanupReplacedItems(
 		}
 		pendingKeys.add(found.key);
 		if (stillOwns && !(await stillOwns())) {
-			return "unowned";
+			return lostClaim();
 		}
 		try {
 			await deleteItem(auth, found.id);
 			pendingKeys.delete(found.key);
+			removedLegacy = true;
 		} catch (error) {
 			console.log(
 				JSON.stringify({
@@ -137,10 +140,11 @@ async function cleanupReplacedItems(
 	}
 	for (const key of pendingKeys) {
 		if (stillOwns && !(await stillOwns())) {
-			return "unowned";
+			return lostClaim();
 		}
 		try {
 			await deleteItemByKey(auth, key);
+			removedLegacy = true;
 		} catch (error) {
 			ok = false;
 			console.log(
@@ -153,6 +157,9 @@ async function cleanupReplacedItems(
 				}),
 			);
 		}
+	}
+	if (stillOwns && !(await stillOwns())) {
+		return lostClaim();
 	}
 	return ok ? "clean" : "failed";
 }
@@ -202,6 +209,10 @@ export async function drainTick(input: {
 					if (itemKey !== item.itemKey) {
 						await deleteItemByKey(itemsAuth, itemKey);
 					}
+					continue;
+				}
+				if (cleaned === "detached") {
+					await input.queue.releaseForRetry(item, itemKey);
 					continue;
 				}
 				if (cleaned === "failed") {
