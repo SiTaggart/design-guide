@@ -217,7 +217,7 @@ bun run reindex
 
 Debug one system with `SYSTEM=primer bun run reindex`.
 
-The cron discovers with one Browser Run `/crawl` job per system (`source: "all"`, `CRAWL_LIMIT` 500, `CRAWL_DEPTH` 500). Depth is not greater than the page cap. A crawl that hits that cap does not prune. After a successful discover, drain fetches each claimed URL with `/markdown` and upserts that page. Upload and delete retry AI Search errors 1015, 7009, and 7114 with backoff. A failed page stays failed on the queue and the previous AI Search doc stays. A parked seed does not take the discover slot. The next cron continues the rest. The seed list stays fourteen systems.
+The cron discovers with one Browser Run `/crawl` job per system (`source: "all"`, `CRAWL_LIMIT` 500, `CRAWL_DEPTH` 500). Depth is not greater than the page cap. A crawl that hits that cap enqueues the usable pages it collected and does not prune. The next tick discovers another seed while those pages drain, or immediately when the cap collected none. After a successful discover, drain fetches each claimed URL with `/markdown` and upserts that page. Upload and delete retry AI Search errors 1015, 7009, and 7114 with backoff. A failed page stays failed on the queue and the previous AI Search doc stays. A parked seed does not take the discover slot. The next cron continues the rest. The seed list stays fourteen systems.
 
 `bun run reindex` still runs the debug whole-site swap. It polls every 15 seconds and collects that system's completed pages in memory. That command is not the indexing runner. A crawl that fails, hits the limit, or produces a stub (`usable < 2`) does not swap. Stubs are parked in KV. DIY Vectorize is not on this path.
 

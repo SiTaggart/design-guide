@@ -25,6 +25,7 @@ import {
 } from "./page-queue.ts";
 
 export const DISCOVER_URLS_PER_TICK = 25;
+export const CAP_RETRY_MS = 60 * 60 * 1000;
 const MAX_POLL_FAILURES = 5;
 
 export type DiscoverPick = {
@@ -58,8 +59,12 @@ export function pickDiscoverSystem(input: {
 	parks: Parks;
 	busy?: ReadonlySet<SystemId>;
 	recoveryAttempts?: Readonly<Record<string, string>>;
+	deferred?: Readonly<Record<string, string>>;
+	now?: number;
 }): DiscoverPick | null {
 	const busy = input.busy ?? new Set<SystemId>();
+	const deferred = input.deferred ?? {};
+	const cooling = (id: SystemId) => capCooling(id, deferred, input.now);
 	if (isRecoveryCron(input.cron)) {
 		const systemId = nextParkedSystem(input.parked, input.recoveryAttempts ?? {});
 		if (!systemId) {
@@ -71,15 +76,26 @@ export function pickDiscoverSystem(input: {
 			trigger: "recovery",
 		};
 	}
-	const drifted = input.drifted.find((id) => input.parks[id] === undefined && !busy.has(id));
+	const drifted = input.drifted.find((id) => input.parks[id] === undefined && !busy.has(id) && !cooling(id));
 	if (drifted) {
 		return { systemId: drifted, kind: "seed", trigger: "deploy-drift" };
 	}
-	const due = input.due.find((id) => input.parks[id] === undefined);
+	const due = input.due.find((id) => input.parks[id] === undefined && !cooling(id));
 	if (due) {
 		return { systemId: due, kind: "reindex", trigger: "recrawl" };
 	}
 	return null;
+}
+
+function capCooling(id: SystemId, deferred: Readonly<Record<string, string>>, now: number | undefined): boolean {
+	const at = deferred[id];
+	if (!at) {
+		return false;
+	}
+	if (now === undefined) {
+		return true;
+	}
+	return now - Date.parse(at) < CAP_RETRY_MS;
 }
 
 export function nextParkedSystem(
@@ -143,6 +159,7 @@ export async function commitDiscoveredUrls(input: {
 	urls: readonly string[];
 	liveUrls?: readonly string[];
 	ok: boolean;
+	prune?: boolean;
 	now: string;
 	deleteDocs: (dropped: readonly DroppedPage[]) => Promise<void>;
 }): Promise<{ pruned: DroppedPage[] }> {
@@ -156,6 +173,9 @@ export async function commitDiscoveredUrls(input: {
 			enqueue.map((url) => ({ systemId: input.systemId, url, kind: input.kind })),
 			input.now,
 		);
+	}
+	if (input.prune === false) {
+		return { pruned: [] };
 	}
 	const dropped = await input.queue.listAbsent(input.systemId, live);
 	if (dropped.length > 0) {
@@ -198,14 +218,6 @@ export async function deleteOrphanDocs(
 	}
 }
 
-type DiscoverDeps = {
-	start: typeof startSeedCrawl;
-	poll: typeof pollJob;
-	page: typeof fetchCrawlPage;
-	cancel: typeof cancelCrawl;
-	deleteDocs: typeof deleteOrphanDocs;
-};
-
 const defaultDeps: DiscoverDeps = {
 	start: startSeedCrawl,
 	poll: pollJob,
@@ -214,8 +226,16 @@ const defaultDeps: DiscoverDeps = {
 	deleteDocs: deleteOrphanDocs,
 };
 
-function hitCap(status: string, finished: number): boolean {
-	return status === "cancelled_due_to_limits" || finished >= CRAWL_LIMIT;
+export type DiscoverDeps = {
+	start: typeof startSeedCrawl;
+	poll: typeof pollJob;
+	page: typeof fetchCrawlPage;
+	cancel: typeof cancelCrawl;
+	deleteDocs: typeof deleteOrphanDocs;
+};
+
+function cappedCrawl(status: string, finished: number): boolean {
+	return status === "cancelled_due_to_limits" || (status === "completed" && finished >= CRAWL_LIMIT);
 }
 
 export async function discoverTick(
@@ -263,6 +283,8 @@ async function runDiscover(
 		parks: parksRead.parks,
 		busy: new Set(freshness.filter((row) => row.pending + row.claimed > 0).map((row) => row.system)),
 		recoveryAttempts: await queue.recoveryAttempts(),
+		deferred: await queue.capDefers(),
+		now: now.getTime(),
 	});
 	if (!pick) {
 		return { action: "skip", reason: "idle" };
@@ -326,16 +348,9 @@ async function continueDiscover(
 	if (snapshot.status === "running" || snapshot.status === "") {
 		return { action: "continued", systemId: run.systemId, accepted: 0 };
 	}
-	if (hitCap(snapshot.status, snapshot.finished) || snapshot.status !== "completed") {
-		return failDiscover(
-			queue,
-			auth,
-			run,
-			deps,
-			hitCap(snapshot.status, snapshot.finished)
-				? `crawl hit the ${CRAWL_LIMIT} page limit`
-				: `crawl ended ${snapshot.status}`,
-		);
+	const capped = cappedCrawl(snapshot.status, snapshot.finished);
+	if (!capped && snapshot.status !== "completed") {
+		return failDiscover(queue, auth, run, deps, `crawl ended ${snapshot.status}`);
 	}
 	const seed = seedById(run.systemId);
 	let cursor = run.cursor;
@@ -374,7 +389,7 @@ async function continueDiscover(
 	}
 	const live = await queue.stagedUrls(run.systemId);
 	const indexable = await queue.indexableUrls(run.systemId);
-	if (isStubGeneration(indexable.length)) {
+	if (!capped && isStubGeneration(indexable.length)) {
 		await writePark(env, run.systemId, indexable.length, iso);
 		await writeIndexedHash(env, run.systemId, systemSeedHash(seed));
 		await writeLastIndexedHashIfComplete(env);
@@ -382,6 +397,16 @@ async function continueDiscover(
 		await queue.clearWork(run.systemId);
 		await queue.clearRun(run.systemId);
 		return { action: "parked", systemId: run.systemId, trigger: run.trigger, usable: indexable.length };
+	}
+	if (capped && indexable.length === 0) {
+		await queue.noteCapDefer(run.systemId, iso);
+		await queue.clearRun(run.systemId);
+		return {
+			action: "failed",
+			systemId: run.systemId,
+			trigger: run.trigger,
+			error: `crawl hit the ${CRAWL_LIMIT} page limit`,
+		};
 	}
 	const itemsAuth = itemsAuthFrom(env, auth);
 	const committed = await commitDiscoveredUrls({
@@ -391,10 +416,12 @@ async function continueDiscover(
 		urls: indexable,
 		liveUrls: live,
 		ok: true,
+		prune: !capped,
 		now: iso,
 		deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
 	});
 	await queue.recordSeedRefresh(run.systemId, systemSeedHash(seed), iso);
+	await queue.clearCapDefer(run.systemId);
 	await queue.clearRun(run.systemId);
 	return {
 		action: "enqueued",

@@ -63,6 +63,11 @@ CREATE TABLE IF NOT EXISTS seed_refresh (
   seed_hash TEXT NOT NULL,
   enqueued_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS cap_defer (
+  system_id TEXT PRIMARY KEY,
+  deferred_at TEXT NOT NULL
+);
 `;
 
 export type PageKind = "seed" | "reindex";
@@ -167,23 +172,29 @@ export function emptyDepths(): QueueDepths {
 	return { pending: 0, claimed: 0, failed: 0, done: 0 };
 }
 
+export function schemaStatements(schema = PAGE_QUEUE_SCHEMA): string[] {
+	return schema
+		.split(";")
+		.map((sql) => sql.trim())
+		.filter((sql) => sql.length > 0);
+}
+
 export function ensurePageQueue(db: D1Database): Promise<void> {
 	let pending = ready.get(db);
 	if (!pending) {
-		pending = db.exec(PAGE_QUEUE_SCHEMA).then(
-			() => undefined,
-			async (error: unknown) => {
-				try {
-					await db.prepare("SELECT 1 AS ok FROM page_work LIMIT 1").all();
-				} catch {
-					ready.delete(db);
-					throw error;
-				}
-			},
-		);
+		pending = applySchema(db).catch((error: unknown) => {
+			ready.delete(db);
+			throw error;
+		});
 		ready.set(db, pending);
 	}
 	return pending;
+}
+
+async function applySchema(db: D1Database): Promise<void> {
+	for (const sql of schemaStatements()) {
+		await db.exec(sql);
+	}
 }
 
 function asKind(value: string): PageKind {
@@ -680,6 +691,28 @@ export class D1PageQueue implements PageQueue {
 			"SELECT system_id, attempted_at FROM recovery_attempt",
 		);
 		return Object.fromEntries(rows.map((row) => [row.system_id, row.attempted_at]));
+	}
+
+	async noteCapDefer(systemId: SystemId, now: string): Promise<void> {
+		await run(
+			this.db,
+			`INSERT INTO cap_defer (system_id, deferred_at) VALUES (?, ?)
+			 ON CONFLICT(system_id) DO UPDATE SET deferred_at = excluded.deferred_at`,
+			systemId,
+			now,
+		);
+	}
+
+	async clearCapDefer(systemId: SystemId): Promise<void> {
+		await run(this.db, "DELETE FROM cap_defer WHERE system_id = ?", systemId);
+	}
+
+	async capDefers(): Promise<Record<string, string>> {
+		const rows = await all<{ system_id: string; deferred_at: string }>(
+			this.db,
+			"SELECT system_id, deferred_at FROM cap_defer",
+		);
+		return Object.fromEntries(rows.map((row) => [row.system_id, row.deferred_at]));
 	}
 
 	async markDiscovered(systemId: SystemId, now: string): Promise<void> {

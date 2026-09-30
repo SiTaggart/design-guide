@@ -1,7 +1,7 @@
 import { seedById } from "../config/seed.ts";
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
-import { discoverTick, type DiscoverTickResult } from "./discover.ts";
+import { discoverTick, type DiscoverDeps, type DiscoverTickResult } from "./discover.ts";
 import { drainTick, type DrainCounts } from "./drain.ts";
 import {
 	sendFinishIndexMail,
@@ -36,7 +36,12 @@ function emptyCounts(): Crawlish {
 
 type Crawlish = SystemReindexResult["crawl"];
 
-export async function fillTick(env: WorkerEnv, cron: string, now = new Date()): Promise<void> {
+export async function fillTick(
+	env: WorkerEnv,
+	cron: string,
+	now = new Date(),
+	discoverDeps: Partial<DiscoverDeps> = {},
+): Promise<void> {
 	if (!env.INDEX || !env.PAGE_QUEUE) {
 		console.log(JSON.stringify({ event: "index_cron_skip", cron, reason: "unbound" }));
 		return;
@@ -56,7 +61,7 @@ export async function fillTick(env: WorkerEnv, cron: string, now = new Date()): 
 		return;
 	}
 
-	const discover = await discoverTick(env, cron, now);
+	const discover = await discoverTick(env, cron, now, discoverDeps);
 	let drain: DrainCounts = { claimed: 0, indexed: 0, failed: 0 };
 	let drainError: string | undefined;
 	try {
@@ -194,6 +199,13 @@ async function noteFill(
 	const workflowId = workflowOf(discover, now) ?? current.workflowId;
 	const runError = outcome.failed ? outcome.reason : undefined;
 	const state = outcome.failed ? "fail" : busy ? "running" : "ok";
+	const systems =
+		discover.action === "enqueued"
+			? [
+					...current.systems.filter((entry) => entry.system !== discover.systemId),
+					resultFor(discover.systemId, seedById(discover.systemId).startUrl, discover.urls),
+				]
+			: current.systems;
 	await writeStatus(env, {
 		...current,
 		workflowId,
@@ -202,8 +214,9 @@ async function noteFill(
 		startedAt: discover.action === "started" ? now.toISOString() : current.startedAt,
 		finishedAt: outcome.failed || !busy ? now.toISOString() : null,
 		runError,
-		errors: errorsFromResults(current.systems, runError),
-		counts: countsFrom(current.systems, current.parks, runError),
+		systems,
+		errors: errorsFromResults(systems, runError),
+		counts: countsFrom(systems, current.parks, runError),
 	});
 }
 
