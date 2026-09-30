@@ -120,19 +120,30 @@ async function unparkFilled(env: WorkerEnv, queue: D1PageQueue, justParked?: Sys
 
 export async function noteIndexedSeeds(env: WorkerEnv, queue: D1PageQueue, now: Date): Promise<void> {
 	const indexed = await readIndexedHashes(env);
+	const refreshes = await queue.seedRefreshes();
+	const running = await queue.running();
 	let wrote = false;
 	for (const row of await queue.freshness()) {
-		if (row.done < 1 || row.pending > 0 || row.claimed > 0 || row.failed > 0) {
+		if (running?.systemId === row.system) {
 			continue;
 		}
-		const seed = seedById(row.system);
-		const hash = systemSeedHash(seed);
-		if (indexed[seed.id] === hash) {
+		const refresh = refreshes[row.system];
+		const hash = systemSeedHash(seedById(row.system));
+		if (!refresh || refresh.seedHash !== hash) {
 			continue;
 		}
-		await writeIndexedHash(env, seed.id, hash);
-		await queue.markDiscovered(seed.id, now.toISOString());
-		indexed[seed.id] = hash;
+		if (row.pending > 0 || row.claimed > 0 || row.failed > 0) {
+			continue;
+		}
+		if (!row.lastIndexed || row.lastIndexed < refresh.enqueuedAt) {
+			continue;
+		}
+		if (indexed[row.system] === hash) {
+			continue;
+		}
+		await writeIndexedHash(env, row.system, hash);
+		await queue.markDiscovered(row.system, now.toISOString());
+		indexed[row.system] = hash;
 		wrote = true;
 	}
 	if (wrote) {

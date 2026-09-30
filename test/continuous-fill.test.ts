@@ -218,6 +218,7 @@ describe("orphan prune", () => {
 		expect(deleted).toEqual([]);
 		expect(await urls(pageQueue)).toEqual([orphan]);
 		expect(await pageQueue.running()).toBeNull();
+		expect(await pageQueue.seedRefreshes()).toEqual({});
 	});
 });
 
@@ -387,6 +388,151 @@ describe("deleteOrphanDocs", () => {
 	});
 });
 
+describe("drain claim ownership", () => {
+	it("does not upload or delete when the claim is lost before the replacement", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/components/select";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		const deleted: string[] = [];
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		const upload = vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({ id: "fresh", key: "primer/page/fresh.md" });
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "newer",
+				key: "primer/page/newer.md",
+				metadata: { system: "primer", source_url: url },
+			},
+		]);
+		vi.spyOn(itemsRest, "deleteItem").mockImplementation(async (_auth, id) => {
+			deleted.push(id);
+		});
+		vi.spyOn(itemsRest, "deleteItemByKey").mockImplementation(async (_auth, key) => {
+			deleted.push(key);
+		});
+		const counts = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => {
+				await stealClaim(pageQueue, url, "2026-09-30T00:20:00.000Z");
+				return "# select";
+			},
+		});
+		expect(counts).toEqual({ claimed: 1, indexed: 0, failed: 0 });
+		expect(upload).not.toHaveBeenCalled();
+		expect(deleted).toEqual([]);
+		const row = await workRow(pageQueue, url);
+		expect(row?.status).toBe("claimed");
+		expect(row?.claimed_at).toBe("2026-09-30T00:20:00.000Z");
+		expect(row?.item_key).toBeNull();
+	});
+
+	it("does not delete a newer item when the claim is lost after upload", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/components/select";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		const deleted: string[] = [];
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		vi.spyOn(itemsRest, "uploadItem").mockImplementation(async () => {
+			await stealClaim(pageQueue, url, "2026-09-30T00:20:00.000Z");
+			return { id: "stale", key: "primer/page/stale.md" };
+		});
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "newer",
+				key: "primer/page/newer.md",
+				metadata: { system: "primer", source_url: url },
+			},
+		]);
+		vi.spyOn(itemsRest, "deleteItem").mockImplementation(async (_auth, id) => {
+			deleted.push(id);
+		});
+		vi.spyOn(itemsRest, "deleteItemByKey").mockImplementation(async (_auth, key) => {
+			deleted.push(key);
+		});
+		const counts = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => "# select",
+		});
+		expect(counts).toEqual({ claimed: 1, indexed: 0, failed: 0 });
+		expect(deleted).toEqual([]);
+		const row = await workRow(pageQueue, url);
+		expect(row?.status).toBe("claimed");
+		expect(row?.claimed_at).toBe("2026-09-30T00:20:00.000Z");
+		expect(row?.item_key).toBeNull();
+	});
+});
+
+describe("legacy cleanup retry", () => {
+	it("leaves the page retryable when listing older items fails, then cleans up on a later tick", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/components/select";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		const deleted: string[] = [];
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({ id: "fresh", key: "primer/page/fresh.md" });
+		const list = vi.spyOn(itemsRest, "listItems").mockRejectedValue(new Error("list down"));
+		vi.spyOn(itemsRest, "deleteItem").mockImplementation(async (_auth, id) => {
+			deleted.push(id);
+		});
+		vi.spyOn(itemsRest, "deleteItemByKey").mockResolvedValue();
+		const first = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => "# select",
+		});
+		expect(first).toEqual({ claimed: 1, indexed: 0, failed: 1 });
+		expect(deleted).toEqual([]);
+		expect(await workRow(pageQueue, url)).toMatchObject({ status: "failed", error: "legacy cleanup failed" });
+		list.mockResolvedValue([
+			{
+				id: "legacy",
+				key: "primer/20260101/abc.md",
+				metadata: { system: "primer", source_url: url },
+			},
+		]);
+		const second = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: "2026-09-30T00:05:00.000Z",
+			fetchMarkdown: async () => "# select",
+		});
+		expect(second).toEqual({ claimed: 1, indexed: 1, failed: 0 });
+		expect(deleted).toEqual(["legacy"]);
+		expect((await workRow(pageQueue, url))?.status).toBe("done");
+	});
+
+	it("does not mark the page done when deleting an older item fails", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/components/select";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({ id: "fresh", key: "primer/page/fresh.md" });
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "legacy",
+				key: "primer/20260101/abc.md",
+				metadata: { system: "primer", source_url: url },
+			},
+		]);
+		vi.spyOn(itemsRest, "deleteItem").mockRejectedValue(new Error("delete down"));
+		vi.spyOn(itemsRest, "deleteItemByKey").mockRejectedValue(new Error("delete down"));
+		const counts = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => "# select",
+		});
+		expect(counts).toEqual({ claimed: 1, indexed: 0, failed: 1 });
+		const row = await workRow(pageQueue, url);
+		expect(row?.status).toBe("failed");
+		expect(row?.error).toBe("legacy cleanup failed");
+	});
+});
+
 describe("claim ownership", () => {
 	it("ignores a complete from a tick that no longer owns the claim", async () => {
 		const pageQueue = await queue();
@@ -529,6 +675,7 @@ describe("live map prune", () => {
 		});
 		expect(result.action).toBe("enqueued");
 		expect(deleted).toEqual(["gone-doc"]);
+		expect((await pageQueue.seedRefreshes()).primer?.seedHash).toBe(systemSeedHash(seedById("primer")));
 		expect(await kv.get(seedHashKey("primer"))).toBeNull();
 		const urlsLeft = await urls(pageQueue);
 		expect(urlsLeft).toContain(blurry);
@@ -658,7 +805,7 @@ describe("park stickiness", () => {
 });
 
 describe("indexed seed hash", () => {
-	it("writes the seed hash only after drain has indexed every queued page", async () => {
+	it("writes the seed hash only after the current refresh is fully indexed", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
 		await pageQueue.ensure();
@@ -667,15 +814,40 @@ describe("indexed seed hash", () => {
 			INDEX: kv,
 			PAGE_QUEUE: db,
 		});
+		const hash = systemSeedHash(seedById("primer"));
 		const url = "https://primer.style/components";
-		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
-		await noteIndexedSeeds(env, pageQueue, new Date(NOW));
-		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2020-01-01T00:00:00.000Z");
 		await pageQueue.complete(
 			{ systemId: "primer", url },
-			{ lastCrawled: NOW, lastIndexed: NOW },
+			{ lastCrawled: "2020-01-02T00:00:00.000Z", lastIndexed: "2020-01-02T00:00:00.000Z" },
 			"primer/page/components.md",
 		);
+		await noteIndexedSeeds(env, pageQueue, new Date(NOW));
+		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		await pageQueue.recordSeedRefresh("primer", "previous-seed", "2020-01-01T00:00:00.000Z");
+		await noteIndexedSeeds(env, pageQueue, new Date(NOW));
+		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		await pageQueue.recordSeedRefresh("primer", hash, NOW);
+		await noteIndexedSeeds(env, pageQueue, new Date(NOW));
+		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		await pageQueue.insertRun({
+			systemId: "primer",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-open",
+			startUrl: "https://primer.style/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET last_indexed = ?, last_crawled = ? WHERE url = ?")
+			.bind(NOW, NOW, url)
+			.run();
+		await noteIndexedSeeds(env, pageQueue, new Date(NOW));
+		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		await pageQueue.clearRun("primer");
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url: "https://primer.style/missing", kind: "seed" }], NOW);
 		await pageQueueDb(pageQueue)
 			.prepare("UPDATE page_work SET status = 'failed', attempts = ? WHERE url = ?")
@@ -685,7 +857,50 @@ describe("indexed seed hash", () => {
 		expect(await kv.get(seedHashKey("primer"))).toBeNull();
 		await pageQueueDb(pageQueue).prepare("DELETE FROM page_work WHERE status = 'failed'").run();
 		await noteIndexedSeeds(env, pageQueue, new Date(NOW));
-		expect(await kv.get(seedHashKey("primer"))).toBe(systemSeedHash(seedById("primer")));
+		expect(await kv.get(seedHashKey("primer"))).toBe(hash);
+	});
+
+	it("leaves the hash stale when discover for the new seed fails", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const url = "https://primer.style/components";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "reindex" }], "2020-01-01T00:00:00.000Z");
+		await pageQueue.complete(
+			{ systemId: "primer", url },
+			{ lastCrawled: "2020-01-02T00:00:00.000Z", lastIndexed: "2020-01-02T00:00:00.000Z" },
+			"primer/page/components.md",
+		);
+		await pageQueue.insertRun({
+			systemId: "primer",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-failed-seed",
+			startUrl: "https://primer.style/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "errored", finished: 1 }),
+			deleteDocs: async () => {
+				throw new Error("failed discover must not prune");
+			},
+			cancel: async () => undefined,
+		});
+		expect(result.action).toBe("failed");
+		await noteIndexedSeeds(env, pageQueue, new Date(NOW));
+		expect(await pageQueue.seedRefreshes()).toEqual({});
+		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		expect(await urls(pageQueue)).toEqual([url]);
 	});
 });
 
@@ -776,6 +991,23 @@ describe("recovery cron", () => {
 		}
 	});
 });
+
+async function stealClaim(pageQueue: D1PageQueue, url: string, claimedAt: string): Promise<void> {
+	await pageQueueDb(pageQueue)
+		.prepare("UPDATE page_work SET attempts = attempts + 1, claimed_at = ? WHERE url = ?")
+		.bind(claimedAt, url)
+		.run();
+}
+
+async function workRow(
+	pageQueue: D1PageQueue,
+	url: string,
+): Promise<{ status: string; claimed_at: string | null; item_key: string | null; error: string | null } | null> {
+	return pageQueueDb(pageQueue)
+		.prepare("SELECT status, claimed_at, item_key, error FROM page_work WHERE url = ?")
+		.bind(url)
+		.first<{ status: string; claimed_at: string | null; item_key: string | null; error: string | null }>();
+}
 
 function pageQueueDb(pageQueue: D1PageQueue): D1Database {
 	return (pageQueue as unknown as { db: D1Database }).db;

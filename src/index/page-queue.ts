@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS recovery_attempt (
   system_id TEXT PRIMARY KEY,
   attempted_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS seed_refresh (
+  system_id TEXT PRIMARY KEY,
+  seed_hash TEXT NOT NULL,
+  enqueued_at TEXT NOT NULL
+);
 `;
 
 export type PageKind = "seed" | "reindex";
@@ -107,6 +113,7 @@ export type PageQueue = {
 		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
 		error: string,
 	): Promise<boolean>;
+	owns(item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt">): Promise<boolean>;
 	depths(): Promise<QueueDepths>;
 	listAbsent(
 		systemId: SystemId,
@@ -589,6 +596,43 @@ export class D1PageQueue implements PageQueue {
 			 ON CONFLICT(system_id) DO UPDATE SET attempted_at = excluded.attempted_at`,
 			systemId,
 			now,
+		);
+	}
+
+	async owns(item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt">): Promise<boolean> {
+		if (item.claimedAt === undefined || item.attempts === undefined) {
+			return false;
+		}
+		const row = await first<{ ok: number }>(
+			this.db,
+			`SELECT 1 AS ok FROM page_work
+			 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
+			item.systemId,
+			item.url,
+			item.attempts,
+			item.claimedAt,
+		);
+		return row !== null;
+	}
+
+	async recordSeedRefresh(systemId: SystemId, seedHash: string, enqueuedAt: string): Promise<void> {
+		await run(
+			this.db,
+			`INSERT INTO seed_refresh (system_id, seed_hash, enqueued_at) VALUES (?, ?, ?)
+			 ON CONFLICT(system_id) DO UPDATE SET seed_hash = excluded.seed_hash, enqueued_at = excluded.enqueued_at`,
+			systemId,
+			seedHash,
+			enqueuedAt,
+		);
+	}
+
+	async seedRefreshes(): Promise<Record<string, { seedHash: string; enqueuedAt: string }>> {
+		const rows = await all<{ system_id: string; seed_hash: string; enqueued_at: string }>(
+			this.db,
+			"SELECT system_id, seed_hash, enqueued_at FROM seed_refresh",
+		);
+		return Object.fromEntries(
+			rows.map((row) => [row.system_id, { seedHash: row.seed_hash, enqueuedAt: row.enqueued_at }]),
 		);
 	}
 

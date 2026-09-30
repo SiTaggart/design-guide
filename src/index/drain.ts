@@ -27,13 +27,12 @@ export function pageItemKey(system: SystemId, url: string, attempts: number, sta
 	return `${system}/page/${digest}-${slot}.md`;
 }
 
-export async function indexQueuedPage(
+export async function uploadQueuedPage(
 	auth: ItemsAuth,
 	seed: Seed,
 	item: PageWorkItem,
 	markdown: string,
 	timestamps: { lastCrawled: string; lastIndexed: string },
-	catalog?: { items: ItemRecord[] | null },
 ): Promise<string> {
 	if (!fitsItem({ url: item.url, status: "completed", markdown }, seed)) {
 		throw new Error("page is not indexable");
@@ -46,18 +45,39 @@ export async function indexQueuedPage(
 		lastCrawled: timestamps.lastCrawled,
 		lastIndexed: timestamps.lastIndexed,
 	});
-	await deleteReplacedItems(auth, item.systemId, item.url, key, item.itemKey, catalog);
 	return key;
 }
 
-async function deleteReplacedItems(
+export async function indexQueuedPage(
+	auth: ItemsAuth,
+	seed: Seed,
+	item: PageWorkItem,
+	markdown: string,
+	timestamps: { lastCrawled: string; lastIndexed: string },
+	catalog?: { items: ItemRecord[] | null },
+): Promise<string> {
+	const key = await uploadQueuedPage(auth, seed, item, markdown, timestamps);
+	const cleaned = await cleanupReplacedItems(auth, item.systemId, item.url, key, item.itemKey, catalog);
+	if (cleaned !== "clean") {
+		throw new Error("legacy cleanup failed");
+	}
+	return key;
+}
+
+type CleanupOutcome = "clean" | "failed" | "unowned";
+
+async function cleanupReplacedItems(
 	auth: ItemsAuth,
 	systemId: SystemId,
 	url: string,
 	keepKey: string,
 	previousKey: string | null,
 	catalog?: { items: ItemRecord[] | null },
-): Promise<void> {
+	stillOwns?: () => Promise<boolean>,
+): Promise<CleanupOutcome> {
+	if (stillOwns && !(await stillOwns())) {
+		return "unowned";
+	}
 	const pendingKeys = new Set<string>();
 	if (previousKey && previousKey !== keepKey) {
 		pendingKeys.add(previousKey);
@@ -81,7 +101,12 @@ async function deleteReplacedItems(
 				error: error instanceof Error ? error.message : String(error),
 			}),
 		);
+		return "failed";
 	}
+	if (stillOwns && !(await stillOwns())) {
+		return "unowned";
+	}
+	let ok = true;
 	for (const found of items) {
 		if (found.key === keepKey || !found.key.startsWith(`${systemId}/`)) {
 			continue;
@@ -93,10 +118,14 @@ async function deleteReplacedItems(
 			continue;
 		}
 		pendingKeys.add(found.key);
+		if (stillOwns && !(await stillOwns())) {
+			return "unowned";
+		}
 		try {
 			await deleteItem(auth, found.id);
 			pendingKeys.delete(found.key);
 		} catch (error) {
+			ok = false;
 			console.log(
 				JSON.stringify({
 					event: "page_replace_delete_failed",
@@ -108,9 +137,13 @@ async function deleteReplacedItems(
 		}
 	}
 	for (const key of pendingKeys) {
+		if (stillOwns && !(await stillOwns())) {
+			return "unowned";
+		}
 		try {
 			await deleteItemByKey(auth, key);
 		} catch (error) {
+			ok = false;
 			console.log(
 				JSON.stringify({
 					event: "page_replace_delete_failed",
@@ -122,6 +155,7 @@ async function deleteReplacedItems(
 			);
 		}
 	}
+	return ok ? "clean" : "failed";
 }
 
 export async function drainTick(input: {
@@ -140,17 +174,41 @@ export async function drainTick(input: {
 	await ensureInstance(itemsAuth);
 	const fetchMarkdown = input.fetchMarkdown ?? ((url: string) => fetchPageMarkdown(input.auth, url));
 	const catalog: { items: ItemRecord[] | null } = { items: null };
-	const indexPage =
-		input.indexPage ??
-		((auth, seed, item, markdown, timestamps) =>
-			indexQueuedPage(auth, seed, item, markdown, timestamps, catalog));
 	let indexed = 0;
 	let failed = 0;
 	for (const item of claimed) {
 		const timestamps = { lastCrawled: input.now, lastIndexed: input.now };
+		if (!(await input.queue.owns(item))) {
+			continue;
+		}
 		try {
 			const markdown = await fetchMarkdown(item.url);
-			const itemKey = await indexPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps);
+			if (!(await input.queue.owns(item))) {
+				continue;
+			}
+			const itemKey = input.indexPage
+				? await input.indexPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps)
+				: await uploadQueuedPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps);
+			if (!input.indexPage) {
+				const cleaned = await cleanupReplacedItems(
+					itemsAuth,
+					item.systemId,
+					item.url,
+					itemKey,
+					item.itemKey,
+					catalog,
+					() => input.queue.owns(item),
+				);
+				if (cleaned === "unowned") {
+					continue;
+				}
+				if (cleaned === "failed") {
+					if (await input.queue.fail(item, "legacy cleanup failed")) {
+						failed += 1;
+					}
+					continue;
+				}
+			}
 			if (await input.queue.complete(item, timestamps, itemKey)) {
 				indexed += 1;
 			}

@@ -394,6 +394,7 @@ async function continueDiscover(
 		now: iso,
 		deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
 	});
+	await queue.recordSeedRefresh(run.systemId, systemSeedHash(seed), iso);
 	await queue.clearRun(run.systemId);
 	return {
 		action: "enqueued",
