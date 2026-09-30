@@ -26,6 +26,8 @@ import {
 
 export const DISCOVER_URLS_PER_TICK = 25;
 export const CAP_RETRY_MS = 60 * 60 * 1000;
+/** Records per capped results response. Full markdown makes a large page easy to OOM. */
+export const CAP_RECORD_LIMIT = 5;
 const MAX_POLL_FAILURES = 5;
 
 export type DiscoverPick = {
@@ -45,6 +47,7 @@ export type DiscoverTickResult =
 			trigger: DiscoverPick["trigger"];
 			urls: number;
 			pruned: string[];
+			hitLimit: boolean;
 	  }
 	| { action: "parked"; systemId: SystemId; trigger: DiscoverPick["trigger"]; usable: number }
 	| { action: "failed"; systemId?: SystemId; trigger?: DiscoverPick["trigger"]; error: string };
@@ -234,10 +237,8 @@ export type DiscoverDeps = {
 	deleteDocs: typeof deleteOrphanDocs;
 };
 
-const CAP_RECORD_LIMIT = 100;
-
 function cappedCrawl(status: string, finished: number): boolean {
-	return status === "cancelled_due_to_limits" || finished >= CRAWL_LIMIT;
+	return status === "cancelled_due_to_limits" || (status === "completed" && finished >= CRAWL_LIMIT);
 }
 
 export async function discoverTick(
@@ -359,8 +360,7 @@ async function continueDiscover(
 	let accepted = 0;
 	if (cursor !== "done") {
 		try {
-			const pageBudget = capped ? CRAWL_LIMIT : DISCOVER_URLS_PER_TICK;
-			for (let i = 0; i < pageBudget && cursor !== "done"; i += 1) {
+			for (let i = 0; i < DISCOVER_URLS_PER_TICK && cursor !== "done"; i += 1) {
 				const page = await deps.page(
 					auth,
 					run.jobId,
@@ -378,13 +378,9 @@ async function continueDiscover(
 						accepted += 1;
 					}
 				}
-				if (page.cursor === null) {
-					cursor = "done";
-					break;
-				}
-				cursor = String(page.cursor);
+				cursor = page.cursor === null ? "done" : String(page.cursor);
+				await queue.saveCursor(run.systemId, cursor, iso);
 			}
-			await queue.saveCursor(run.systemId, cursor, iso);
 		} catch (error) {
 			const failures = await queue.notePollFailure(run.systemId, iso);
 			if (failures >= MAX_POLL_FAILURES) {
@@ -394,10 +390,7 @@ async function continueDiscover(
 		}
 	}
 	if (cursor !== "done") {
-		if (!capped) {
-			return { action: "continued", systemId: run.systemId, accepted };
-		}
-		cursor = "done";
+		return { action: "continued", systemId: run.systemId, accepted };
 	}
 	const live = await queue.stagedUrls(run.systemId);
 	const indexable = await queue.indexableUrls(run.systemId);
@@ -440,6 +433,7 @@ async function continueDiscover(
 		trigger: run.trigger,
 		urls: indexable.length,
 		pruned: committed.pruned.map((row) => row.url),
+		hitLimit: capped,
 	};
 }
 

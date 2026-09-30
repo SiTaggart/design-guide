@@ -203,7 +203,12 @@ async function noteFill(
 		discover.action === "enqueued"
 			? [
 					...current.systems.filter((entry) => entry.system !== discover.systemId),
-					resultFor(discover.systemId, seedById(discover.systemId).startUrl, discover.urls),
+					resultFor(
+						discover.systemId,
+						seedById(discover.systemId).startUrl,
+						discover.urls,
+						discover.hitLimit,
+					),
 				]
 			: current.systems;
 	await writeStatus(env, {
@@ -258,7 +263,7 @@ async function mailFill(
 			await sendFinishIndexMail(
 				env,
 				{ trigger: discover.trigger, workflowId: `discover-${discover.trigger}-${discover.systemId}` },
-				[resultFor(discover.systemId, seed.startUrl, discover.urls)],
+				[resultFor(discover.systemId, seed.startUrl, discover.urls, discover.hitLimit)],
 			);
 		}
 		if (discover.action === "parked") {
@@ -296,13 +301,18 @@ async function mailFill(
 	}
 }
 
-function resultFor(system: SystemId, startUrl: string, usable: number): SystemReindexResult {
+function resultFor(
+	system: SystemId,
+	startUrl: string,
+	usable: number,
+	hitLimit = false,
+): SystemReindexResult {
 	return {
 		system,
 		startUrl,
 		crawl: { ...emptyCounts(), total: usable, finished: usable },
 		indexed: 0,
-		hitLimit: false,
+		hitLimit,
 		keptPrevious: true,
 		usable,
 	};
