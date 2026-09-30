@@ -125,7 +125,6 @@ async function cleanupReplacedItems(
 			await deleteItem(auth, found.id);
 			pendingKeys.delete(found.key);
 		} catch (error) {
-			ok = false;
 			console.log(
 				JSON.stringify({
 					event: "page_replace_delete_failed",
@@ -200,6 +199,9 @@ export async function drainTick(input: {
 					() => input.queue.owns(item),
 				);
 				if (cleaned === "unowned") {
+					if (itemKey !== item.itemKey) {
+						await deleteItemByKey(itemsAuth, itemKey);
+					}
 					continue;
 				}
 				if (cleaned === "failed") {

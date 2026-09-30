@@ -4,7 +4,7 @@ import { seedById } from "../src/config/seed.ts";
 import worker from "../src/worker.ts";
 import { discoverTick, commitDiscoveredUrls, deleteOrphanDocs, pickDiscoverSystem } from "../src/index/discover.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
-import { drainTick, indexQueuedPage } from "../src/index/drain.ts";
+import { drainTick, indexQueuedPage, pageItemKey } from "../src/index/drain.ts";
 import { fillTick, noteIndexedSeeds } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import { D1PageQueue, FRESHNESS_MS, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
@@ -427,9 +427,16 @@ describe("drain claim ownership", () => {
 		expect(row?.item_key).toBeNull();
 	});
 
-	it("does not delete a newer item when the claim is lost after upload", async () => {
+	it("drops the untracked upload when the claim is lost after upload and keeps the live page", async () => {
 		const pageQueue = await queue();
 		const url = "https://primer.style/components/select";
+		const liveKey = "primer/page/previous.md";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
+		await pageQueue.complete(
+			{ systemId: "primer", url },
+			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
+			liveKey,
+		);
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
 		const deleted: string[] = [];
 		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
@@ -438,6 +445,11 @@ describe("drain claim ownership", () => {
 			return { id: "stale", key: "primer/page/stale.md" };
 		});
 		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "live",
+				key: liveKey,
+				metadata: { system: "primer", source_url: url },
+			},
 			{
 				id: "newer",
 				key: "primer/page/newer.md",
@@ -457,11 +469,11 @@ describe("drain claim ownership", () => {
 			fetchMarkdown: async () => "# select",
 		});
 		expect(counts).toEqual({ claimed: 1, indexed: 0, failed: 0 });
-		expect(deleted).toEqual([]);
+		expect(deleted).toEqual([pageItemKey("primer", url, 1, NOW)]);
 		const row = await workRow(pageQueue, url);
 		expect(row?.status).toBe("claimed");
 		expect(row?.claimed_at).toBe("2026-09-30T00:20:00.000Z");
-		expect(row?.item_key).toBeNull();
+		expect(row?.item_key).toBe(liveKey);
 	});
 });
 
@@ -502,6 +514,35 @@ describe("legacy cleanup retry", () => {
 		});
 		expect(second).toEqual({ claimed: 1, indexed: 1, failed: 0 });
 		expect(deleted).toEqual(["legacy"]);
+		expect((await workRow(pageQueue, url))?.status).toBe("done");
+	});
+
+	it("marks the page done when delete-by-id fails and delete-by-key removes the legacy item", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/components/select";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({ id: "fresh", key: "primer/page/fresh.md" });
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "legacy",
+				key: "primer/20260101/abc.md",
+				metadata: { system: "primer", source_url: url },
+			},
+		]);
+		vi.spyOn(itemsRest, "deleteItem").mockRejectedValue(new Error("delete by id down"));
+		const deletedKeys: string[] = [];
+		vi.spyOn(itemsRest, "deleteItemByKey").mockImplementation(async (_auth, key) => {
+			deletedKeys.push(key);
+		});
+		const counts = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => "# select",
+		});
+		expect(counts).toEqual({ claimed: 1, indexed: 1, failed: 0 });
+		expect(deletedKeys).toEqual(["primer/20260101/abc.md"]);
 		expect((await workRow(pageQueue, url))?.status).toBe("done");
 	});
 
