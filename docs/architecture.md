@@ -2,23 +2,32 @@
 
 Cited retrieval over indexed design-system docs. The worker returns stored passages. It does not write them.
 
-## Seed to crawl to index
+## Seed to queue to index
 
 ```mermaid
 flowchart LR
-  seed["seed.ts hash\nin Worker bundle"] --> cron["Worker cron fuse"]
-  cron --> workflow["Reindex Workflow"]
-  workflow --> crawl["Browser Run /crawl\nmarkdown"]
-  crawl --> items["AI Search Items"]
-  workflow --> kv["INDEX KV\nparks + last-run"]
-  workflow --> mail["EMAIL send\nstart + finish"]
+  seed["seed.ts hash\nin Worker bundle"] --> cron["Worker cron"]
+  cron --> discover["Discover\none live system"]
+  discover --> queue["D1 page queue"]
+  discover --> prune["Prune orphans\nafter success"]
+  cron --> drain["Drain about 100 pages"]
+  queue --> drain
+  drain --> items["AI Search\nper-page upsert"]
+  cron --> kv["INDEX KV\nparks + last-run"]
+  drain --> mail["EMAIL\nstart, finish, stuck"]
 ```
 
 Seed ids: `paste`, `primer`, `uswds`, `govuk`, `nhs`, `antd`, `gitlab-pajamas`, `patternfly`, `cloudscape`, `vanilla`, `siemens-ix`, `backpack`, `garden`, `ouds-web`. One `startUrl` each.
 
-Crawl: `source=all`, limit `500`, depth `500`, `formats: [markdown]`, `render: true`. Depth is never greater than the page cap. `hitLimit` is true only when the crawl job hits that cap. A crawl that reaches the page cap keeps the previous generation. `includePatterns` scopes the crawl when a seed sets them. No page-list filters. Deploy-drift starts one live system per workflow. A parked seed does not take that slot. The workflow applies the same cap to a payload that already lists more systems.
+The happy path is continuous fill. Each cron tick discovers URLs for at most one system and drains a small batch of page work. It does not crawl and swap a whole site inside one Workflow run. Parks stay on INDEX KV. The page queue is D1 (`PAGE_QUEUE`): one row per `(systemId, url)` with `kind` (`seed` or `reindex`), `enqueuedAt`, `attempts`, `lastCrawled`, and `lastIndexed`. Rediscovery upserts that row and keeps those timestamps. `seed` stays ahead of `reindex`.
 
-A Cloudflare Workflow is the reindex engine. A 5-minute Worker cron compares the bundle seed hash to `lastIndexedHash` in KV and starts the Workflow for new or changed systems (`deploy-drift`). A daily cron recrawls non-parked seeds (`recrawl`). A Sunday 06:00 UTC recovery recrawls parked seeds via the same Workflow. The Workflow polls Browser Run with `step.sleep`, then does the same per-system swap as `src/index/reindex.ts`. A completed crawl with fewer than two usable pages is a stub: it does not swap, and the Workflow writes park state to KV. Catalog, query, and the MCP skill enum read that park map and drop parked systems from the live set. `GET /v1/index-status` returns the last-run JSON. The Workflow emails `simon.taggart@gmail.com` via `env.EMAIL.send({ from, to, subject, text })` on start and on finish (success or fail). The `EMAIL` binding is unrestricted; `to` is set in the send call. Finish mail includes systems, counts, parks, unparked ids when a park cleared, errors, and the status URL. Index swap commits before finish mail. `bun run reindex` stays debug-only.
+Discover reuses the Browser Run `/crawl` request (`source=all`, limit `500`, depth `500`, markdown, render). A tick only starts or continues one job. Parks do not take that slot. Seed drift is chosen before a due recheck. A system is due when `lastIndexed` is missing or older than 30 days, it has no queued pages, and it was not discovered in that window. The Sunday 06:00 UTC cron is the run that discovers one parked seed. While the crawl is still running, the tick only polls. After it completes, later ticks page through records and keep https URLs that pass the existing usable-page check. A finished crawl with fewer than two usable URLs is a stub: it parks the system and does not enqueue or prune. A crawl that errors or hits the page cap does not prune and does not replace the queue.
+
+A successful discover enqueues the live URL set, then deletes AI Search docs and queue rows for that system whose URL is not in the set. URLs still on the map stay: indexed rows keep their timestamps, queued rows drain, failed rows retry. Docs already in AI Search stay searchable. Drain never deletes a previous page unless the replacement upload has succeeded.
+
+Drain claims up to 100 pages per tick: `seed` first, then oldest `lastIndexed` (missing first), then oldest `enqueuedAt`. Each claimed page is fetched with Browser Run `/markdown` and upserted into AI Search with `lastCrawled` and `lastIndexed` on the item. A failed fetch or upload marks that work item failed and leaves the previous doc in place. Pages already upserted are searchable while the rest of the system is still queued. A system leaves the park map once two pages are indexed.
+
+`GET /v1/index-status` returns the last-run JSON plus queue depths (`pending`, `claimed`, `failed`, `done`) and per-system `lastCrawled`, `lastIndexed`, and `lastDiscovered`. The worker emails `simon.taggart@gmail.com` when a discover starts, when a discover finishes or parks, and when a drain tick claims pages but indexes none or the failed set is stuck. A tick that indexes at least one page does not send fail mail while other pages remain queued. `ReindexWorkflow` is still in the bundle from the earlier whole-site path and is not what the cron starts. If one of those instances is still running, the cron waits instead of starting a second crawl. `bun run reindex` stays debug-only.
 
 ## Query to citation JSON
 
@@ -44,4 +53,4 @@ The query path calls `search()` only. No rewrite. No chat completions.
 
 The golden query is `accessible combobox or listbox keyboard and focus guidance`. A pass is HTTP 200 with at least two distinct `system` values. Each hit has `passage`, `source`, `url`, and `score` of 0.6 or greater. A human spot-check confirms the passages are about combobox or listbox keyboard and focus accessibility.
 
-`GET /health` is `200` when the index is ready. `GET /v1/index-status` is last-run health: per-system counts, parks, unparked ids, crawl/render/index errors, and the workflow id. Email is a push of that same summary, not a replacement for the pull endpoint.
+`GET /health` is `200` when the index is ready. `GET /v1/index-status` is last-run health plus the live page queue: depths, per-system `lastCrawled` / `lastIndexed` / `lastDiscovered`, parks, unparked ids, crawl/render/index errors, and the active discover id when a fill is running. Email is a push of start, finish, and stuck summaries, not a replacement for the pull endpoint. Mid-fill does not fail the status or the mail.

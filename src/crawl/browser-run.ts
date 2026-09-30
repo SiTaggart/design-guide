@@ -139,6 +139,22 @@ export async function startCrawl(auth: CrawlAuth, seed: Seed, startUrl: string):
 	return { jobId };
 }
 
+export async function fetchPageMarkdown(auth: CrawlAuth, pageUrl: string): Promise<string> {
+	const endpoint = `https://api.cloudflare.com/client/v4/accounts/${auth.accountId}/browser-rendering/markdown`;
+	const { ok, status, data } = await cfJson(auth, endpoint, {
+		method: "POST",
+		body: JSON.stringify({ url: pageUrl }),
+	});
+	if (!ok) {
+		throw new Error(`markdown fetch failed ${status}: ${JSON.stringify(data.errors ?? data)}`);
+	}
+	const result = data.result;
+	if (typeof result !== "string") {
+		throw new Error(`markdown fetch for ${pageUrl} returned no document`);
+	}
+	return result;
+}
+
 export async function pollJob(auth: CrawlAuth, jobId: string): Promise<CrawlJobResult> {
 	const { ok, status, data } = await cfJson(auth, `${crawlUrl(auth.accountId, jobId)}?limit=1`);
 	if (!ok) {

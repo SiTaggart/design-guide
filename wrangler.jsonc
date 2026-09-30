@@ -25,6 +25,14 @@
 			"preview_id": "eb078c35c3894d2b96370964fa6ac34d"
 		}
 	],
+	"d1_databases": [
+		{
+			"binding": "PAGE_QUEUE",
+			"database_name": "design-guide-page-queue",
+			"database_id": "a19a988e-a45c-4de9-a4f4-490ddfd0212b",
+			"migrations_dir": "migrations"
+		}
+	],
 	"workflows": [
 		{
 			"name": "design-guide-reindex",

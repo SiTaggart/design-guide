@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { seedById } from "../src/config/seed.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
@@ -9,7 +9,20 @@ import { startStatusRun } from "../src/index/status.ts";
 import { DRIFT_CRON, RECRAWL_CRON, RECOVERY_CRON, decideReindex, startReindex } from "../src/index/trigger.ts";
 import { handleScheduled } from "../src/schedule.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
+import { memoryD1 } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV, mockWorkflow, parksKvGetThrows } from "./helpers/index-env.ts";
+
+const startSeedCrawl = vi.hoisted(() =>
+	vi.fn(async (_auth: unknown, seed: { startUrl: string }) => ({
+		startUrl: seed.startUrl,
+		jobId: "job-discover",
+	})),
+);
+
+vi.mock("../src/crawl/browser-run.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/crawl/browser-run.ts")>();
+	return { ...actual, startSeedCrawl };
+});
 
 describe("wrangler automation config", () => {
 	const wrangler = readFileSync("wrangler.jsonc", "utf8");
@@ -19,6 +32,7 @@ describe("wrangler automation config", () => {
 		expect(wrangler).toContain('"0 4 * * *"');
 		expect(wrangler).toContain('"0 6 * * 0"');
 		expect(wrangler).toContain('"steps": 25000');
+		expect(wrangler).toContain('"binding": "PAGE_QUEUE"');
 		expect(wrangler).not.toContain('"schedules"');
 		expect(DRIFT_CRON).toBe("*/5 * * * *");
 		expect(RECRAWL_CRON).toBe("0 4 * * *");
@@ -78,8 +92,10 @@ describe("decideReindex", () => {
 	it("starts one live system when parked seeds sit ahead of it", async () => {
 		const kv = memoryKV();
 		const workflow = mockWorkflow();
+		const pageQueue = memoryD1();
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: kv,
+			PAGE_QUEUE: pageQueue,
 			REINDEX: workflow.binding,
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
@@ -98,15 +114,20 @@ describe("decideReindex", () => {
 			catalogHash: SEED_HASH,
 		});
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
-		expect(workflow.created).toHaveLength(1);
-		expect(workflow.created[0]?.params?.systems).toEqual(["primer"]);
+		expect(workflow.created).toEqual([]);
+		const running = await pageQueue
+			.prepare("SELECT system_id, kind, trigger_name FROM discover_run")
+			.first<{ system_id: string; kind: string; trigger_name: string }>();
+		expect(running).toEqual({ system_id: "primer", kind: "seed", trigger_name: "deploy-drift" });
 	});
 
 	it("starts one deploy-drift system when every seed is stale", async () => {
 		const kv = memoryKV();
 		const workflow = mockWorkflow();
+		const pageQueue = memoryD1();
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: kv,
+			PAGE_QUEUE: pageQueue,
 			REINDEX: workflow.binding,
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
@@ -119,15 +140,20 @@ describe("decideReindex", () => {
 			catalogHash: SEED_HASH,
 		});
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
-		expect(workflow.created).toHaveLength(1);
-		expect(workflow.created[0]?.params?.systems).toEqual(["paste"]);
+		expect(workflow.created).toEqual([]);
+		const running = await pageQueue
+			.prepare("SELECT system_id FROM discover_run")
+			.first<{ system_id: string }>();
+		expect(running).toEqual({ system_id: "paste" });
 	});
 
 	it("recovers only parked seeds", async () => {
 		const kv = memoryKV();
 		const workflow = mockWorkflow();
+		const pageQueue = memoryD1();
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: kv,
+			PAGE_QUEUE: pageQueue,
 			REINDEX: workflow.binding,
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
@@ -141,12 +167,11 @@ describe("decideReindex", () => {
 			catalogHash: SEED_HASH,
 		});
 		await handleScheduled({ cron: RECOVERY_CRON } as ScheduledController, env);
-		expect(workflow.created).toHaveLength(1);
-		expect(workflow.created[0]?.params).toMatchObject({
-			trigger: "recovery",
-			systems: ["garden"],
-			catalogHash: SEED_HASH,
-		});
+		expect(workflow.created).toEqual([]);
+		const running = await pageQueue
+			.prepare("SELECT system_id, trigger_name FROM discover_run")
+			.first<{ system_id: string; trigger_name: string }>();
+		expect(running).toEqual({ system_id: "garden", trigger_name: "recovery" });
 	});
 
 	it("skips recovery when nothing is parked", async () => {

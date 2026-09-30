@@ -168,7 +168,7 @@ A missing query returns `400` with `{ "error": "query_required" }`. No matches a
 
 `GET /health` returns `200` when at least one completed item exists. Otherwise it returns `503`.
 
-`GET /v1/index-status` returns last-run JSON: workflow id, parks, unparked ids, per-system counts, and crawl/render/index errors.
+`GET /v1/index-status` returns last-run JSON plus page-queue depths and per-system `lastCrawled`, `lastIndexed`, and `lastDiscovered`.
 
 ## Seed
 
@@ -193,17 +193,17 @@ Config lives in `src/config/seed.ts`. A seed is one crawl from a single `startUr
 
 Spectrum and Carbon are parked as crawl misses. Their items are deleted. They are not in the seed. Every seed excludes spectrum.adobe.com and carbondesignsystem.com. The exclude list does not match `react-spectrum.adobe.com`. `includePatterns` scopes uswds to its host, backpack to `/latest/**`, siemens-ix to `/docs/**`, and ouds-web to `/orange/` including `docs/1.5`. ouds-web also excludes `docs/0.4`. No seed filters by page topic. gitlab-pajamas has a `fallbackStartUrl`. The CLI uses that URL only when the primary crawl start returns a 4xx or 5xx. A `llms.txt` start for siemens-ix finished 1 page and produced 0 usable records, because Browser Run did not follow the markdown links.
 
-Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron compares that hash to `lastIndexedHash` in KV and starts the reindex Workflow for new or changed systems. A daily cron recrawls non-parked systems. A Sunday 06:00 UTC recovery recrawls parked seeds via the same Workflow. There is no admin UI. There is no GitHub Actions crawl job.
+Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron discovers one drifted or due system and drains up to 100 queued pages. A daily cron uses the same fill. A Sunday 06:00 UTC recovery discovers one parked seed. There is no admin UI. There is no GitHub Actions crawl job.
 
-`GET /v1/index-status` is the last-run record: per-system counts, parks, unparked ids, crawl/render/index errors, and the workflow id. Slack is not the health path.
+`GET /v1/index-status` is the fill record: queue depths, per-system crawl and index timestamps, parks, unparked ids, crawl/render/index errors, and the discover id. Slack is not the health path.
 
-The Workflow emails start and finish through the Worker `send_email` binding. Each mail step is its own `step.do` with retries and calls `env.EMAIL.send({ from, to, subject, text })`. There is no REST/SMTP path, no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift`, `recrawl`, or `recovery`), workflow id, and systems kicked. Finish mail (success or fail) includes systems, counts, parks, unparked ids when a park cleared, errors, and the status URL. Index swap commits before finish mail.
+The worker emails start and finish through the Worker `send_email` binding with `env.EMAIL.send({ from, to, subject, text })`. There is no REST/SMTP path, no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift`, `recrawl`, or `recovery`), discover id, and the one system kicked. Finish mail on a successful discover is not a failure while drain continues. Fail mail is for a discover that errors or a drain tick that claims pages and indexes none. A mid-fill tick that indexes pages does not send fail mail.
 
 `wrangler.jsonc` binds `EMAIL` the same way as team-retros: `{ "name": "EMAIL" }` (no `destination_address`). The Workflow sends `to: simon.taggart@gmail.com` (the verified Email Routing destination for this account; `me@simontaggart.com` is not a send destination) and `from: design-guide@simontaggart.com` (same routed zone as this Worker). `EMAIL` is a binding, not a secret. There is no Resend, Mailchannels, SES, or agent mailer. The Worker secrets stay **CLOUDFLARE_ACCOUNT_ID** and **CLOUDFLARE_API_TOKEN**.
 
 ## Reindex
 
-The happy path is a Cloudflare Workflow. It reuses the crawl → item-swap logic in `src/index/reindex.ts` and polls Browser Run with Workflow `step.sleep`. A stub (`usable < 2`) does not swap. The Workflow writes park state to KV, and search/MCP drop parked systems from the live set.
+The happy path is discover plus drain. Discover enqueues URLs for one system. Drain upserts about 100 pages per cron tick into AI Search. A stub (`usable < 2`) does not enqueue or prune. Park state stays in KV, and search/MCP drop parked systems from the live set. The previous whole-site Workflow is not started by the cron.
 
 `bun run reindex` is debug-only. Do not use it as the indexing runner.
 
@@ -217,11 +217,9 @@ bun run reindex
 
 Debug one system with `SYSTEM=primer bun run reindex`.
 
-Each system runs one Browser Run `/crawl` job from its `startUrl` with `source: "all"`. `CRAWL_LIMIT` is 500 pages and `CRAWL_DEPTH` is 500, both in `src/config/instance.ts`. Depth is not greater than the page cap. A crawl that reaches the page cap fails that system and keeps the previous generation. The Workflow polls every two minutes. It uploads one crawl record per step. Status counts come from the job totals. The debug CLI polls every 15 seconds and still collects that system's completed pages in memory. A job may run up to the seven days Cloudflare allows. A step that dies from memory or the step timeout keeps the previous generation, reports `indexed` 0, and cancels the crawl job. `hitLimit` stays false unless the crawl itself hit the page cap.
+The cron discovers with one Browser Run `/crawl` job per system (`source: "all"`, `CRAWL_LIMIT` 500, `CRAWL_DEPTH` 500). Depth is not greater than the page cap. A crawl that hits that cap does not prune. After a successful discover, drain fetches each claimed URL with `/markdown` and upserts that page. Upload and delete retry AI Search errors 1015, 7009, and 7114 with backoff. A failed page stays failed on the queue and the previous AI Search doc stays. A parked seed does not take the discover slot. The next cron continues the rest. The seed list stays fourteen systems.
 
-Upload and delete retry AI Search errors 1015, 7009, and 7114 with backoff. When those retries are exhausted, the system keeps the previous generation and records an error. After a system sees one of those errors, the Workflow sleeps 30 seconds before the next system. Deploy-drift starts one stale live system per workflow. A parked seed does not take that slot. The next cron continues the rest. The seed list stays fourteen systems.
-
-Reindex deletes items whose key prefix is not a current `SYSTEM_IDS` seed. Each system uploads a new generation, then deletes that system's old keys only after every upload succeeds. A failed generation is deleted while an older generation is still present. If a retry fails after that older generation is already gone, the uploaded generation stays. A crawl that fails, hits the limit, or produces a stub (`usable < 2`) does not swap. Stubs are parked in KV. DIY Vectorize is not on this path.
+`bun run reindex` still runs the debug whole-site swap. It polls every 15 seconds and collects that system's completed pages in memory. That command is not the indexing runner. A crawl that fails, hits the limit, or produces a stub (`usable < 2`) does not swap. Stubs are parked in KV. DIY Vectorize is not on this path.
 
 The CLI prints a JSON array with one result per system:
 
