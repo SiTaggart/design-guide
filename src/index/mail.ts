@@ -12,7 +12,10 @@ import {
 
 export const INDEX_MAIL_TO = "simon.taggart@gmail.com";
 export const INDEX_MAIL_FROM = "design-guide@simontaggart.com";
-export const INDEX_STATUS_URL = "https://design-guide.me-2c5.workers.dev/v1/index-status";
+export const INDEX_STATUS_URL = "https://design-guide.me-2c5.workers.dev/status";
+
+const STATUS_OPEN =
+	"Open Status with the Worker secret STATUS_TOKEN (Authorization: Bearer, or ?token= on that URL locally). This mail does not include the secret.";
 export const MAIL_STEP_RETRIES = {
 	retries: { limit: 5, delay: "10 seconds" as const, backoff: "exponential" as const },
 };
@@ -35,6 +38,7 @@ export function startIndexMail(params: Pick<ReindexParams, "trigger" | "workflow
 			`Workflow: ${params.workflowId}`,
 			`Systems: ${systems}`,
 			`Status: ${INDEX_STATUS_URL}`,
+			STATUS_OPEN,
 		].join("\n"),
 	};
 }
@@ -97,6 +101,7 @@ export function finishIndexMail(
 			"Per-system counts:",
 			...systemLines,
 			`Status: ${INDEX_STATUS_URL}`,
+			STATUS_OPEN,
 		].join("\n"),
 	};
 }
