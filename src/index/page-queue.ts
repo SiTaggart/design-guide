@@ -4,6 +4,7 @@ export const DRAIN_LIMIT = 100;
 export const MAX_ATTEMPTS = 5;
 export const FRESHNESS_MS = 30 * 24 * 60 * 60 * 1000;
 const STALE_CLAIM_MS = 15 * 60 * 1000;
+const CLAIM_EXPIRED = "claim expired";
 
 export const PAGE_QUEUE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS page_work (
@@ -289,7 +290,7 @@ export class D1PageQueue implements PageQueue {
 		await run(
 			this.db,
 			`UPDATE page_work
-			 SET status = 'failed', claimed_at = NULL, error = COALESCE(error, 'claim expired')
+			 SET status = 'failed', claimed_at = NULL, error = COALESCE(error, '${CLAIM_EXPIRED}')
 			 WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ? AND attempts >= ?`,
 			staleBefore,
 			MAX_ATTEMPTS,
@@ -634,7 +635,11 @@ export class D1PageQueue implements PageQueue {
 			     claimed_at = NULL,
 			     error = NULL,
 			     item_key = ?
-			 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
+			 WHERE system_id = ? AND url = ?
+			   AND (
+			     (status = 'claimed' AND attempts = ? AND claimed_at = ?)
+			     OR (status = 'failed' AND attempts = ? AND claimed_at IS NULL AND error = ?)
+			   )`,
 			MAX_ATTEMPTS,
 			MAX_ATTEMPTS - 1,
 			itemKey,
@@ -642,6 +647,8 @@ export class D1PageQueue implements PageQueue {
 			item.url,
 			item.attempts,
 			item.claimedAt,
+			item.attempts,
+			CLAIM_EXPIRED,
 		);
 		return changes === 1;
 	}

@@ -524,6 +524,65 @@ describe("drain claim ownership", () => {
 		expect(row).toEqual({ status: "failed", attempts: MAX_ATTEMPTS, item_key: liveKey, error: "gave up" });
 		expect(await pageQueue.claim(1, "2026-09-30T00:30:00.000Z")).toEqual([]);
 	});
+
+	it("records the replacement and stays retryable when the final claim expires after the older item is deleted", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/components/select";
+		const liveKey = "primer/page/previous.md";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
+		await pageQueue.complete(
+			{ systemId: "primer", url },
+			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
+			liveKey,
+		);
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET attempts = ? WHERE url = ?")
+			.bind(MAX_ATTEMPTS - 1, url)
+			.run();
+		const deleted: string[] = [];
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({ id: "fresh", key: "primer/page/fresh.md" });
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "legacy",
+				key: liveKey,
+				metadata: { system: "primer", source_url: url },
+			},
+		]);
+		vi.spyOn(itemsRest, "deleteItem").mockImplementation(async (_auth, id) => {
+			deleted.push(id);
+			await pageQueueDb(pageQueue)
+				.prepare(
+					"UPDATE page_work SET status = 'failed', claimed_at = NULL, error = COALESCE(error, 'claim expired') WHERE url = ?",
+				)
+				.bind(url)
+				.run();
+		});
+		vi.spyOn(itemsRest, "deleteItemByKey").mockImplementation(async (_auth, key) => {
+			deleted.push(key);
+		});
+		const counts = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => "# select",
+		});
+		const replacement = pageItemKey("primer", url, MAX_ATTEMPTS, NOW);
+		expect(counts).toEqual({ claimed: 1, indexed: 0, failed: 0 });
+		expect(deleted).toEqual(["legacy"]);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, attempts, item_key, error FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; attempts: number; item_key: string; error: string | null }>();
+		expect(row).toEqual({
+			status: "pending",
+			attempts: MAX_ATTEMPTS - 1,
+			item_key: replacement,
+			error: null,
+		});
+		expect((await pageQueue.claim(1, "2026-09-30T00:30:00.000Z")).map((item) => item.url)).toEqual([url]);
+	});
 });
 
 describe("legacy cleanup retry", () => {
@@ -659,6 +718,23 @@ describe("releaseForRetry", () => {
 			attempts: MAX_ATTEMPTS,
 			item_key: "primer/page/later.md",
 			error: "gave up",
+			claimed_at: null,
+		});
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET status = 'failed', attempts = ?, item_key = ?, error = 'claim expired', claimed_at = NULL WHERE url = ?")
+			.bind(owned!.attempts, "primer/page/deleted.md", url)
+			.run();
+		expect(await pageQueue.releaseForRetry(owned!, "primer/page/kept.md")).toBe(true);
+		expect(
+			await pageQueueDb(pageQueue)
+				.prepare("SELECT status, attempts, item_key, error, claimed_at FROM page_work WHERE url = ?")
+				.bind(url)
+				.first(),
+		).toEqual({
+			status: "pending",
+			attempts: owned!.attempts,
+			item_key: "primer/page/kept.md",
+			error: null,
 			claimed_at: null,
 		});
 	});
