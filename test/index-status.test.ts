@@ -9,10 +9,19 @@ import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV, mockWorkflow } from "./helpers/index-env.ts";
 
+const STATUS_TOKEN = "test-status-token";
+
+function authed(url: string): Request {
+	return new Request(url, { headers: { authorization: `Bearer ${STATUS_TOKEN}` } });
+}
+
 describe("GET /v1/index-status", () => {
 	it("returns unbound 200 when INDEX is missing", async () => {
 		const { env } = envWithIndex(fixtureChunks);
-		const response = await worker.fetch(new Request("https://example.test/v1/index-status"), env);
+		const response = await worker.fetch(authed("https://example.test/v1/index-status"), {
+			...env,
+			STATUS_TOKEN,
+		});
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({
 			unbound: true,
@@ -26,6 +35,7 @@ describe("GET /v1/index-status", () => {
 			counts: { systems: 0, indexed: 0, parked: 0, errors: 0 },
 			queue: { pending: 0, claimed: 0, failed: 0, done: 0 },
 			freshness: [],
+			discover: null,
 		});
 	});
 
@@ -72,8 +82,12 @@ describe("GET /v1/index-status", () => {
 			counts: { systems: 0, indexed: 0, parked: 0, errors: 0 },
 			queue: { pending: 0, claimed: 0, failed: 0, done: 0 },
 			freshness: [],
+			discover: null,
 		});
-		const response = await worker.fetch(new Request("https://example.test/v1/index-status"), env);
+		const response = await worker.fetch(authed("https://example.test/v1/index-status"), {
+			...env,
+			STATUS_TOKEN,
+		});
 		expect(response.status).toBe(200);
 		const body = (await response.json()) as {
 			unbound: boolean;
@@ -135,7 +149,10 @@ describe("GET /v1/index-status", () => {
 		expect(finished.workflowId).toBe("reindex-setup-fail");
 		expect(finished.errors.crawl).toEqual([{ message: "sweep boom" }]);
 		expect(finished.counts.errors).toBe(1);
-		const response = await worker.fetch(new Request("https://example.test/v1/index-status"), env);
+		const response = await worker.fetch(authed("https://example.test/v1/index-status"), {
+			...env,
+			STATUS_TOKEN,
+		});
 		const body = (await response.json()) as {
 			state: string;
 			runError?: string;
@@ -194,7 +211,10 @@ describe("GET /v1/index-status", () => {
 		expect(finished.unparked).toEqual(["garden"]);
 		expect(finished.parks).toEqual({});
 		expect(finished.state).toBe("ok");
-		const response = await worker.fetch(new Request("https://example.test/v1/index-status"), env);
+		const response = await worker.fetch(authed("https://example.test/v1/index-status"), {
+			...env,
+			STATUS_TOKEN,
+		});
 		const body = (await response.json()) as {
 			trigger: string;
 			unparked: string[];

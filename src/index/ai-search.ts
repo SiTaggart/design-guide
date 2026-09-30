@@ -41,6 +41,7 @@ export type WorkerEnv = {
 	CLOUDFLARE_API_TOKEN?: string;
 	INDEX_WEBHOOK_URL?: string;
 	EMAIL?: SendEmail;
+	STATUS_TOKEN?: string;
 };
 
 function retrievalFilters(

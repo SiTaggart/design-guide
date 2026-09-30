@@ -1,6 +1,12 @@
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
-import { D1PageQueue, emptyDepths, type QueueDepths, type SystemFreshness } from "./page-queue.ts";
+import {
+	D1PageQueue,
+	emptyDepths,
+	type DiscoverRun,
+	type QueueDepths,
+	type SystemFreshness,
+} from "./page-queue.ts";
 import { SEED_HASH } from "./seed-hash.ts";
 import { readParks, type Parks } from "./parks.ts";
 import type { SystemReindexResult } from "./reindex.ts";
@@ -24,6 +30,14 @@ export type IndexStatusCounts = {
 	errors: number;
 };
 
+export type IndexDiscoverStatus = {
+	systemId: SystemId;
+	jobId: string;
+	kind: DiscoverRun["kind"];
+	trigger: IndexTrigger;
+	startedAt: string;
+};
+
 export type IndexStatusDocument = {
 	unbound: boolean;
 	workflowId: string | null;
@@ -41,6 +55,7 @@ export type IndexStatusDocument = {
 	runError?: string;
 	queue: QueueDepths;
 	freshness: SystemFreshness[];
+	discover: IndexDiscoverStatus | null;
 };
 
 export type ReindexParams = {
@@ -149,6 +164,20 @@ export function emptyStatus(unbound: boolean, lastIndexedHash: string | null = n
 		counts: { systems: 0, indexed: 0, parked: 0, errors: 0 },
 		queue: emptyDepths(),
 		freshness: [],
+		discover: null,
+	};
+}
+
+function discoverFromRun(run: DiscoverRun | null): IndexDiscoverStatus | null {
+	if (!run) {
+		return null;
+	}
+	return {
+		systemId: run.systemId,
+		jobId: run.jobId,
+		kind: run.kind,
+		trigger: run.trigger,
+		startedAt: run.startedAt,
 	};
 }
 
@@ -186,6 +215,7 @@ export async function readStoredStatus(env: WorkerEnv): Promise<IndexStatusDocum
 			runError,
 			errors: errorsFromResults(systems, runError),
 			counts: countsFrom(systems, parks, runError),
+			discover: null,
 		};
 	} catch {
 		const parks = parksRead.kind === "ok" ? parksRead.parks : {};
@@ -208,7 +238,12 @@ export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 	try {
 		const queue = new D1PageQueue(env.PAGE_QUEUE);
 		await queue.ensure();
-		return { ...stored, queue: await queue.depths(), freshness: await queue.freshness() };
+		const [depths, freshness, run] = await Promise.all([
+			queue.depths(),
+			queue.freshness(),
+			queue.running(),
+		]);
+		return { ...stored, queue: depths, freshness, discover: discoverFromRun(run) };
 	} catch (error) {
 		console.log(
 			JSON.stringify({
@@ -261,6 +296,7 @@ export async function startStatusRun(
 		runError: undefined,
 		queue: current.queue ?? emptyDepths(),
 		freshness: current.freshness ?? [],
+		discover: null,
 	};
 	await writeStatus(env, document);
 	return document;

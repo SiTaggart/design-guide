@@ -47,7 +47,7 @@
 		"subrequests": 1000000
 	},
 	"secrets": {
-		"required": ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]
+		"required": ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN", "STATUS_TOKEN"]
 	},
 	"send_email": [
 		{

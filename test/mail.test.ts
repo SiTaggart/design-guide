@@ -83,6 +83,18 @@ describe("index mail", () => {
 		expect(mail.text).toContain(`Status: ${INDEX_STATUS_URL}`);
 	});
 
+	it("points mail at /status and does not link an unauthenticated index-status URL", () => {
+		expect(INDEX_STATUS_URL).toBe("https://design-guide.me-2c5.workers.dev/status");
+		for (const mail of [startIndexMail(params), finishIndexMail(params, [], {})]) {
+			expect(mail.text).toContain(`Status: ${INDEX_STATUS_URL}`);
+			expect(mail.text).not.toContain("/v1/index-status");
+			expect(mail.text).toContain("Authorization: Bearer");
+			expect(mail.text).toContain("?token=");
+			expect(mail.text).toContain("does not include the secret");
+			expect(mail.text).not.toMatch(/[?&]token=\S+/);
+		}
+	});
+
 	it("composes finish mail with systems, counts, parks, errors, and status URL", async () => {
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });

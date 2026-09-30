@@ -4,6 +4,8 @@ import { handleHealth } from "./serve/health.ts";
 import { handleIndexStatus } from "./serve/index-status.ts";
 import { handleMcp } from "./serve/mcp.ts";
 import { handleSearch } from "./serve/search.ts";
+import { statusMethodNotAllowed, statusTokenOk, statusUnauthorized } from "./serve/status-auth.ts";
+import { handleStatusPage } from "./serve/status-page.ts";
 import { ReindexWorkflow } from "./workflows/reindex.ts";
 
 export { ReindexWorkflow };
@@ -14,8 +16,14 @@ export default {
 		if (url.pathname === "/health" && request.method === "GET") {
 			return handleHealth(env);
 		}
-		if (url.pathname === "/v1/index-status" && request.method === "GET") {
-			return handleIndexStatus(env);
+		if (url.pathname === "/status" || url.pathname === "/v1/index-status") {
+			if (!statusTokenOk(request, env)) {
+				return statusUnauthorized();
+			}
+			if (request.method !== "GET") {
+				return statusMethodNotAllowed();
+			}
+			return url.pathname === "/status" ? handleStatusPage(env) : handleIndexStatus(env);
 		}
 		if (url.pathname === "/v1/search") {
 			return handleSearch(request, env, url);
