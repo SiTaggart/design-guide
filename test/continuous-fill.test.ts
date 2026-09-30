@@ -1316,10 +1316,13 @@ describe("page cap recovery", () => {
 			cancel: async () => undefined,
 		});
 		expect(capped).toMatchObject({
-			action: "failed",
+			action: "enqueued",
 			systemId: "paste",
-			error: "crawl hit the 500 page limit",
+			urls: 0,
+			pruned: [],
 		});
+		expect(await pageQueue.running()).toBeNull();
+		expect(await pageQueue.seedRefreshes()).toEqual({});
 		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
 		const parks = await readParks(env);
 		expect(parks.kind).toBe("ok");
@@ -1335,6 +1338,74 @@ describe("page cap recovery", () => {
 		});
 		expect(started).toEqual(["primer"]);
 		expect(next).toMatchObject({ action: "started", systemId: "primer", trigger: "deploy-drift" });
+	});
+
+	it("pages a capped crawl to the end in one tick and discovers the next drifted seed", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-cap-pages",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const cursors: Array<string | number | undefined> = [];
+		let calls = 0;
+		const cancelled: string[] = [];
+		const capped = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "errored", finished: 533, total: 533 }),
+			page: async (_auth, _job, _status, cursor) => {
+				calls += 1;
+				cursors.push(cursor);
+				if (calls === 1) {
+					return {
+						records: [{ url: "https://paste-dsys.com/a", status: "completed", markdown: "# a" }],
+						cursor: "2",
+					};
+				}
+				return {
+					records: [{ url: "https://paste-dsys.com/b", status: "completed", markdown: "# b" }],
+					cursor: null,
+				};
+			},
+			cancel: async (_auth, jobId) => {
+				cancelled.push(jobId);
+			},
+			deleteDocs: async () => {
+				throw new Error("page cap must not prune");
+			},
+		});
+		expect(capped).toMatchObject({ action: "enqueued", systemId: "paste", urls: 2, pruned: [] });
+		expect(calls).toBe(2);
+		expect(cursors).toEqual([undefined, "2"]);
+		expect(cancelled).toEqual([]);
+		expect(await pageQueue.running()).toBeNull();
+		const started: string[] = [];
+		const next = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			start: async (_auth, seed) => {
+				started.push(seed.id);
+				return { startUrl: seed.startUrl, jobId: `job-${seed.id}` };
+			},
+		});
+		expect(started).toEqual(["primer"]);
+		expect(next).toMatchObject({ action: "started", systemId: "primer" });
+		expect((await urls(pageQueue)).filter((url) => url.includes("paste-dsys.com"))).toEqual([
+			"https://paste-dsys.com/a",
+			"https://paste-dsys.com/b",
+		]);
 	});
 
 	it("skips a fresh page-cap deferral and retries that seed once the hour has passed", () => {

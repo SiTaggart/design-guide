@@ -189,10 +189,11 @@ export async function fetchCrawlPage(
 	jobId: string,
 	recordStatus: string,
 	cursor?: string | number,
+	limit = 1,
 ): Promise<{ records: CrawlRecord[]; cursor: string | number | null }> {
 	const query = new URL(crawlUrl(auth.accountId, jobId));
 	query.searchParams.set("status", recordStatus);
-	query.searchParams.set("limit", "1");
+	query.searchParams.set("limit", String(limit));
 	if (cursor !== undefined) {
 		query.searchParams.set("cursor", String(cursor));
 	}

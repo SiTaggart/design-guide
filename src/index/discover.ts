@@ -234,8 +234,10 @@ export type DiscoverDeps = {
 	deleteDocs: typeof deleteOrphanDocs;
 };
 
+const CAP_RECORD_LIMIT = 100;
+
 function cappedCrawl(status: string, finished: number): boolean {
-	return status === "cancelled_due_to_limits" || (status === "completed" && finished >= CRAWL_LIMIT);
+	return status === "cancelled_due_to_limits" || finished >= CRAWL_LIMIT;
 }
 
 export async function discoverTick(
@@ -357,8 +359,15 @@ async function continueDiscover(
 	let accepted = 0;
 	if (cursor !== "done") {
 		try {
-			for (let i = 0; i < DISCOVER_URLS_PER_TICK; i += 1) {
-				const page = await deps.page(auth, run.jobId, "completed", cursor ?? undefined);
+			const pageBudget = capped ? CRAWL_LIMIT : DISCOVER_URLS_PER_TICK;
+			for (let i = 0; i < pageBudget && cursor !== "done"; i += 1) {
+				const page = await deps.page(
+					auth,
+					run.jobId,
+					"completed",
+					cursor ?? undefined,
+					capped ? CAP_RECORD_LIMIT : 1,
+				);
 				for (const record of page.records) {
 					if (!record.url.startsWith("https://")) {
 						continue;
@@ -385,7 +394,10 @@ async function continueDiscover(
 		}
 	}
 	if (cursor !== "done") {
-		return { action: "continued", systemId: run.systemId, accepted };
+		if (!capped) {
+			return { action: "continued", systemId: run.systemId, accepted };
+		}
+		cursor = "done";
 	}
 	const live = await queue.stagedUrls(run.systemId);
 	const indexable = await queue.indexableUrls(run.systemId);
@@ -398,30 +410,28 @@ async function continueDiscover(
 		await queue.clearRun(run.systemId);
 		return { action: "parked", systemId: run.systemId, trigger: run.trigger, usable: indexable.length };
 	}
-	if (capped && indexable.length === 0) {
-		await queue.noteCapDefer(run.systemId, iso);
-		await queue.clearRun(run.systemId);
-		return {
-			action: "failed",
-			systemId: run.systemId,
-			trigger: run.trigger,
-			error: `crawl hit the ${CRAWL_LIMIT} page limit`,
-		};
-	}
+	const thin = capped && isStubGeneration(indexable.length);
 	const itemsAuth = itemsAuthFrom(env, auth);
-	const committed = await commitDiscoveredUrls({
-		queue,
-		systemId: run.systemId,
-		kind: run.kind,
-		urls: indexable,
-		liveUrls: live,
-		ok: true,
-		prune: !capped,
-		now: iso,
-		deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
-	});
-	await queue.recordSeedRefresh(run.systemId, systemSeedHash(seed), iso);
-	await queue.clearCapDefer(run.systemId);
+	const committed =
+		indexable.length === 0
+			? { pruned: [] as DroppedPage[] }
+			: await commitDiscoveredUrls({
+					queue,
+					systemId: run.systemId,
+					kind: run.kind,
+					urls: indexable,
+					liveUrls: live,
+					ok: true,
+					prune: !capped,
+					now: iso,
+					deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
+				});
+	if (thin) {
+		await queue.noteCapDefer(run.systemId, iso);
+	} else {
+		await queue.recordSeedRefresh(run.systemId, systemSeedHash(seed), iso);
+		await queue.clearCapDefer(run.systemId);
+	}
 	await queue.clearRun(run.systemId);
 	return {
 		action: "enqueued",
