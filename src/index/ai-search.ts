@@ -35,6 +35,7 @@ export type AiSearchNamespace = {
 export type WorkerEnv = {
 	AI_SEARCH: AiSearchNamespace;
 	INDEX?: KVNamespace;
+	PAGE_QUEUE?: D1Database;
 	REINDEX?: Workflow;
 	CLOUDFLARE_ACCOUNT_ID?: string;
 	CLOUDFLARE_API_TOKEN?: string;

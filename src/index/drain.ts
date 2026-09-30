@@ -1,0 +1,235 @@
+import { createHash } from "node:crypto";
+import { INSTANCE_ID } from "../config/instance.ts";
+import { seedById } from "../config/seed.ts";
+import type { Seed, SystemId } from "../config/types.ts";
+import { fetchPageMarkdown, type CrawlAuth } from "../crawl/browser-run.ts";
+import {
+	deleteItem,
+	deleteItemByKey,
+	ensureInstance,
+	listItems,
+	uploadItem,
+	type ItemRecord,
+	type ItemsAuth,
+} from "./items-rest.ts";
+import { DRAIN_LIMIT, type PageQueue, type PageWorkItem } from "./page-queue.ts";
+import { fitsItem } from "./reindex.ts";
+
+export type DrainCounts = {
+	claimed: number;
+	indexed: number;
+	failed: number;
+};
+
+export function pageItemKey(system: SystemId, url: string, attempts: number, stamp: string): string {
+	const digest = createHash("sha256").update(url).digest("hex").slice(0, 16);
+	const slot = createHash("sha256").update(`${attempts}\0${stamp}`).digest("hex").slice(0, 8);
+	return `${system}/page/${digest}-${slot}.md`;
+}
+
+export async function uploadQueuedPage(
+	auth: ItemsAuth,
+	seed: Seed,
+	item: PageWorkItem,
+	markdown: string,
+	timestamps: { lastCrawled: string; lastIndexed: string },
+): Promise<string> {
+	if (!fitsItem({ url: item.url, status: "completed", markdown }, seed)) {
+		throw new Error("page is not indexable");
+	}
+	const key = pageItemKey(item.systemId, item.url, item.attempts, timestamps.lastIndexed);
+	await uploadItem(auth, key, markdown, {
+		system: seed.id,
+		source: seed.source,
+		source_url: item.url,
+		lastCrawled: timestamps.lastCrawled,
+		lastIndexed: timestamps.lastIndexed,
+	});
+	return key;
+}
+
+export async function indexQueuedPage(
+	auth: ItemsAuth,
+	seed: Seed,
+	item: PageWorkItem,
+	markdown: string,
+	timestamps: { lastCrawled: string; lastIndexed: string },
+	catalog?: { items: ItemRecord[] | null },
+): Promise<string> {
+	const key = await uploadQueuedPage(auth, seed, item, markdown, timestamps);
+	const cleaned = await cleanupReplacedItems(auth, item.systemId, item.url, key, item.itemKey, catalog);
+	if (cleaned !== "clean") {
+		throw new Error("legacy cleanup failed");
+	}
+	return key;
+}
+
+type CleanupOutcome = "clean" | "failed" | "unowned" | "detached";
+
+async function cleanupReplacedItems(
+	auth: ItemsAuth,
+	systemId: SystemId,
+	url: string,
+	keepKey: string,
+	previousKey: string | null,
+	catalog?: { items: ItemRecord[] | null },
+	stillOwns?: () => Promise<boolean>,
+): Promise<CleanupOutcome> {
+	let removedLegacy = false;
+	const lostClaim = (): CleanupOutcome => (removedLegacy ? "detached" : "unowned");
+	if (stillOwns && !(await stillOwns())) {
+		return lostClaim();
+	}
+	const pendingKeys = new Set<string>();
+	if (previousKey && previousKey !== keepKey) {
+		pendingKeys.add(previousKey);
+	}
+	let items: ItemRecord[] = [];
+	try {
+		if (catalog?.items) {
+			items = catalog.items;
+		} else {
+			items = await listItems(auth);
+			if (catalog) {
+				catalog.items = items;
+			}
+		}
+	} catch (error) {
+		console.log(
+			JSON.stringify({
+				event: "page_replace_list_failed",
+				system: systemId,
+				url,
+				error: error instanceof Error ? error.message : String(error),
+			}),
+		);
+		return "failed";
+	}
+	if (stillOwns && !(await stillOwns())) {
+		return lostClaim();
+	}
+	let ok = true;
+	for (const found of items) {
+		if (found.key === keepKey || !found.key.startsWith(`${systemId}/`)) {
+			continue;
+		}
+		const sourceUrl = found.metadata?.source_url;
+		const metaSystem = found.metadata?.system;
+		const sameSystem = metaSystem === undefined || metaSystem === systemId;
+		if (sourceUrl !== url || !sameSystem) {
+			continue;
+		}
+		pendingKeys.add(found.key);
+		if (stillOwns && !(await stillOwns())) {
+			return lostClaim();
+		}
+		try {
+			await deleteItem(auth, found.id);
+			pendingKeys.delete(found.key);
+			removedLegacy = true;
+		} catch (error) {
+			console.log(
+				JSON.stringify({
+					event: "page_replace_delete_failed",
+					system: systemId,
+					url,
+					error: error instanceof Error ? error.message : String(error),
+				}),
+			);
+		}
+	}
+	for (const key of pendingKeys) {
+		if (stillOwns && !(await stillOwns())) {
+			return lostClaim();
+		}
+		try {
+			await deleteItemByKey(auth, key);
+			removedLegacy = true;
+		} catch (error) {
+			ok = false;
+			console.log(
+				JSON.stringify({
+					event: "page_replace_delete_failed",
+					system: systemId,
+					url,
+					key,
+					error: error instanceof Error ? error.message : String(error),
+				}),
+			);
+		}
+	}
+	if (stillOwns && !(await stillOwns())) {
+		return lostClaim();
+	}
+	return ok ? "clean" : "failed";
+}
+
+export async function drainTick(input: {
+	queue: PageQueue;
+	auth: CrawlAuth;
+	now: string;
+	limit?: number;
+	fetchMarkdown?: (url: string) => Promise<string>;
+	indexPage?: typeof indexQueuedPage;
+}): Promise<DrainCounts> {
+	const itemsAuth: ItemsAuth = { ...input.auth, instanceId: INSTANCE_ID };
+	const claimed = await input.queue.claim(input.limit ?? DRAIN_LIMIT, input.now);
+	if (claimed.length === 0) {
+		return { claimed: 0, indexed: 0, failed: 0 };
+	}
+	await ensureInstance(itemsAuth);
+	const fetchMarkdown = input.fetchMarkdown ?? ((url: string) => fetchPageMarkdown(input.auth, url));
+	const catalog: { items: ItemRecord[] | null } = { items: null };
+	let indexed = 0;
+	let failed = 0;
+	for (const item of claimed) {
+		const timestamps = { lastCrawled: input.now, lastIndexed: input.now };
+		if (!(await input.queue.owns(item))) {
+			continue;
+		}
+		try {
+			const markdown = await fetchMarkdown(item.url);
+			if (!(await input.queue.owns(item))) {
+				continue;
+			}
+			const itemKey = input.indexPage
+				? await input.indexPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps)
+				: await uploadQueuedPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps);
+			if (!input.indexPage) {
+				const cleaned = await cleanupReplacedItems(
+					itemsAuth,
+					item.systemId,
+					item.url,
+					itemKey,
+					item.itemKey,
+					catalog,
+					() => input.queue.owns(item),
+				);
+				if (cleaned === "unowned") {
+					if (itemKey !== item.itemKey) {
+						await deleteItemByKey(itemsAuth, itemKey);
+					}
+					continue;
+				}
+				if (cleaned === "detached") {
+					await input.queue.releaseForRetry(item, itemKey);
+					continue;
+				}
+				if (cleaned === "failed") {
+					if (await input.queue.fail(item, "legacy cleanup failed")) {
+						failed += 1;
+					}
+					continue;
+				}
+			}
+			if (await input.queue.complete(item, timestamps, itemKey)) {
+				indexed += 1;
+			}
+		} catch (error) {
+			if (await input.queue.fail(item, error instanceof Error ? error.message : String(error))) {
+				failed += 1;
+			}
+		}
+	}
+	return { claimed: claimed.length, indexed, failed };
+}

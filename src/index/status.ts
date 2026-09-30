@@ -1,5 +1,6 @@
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
+import { D1PageQueue, emptyDepths, type QueueDepths, type SystemFreshness } from "./page-queue.ts";
 import { SEED_HASH } from "./seed-hash.ts";
 import { readParks, type Parks } from "./parks.ts";
 import type { SystemReindexResult } from "./reindex.ts";
@@ -38,6 +39,8 @@ export type IndexStatusDocument = {
 	errors: Record<IndexErrorChannel, IndexErrorEntry[]>;
 	counts: IndexStatusCounts;
 	runError?: string;
+	queue: QueueDepths;
+	freshness: SystemFreshness[];
 };
 
 export type ReindexParams = {
@@ -144,6 +147,8 @@ export function emptyStatus(unbound: boolean, lastIndexedHash: string | null = n
 		systems: [],
 		errors: { ...EMPTY_ERRORS, crawl: [], render: [], index: [] },
 		counts: { systems: 0, indexed: 0, parked: 0, errors: 0 },
+		queue: emptyDepths(),
+		freshness: [],
 	};
 }
 
@@ -154,7 +159,7 @@ export async function readLastIndexedHash(env: WorkerEnv): Promise<string | null
 	return env.INDEX.get(LAST_INDEXED_HASH_KEY);
 }
 
-export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
+export async function readStoredStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 	if (!env.INDEX) {
 		return emptyStatus(true);
 	}
@@ -188,6 +193,33 @@ export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 	}
 }
 
+export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
+	const stored = await readStoredStatus(env);
+	if (!env.PAGE_QUEUE || stored.unbound) {
+		console.log(
+			JSON.stringify({
+				event: "index_status_queue_skip",
+				hasQueue: Boolean(env.PAGE_QUEUE),
+				unbound: stored.unbound,
+			}),
+		);
+		return stored;
+	}
+	try {
+		const queue = new D1PageQueue(env.PAGE_QUEUE);
+		await queue.ensure();
+		return { ...stored, queue: await queue.depths(), freshness: await queue.freshness() };
+	} catch (error) {
+		console.log(
+			JSON.stringify({
+				event: "index_status_queue_unread",
+				error: error instanceof Error ? error.message : String(error),
+			}),
+		);
+		return stored;
+	}
+}
+
 export async function writeStatus(env: WorkerEnv, document: IndexStatusDocument): Promise<void> {
 	if (!env.INDEX) {
 		return;
@@ -200,7 +232,7 @@ export async function startStatusRun(
 	params: Pick<ReindexParams, "trigger" | "workflowId">,
 	startedAt = new Date().toISOString(),
 ): Promise<IndexStatusDocument> {
-	const current = await readStatus(env);
+	const current = await readStoredStatus(env);
 	if (
 		current.state === "running" &&
 		current.workflowId &&
@@ -227,6 +259,8 @@ export async function startStatusRun(
 		errors: { crawl: [], render: [], index: [] },
 		counts: countsFrom([], parks),
 		runError: undefined,
+		queue: current.queue ?? emptyDepths(),
+		freshness: current.freshness ?? [],
 	};
 	await writeStatus(env, document);
 	return document;
@@ -237,7 +271,7 @@ export async function recordSystemResult(
 	result: SystemReindexResult,
 	unparked?: SystemId,
 ): Promise<IndexStatusDocument> {
-	const current = await readStatus(env);
+	const current = await readStoredStatus(env);
 	const systems = [...current.systems.filter((entry) => entry.system !== result.system), result];
 	const parksRead = await readParks(env);
 	const parks = parksRead.kind === "ok" ? parksRead.parks : current.parks;
@@ -264,7 +298,7 @@ export async function finishStatusRun(
 	workflowId?: string,
 	runError?: string,
 ): Promise<IndexStatusDocument> {
-	const current = await readStatus(env);
+	const current = await readStoredStatus(env);
 	if (
 		workflowId &&
 		current.workflowId &&

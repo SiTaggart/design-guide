@@ -2,6 +2,7 @@ export type ItemRecord = {
 	id: string;
 	key: string;
 	status?: string;
+	metadata?: Record<string, unknown>;
 };
 
 export type ItemsAuth = {
@@ -163,6 +164,8 @@ export async function createInstance(auth: ItemsAuth): Promise<void> {
 					{ field_name: "system", data_type: "text" },
 					{ field_name: "source", data_type: "text" },
 					{ field_name: "source_url", data_type: "text" },
+					{ field_name: "lastCrawled", data_type: "text" },
+					{ field_name: "lastIndexed", data_type: "text" },
 				],
 			}),
 		},
@@ -242,7 +245,7 @@ async function findItemByKey(
 	if (!match) {
 		throw new Error(`item ${key} already exists but its id was not found`);
 	}
-	return { id: match.id, key: match.key, status: match.status };
+	return { id: match.id, key: match.key, status: match.status, metadata: match.metadata };
 }
 
 export async function listItems(auth: ItemsAuth, options?: ItemRequestOptions): Promise<ItemRecord[]> {
@@ -292,5 +295,21 @@ export async function deleteItem(
 			`item delete failed ${itemId}: ${JSON.stringify(data.errors ?? data)}`,
 			itemErrorCode(data),
 		);
+	}
+}
+
+export async function deleteItemByKey(
+	auth: ItemsAuth,
+	key: string,
+	options?: ItemRequestOptions,
+): Promise<void> {
+	try {
+		const item = await findItemByKey(auth, key, options);
+		await deleteItem(auth, item.id, options);
+	} catch (error) {
+		if (error instanceof Error && error.message.includes("was not found")) {
+			return;
+		}
+		throw error;
 	}
 }

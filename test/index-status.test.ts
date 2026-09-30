@@ -24,6 +24,8 @@ describe("GET /v1/index-status", () => {
 			systems: [],
 			errors: { crawl: [], render: [], index: [] },
 			counts: { systems: 0, indexed: 0, parked: 0, errors: 0 },
+			queue: { pending: 0, claimed: 0, failed: 0, done: 0 },
+			freshness: [],
 		});
 	});
 
@@ -68,6 +70,8 @@ describe("GET /v1/index-status", () => {
 			],
 			errors: { crawl: [], render: [], index: [] },
 			counts: { systems: 0, indexed: 0, parked: 0, errors: 0 },
+			queue: { pending: 0, claimed: 0, failed: 0, done: 0 },
+			freshness: [],
 		});
 		const response = await worker.fetch(new Request("https://example.test/v1/index-status"), env);
 		expect(response.status).toBe(200);
