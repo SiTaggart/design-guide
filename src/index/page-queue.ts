@@ -634,12 +634,7 @@ export class D1PageQueue implements PageQueue {
 			     claimed_at = NULL,
 			     error = NULL,
 			     item_key = ?
-			 WHERE system_id = ? AND url = ?
-			   AND (
-			     (status = 'claimed' AND attempts = ? AND claimed_at = ?)
-			     OR status = 'pending'
-			     OR status = 'failed'
-			   )`,
+			 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
 			MAX_ATTEMPTS,
 			MAX_ATTEMPTS - 1,
 			itemKey,
