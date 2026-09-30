@@ -145,9 +145,13 @@ export function ensurePageQueue(db: D1Database): Promise<void> {
 	if (!pending) {
 		pending = db.exec(PAGE_QUEUE_SCHEMA).then(
 			() => undefined,
-			(error: unknown) => {
-				ready.delete(db);
-				throw error;
+			async (error: unknown) => {
+				try {
+					await db.prepare("SELECT 1 AS ok FROM page_work LIMIT 1").all();
+				} catch {
+					ready.delete(db);
+					throw error;
+				}
 			},
 		);
 		ready.set(db, pending);

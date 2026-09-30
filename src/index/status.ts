@@ -196,13 +196,26 @@ export async function readStoredStatus(env: WorkerEnv): Promise<IndexStatusDocum
 export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 	const stored = await readStoredStatus(env);
 	if (!env.PAGE_QUEUE || stored.unbound) {
+		console.log(
+			JSON.stringify({
+				event: "index_status_queue_skip",
+				hasQueue: Boolean(env.PAGE_QUEUE),
+				unbound: stored.unbound,
+			}),
+		);
 		return stored;
 	}
 	try {
 		const queue = new D1PageQueue(env.PAGE_QUEUE);
 		await queue.ensure();
 		return { ...stored, queue: await queue.depths(), freshness: await queue.freshness() };
-	} catch {
+	} catch (error) {
+		console.log(
+			JSON.stringify({
+				event: "index_status_queue_unread",
+				error: error instanceof Error ? error.message : String(error),
+			}),
+		);
 		return stored;
 	}
 }
