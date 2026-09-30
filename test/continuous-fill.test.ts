@@ -1210,6 +1210,9 @@ describe("page cap recovery", () => {
 		const db = memoryD1();
 		const exec = db.exec.bind(db);
 		db.exec = (async (sql: string) => {
+			if (sql.includes("\n")) {
+				throw new Error("D1_EXEC_ERROR: incomplete input");
+			}
 			const parts = sql
 				.split(";")
 				.map((part) => part.trim())

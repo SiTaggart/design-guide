@@ -192,8 +192,9 @@ export function ensurePageQueue(db: D1Database): Promise<void> {
 }
 
 async function applySchema(db: D1Database): Promise<void> {
+	// D1 exec() uses the first line only and rejects more than one statement.
 	for (const sql of schemaStatements()) {
-		await db.exec(sql);
+		await db.exec(sql.replace(/\s+/g, " ").trim());
 	}
 }
 
