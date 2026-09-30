@@ -293,7 +293,7 @@ describe("stuck versus mid-fill", () => {
 		expect(row(html, "primer")).not.toContain(">Stuck<");
 	});
 
-	it("does not keep a recovered system stuck from a stale result error", () => {
+	it("does not paint Live over a current error when older pages were indexed", () => {
 		expect(
 			systemPhase({
 				parked: false,
@@ -304,38 +304,25 @@ describe("stuck versus mid-fill", () => {
 				lastCrawled: "2026-09-30T12:00:00.000Z",
 				lastIndexed: "2026-09-30T12:05:00.000Z",
 				lastDiscovered: "2026-09-30T12:00:00.000Z",
-				error: "item upload failed primer/x.md: boom",
-			}),
-		).toBe("live");
-		expect(
-			systemPhase({
-				parked: false,
-				pending: 0,
-				claimed: 0,
-				failed: 2,
-				done: 3,
-				lastCrawled: "2026-09-30T12:00:00.000Z",
-				lastIndexed: "2026-09-30T12:05:00.000Z",
-				lastDiscovered: null,
-				error: "item upload failed primer/x.md: boom",
+				error: "crawl ended failed",
 			}),
 		).toBe("stuck");
 
 		const html = renderStatusPage({
 			...emptyStatus(false),
-			state: "ok",
+			state: "fail",
 			trigger: "recrawl",
 			queue: { pending: 0, claimed: 0, failed: 0, done: 3 },
 			systems: [
 				{
 					system: "primer",
 					startUrl: "https://primer.style/",
-					crawl: { total: 3, finished: 3, skipped: 0, disallowed: 0, errored: 0 },
-					indexed: 3,
+					crawl: { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 1 },
+					indexed: 0,
 					hitLimit: false,
-					keptPrevious: false,
-					usable: 3,
-					error: "item upload failed primer/x.md: boom",
+					keptPrevious: true,
+					usable: 0,
+					error: "crawl ended failed",
 				},
 			],
 			freshness: [
@@ -351,12 +338,73 @@ describe("stuck versus mid-fill", () => {
 				},
 			],
 		});
-		expect(row(html, "primer")).toContain('data-phase="live"');
-		expect(row(html, "primer")).not.toContain(">Stuck<");
-		expect(row(html, "primer")).not.toContain("item upload failed");
+		const primer = row(html, "primer");
+		expect(primer).toContain('data-phase="stuck"');
+		expect(primer).not.toContain(">Live<");
+		expect(primer).toContain("crawl ended failed");
+	});
+
+	it("paints Live after recovery once the current error is gone", () => {
+		expect(
+			systemPhase({
+				parked: false,
+				pending: 0,
+				claimed: 0,
+				failed: 0,
+				done: 3,
+				lastCrawled: "2026-09-30T12:00:00.000Z",
+				lastIndexed: "2026-09-30T12:05:00.000Z",
+				lastDiscovered: "2026-09-30T12:00:00.000Z",
+			}),
+		).toBe("live");
+
+		const html = renderStatusPage({
+			...emptyStatus(false),
+			state: "ok",
+			trigger: "recrawl",
+			queue: { pending: 0, claimed: 0, failed: 0, done: 3 },
+			systems: [
+				{
+					system: "primer",
+					startUrl: "https://primer.style/",
+					crawl: { total: 3, finished: 3, skipped: 0, disallowed: 0, errored: 0 },
+					indexed: 3,
+					hitLimit: false,
+					keptPrevious: false,
+					usable: 3,
+				},
+			],
+			freshness: [
+				{
+					system: "primer",
+					lastCrawled: "2026-09-30T12:00:00.000Z",
+					lastIndexed: "2026-09-30T12:05:00.000Z",
+					lastDiscovered: "2026-09-30T12:00:00.000Z",
+					pending: 0,
+					claimed: 0,
+					failed: 0,
+					done: 3,
+				},
+			],
+		});
+		const primer = row(html, "primer");
+		expect(primer).toContain('data-phase="live"');
+		expect(primer).not.toContain(">Stuck<");
 	});
 
 	it("makes a drained failed queue prominent", () => {
+		expect(
+			systemPhase({
+				parked: false,
+				pending: 0,
+				claimed: 0,
+				failed: 3,
+				done: 4,
+				lastCrawled: "2026-09-30T12:00:00.000Z",
+				lastIndexed: "2026-09-30T12:05:00.000Z",
+				lastDiscovered: null,
+			}),
+		).toBe("stuck");
 		const html = renderStatusPage({
 			...emptyStatus(false),
 			state: "fail",

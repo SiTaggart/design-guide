@@ -43,14 +43,10 @@ export function systemPhase(input: {
 	if (input.pending + input.claimed > 0) {
 		return "mid-fill";
 	}
-	if (input.failed > 0) {
+	if (input.failed > 0 || input.error) {
 		return "stuck";
 	}
-	const recovered = input.done > 0 || input.lastIndexed !== null;
-	if (input.error && !recovered) {
-		return "stuck";
-	}
-	if (recovered || input.lastCrawled || input.lastDiscovered) {
+	if (input.done > 0 || input.lastIndexed || input.lastCrawled || input.lastDiscovered) {
 		return "live";
 	}
 	return "empty";
@@ -235,9 +231,6 @@ function systemRows(document: IndexStatusDocument): Row[] {
 		const lastCrawled = row?.lastCrawled ?? null;
 		const lastIndexed = row?.lastIndexed ?? null;
 		const lastDiscovered = row?.lastDiscovered ?? null;
-		const recovered = done > 0 || lastIndexed !== null;
-		const queueStuck = failed > 0 && pending + claimed === 0;
-		const noteError = error && (queueStuck || !recovered) ? error : undefined;
 		return {
 			system,
 			label: seedById(system).source,
@@ -259,7 +252,7 @@ function systemRows(document: IndexStatusDocument): Row[] {
 			lastCrawled,
 			lastIndexed,
 			lastDiscovered,
-			notes: notes(park, noteError),
+			notes: notes(park, error),
 		};
 	});
 }
