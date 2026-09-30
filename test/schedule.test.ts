@@ -30,13 +30,13 @@ describe("wrangler automation config", () => {
 	it("uses Worker crons and a 25000-step Workflow, not Workflow schedules", () => {
 		expect(wrangler).toContain('"*/5 * * * *"');
 		expect(wrangler).toContain('"0 4 * * *"');
-		expect(wrangler).toContain('"0 6 * * 0"');
+		expect(wrangler).toContain('"0 6 * * SUN"');
 		expect(wrangler).toContain('"steps": 25000');
 		expect(wrangler).toContain('"binding": "PAGE_QUEUE"');
 		expect(wrangler).not.toContain('"schedules"');
 		expect(DRIFT_CRON).toBe("*/5 * * * *");
 		expect(RECRAWL_CRON).toBe("0 4 * * *");
-		expect(RECOVERY_CRON).toBe("0 6 * * 0");
+		expect(RECOVERY_CRON).toBe("0 6 * * SUN");
 	});
 
 	it("binds send_email EMAIL like team-retros, with no destination_address lock", () => {

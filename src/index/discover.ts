@@ -15,7 +15,7 @@ import { deleteItem, deleteItemByKey, listItems, type ItemsAuth } from "./items-
 import { parkedSystemIds, readParks, writePark, type Parks } from "./parks.ts";
 import { isStubGeneration, fitsItem } from "./reindex.ts";
 import { driftedSystems, systemSeedHash } from "./seed-hash.ts";
-import { RECOVERY_CRON } from "./trigger.ts";
+import { isRecoveryCron } from "./trigger.ts";
 import {
 	D1PageQueue,
 	isDue,
@@ -57,7 +57,7 @@ export function pickDiscoverSystem(input: {
 	parked: readonly SystemId[];
 	parks: Parks;
 }): DiscoverPick | null {
-	if (input.cron === RECOVERY_CRON) {
+	if (isRecoveryCron(input.cron)) {
 		const systemId = input.parked[0];
 		if (!systemId) {
 			return null;
@@ -145,17 +145,22 @@ export async function deleteOrphanDocs(
 	auth: ItemsAuth,
 	systemId: SystemId,
 	dropped: readonly DroppedPage[],
+	liveUrls: ReadonlySet<string> = new Set(),
 ): Promise<void> {
 	const urls = new Set(dropped.map((row) => row.url));
 	const keys = new Set(dropped.map((row) => row.itemKey).filter((key): key is string => Boolean(key)));
 	const items = await listItems(auth);
 	for (const item of items) {
+		if (!item.key.startsWith(`${systemId}/`)) {
+			continue;
+		}
 		const sourceUrl = item.metadata?.source_url;
 		const metaSystem = item.metadata?.system;
 		const systemMatch = metaSystem === undefined || metaSystem === systemId;
-		const orphan =
-			(typeof sourceUrl === "string" && urls.has(sourceUrl) && systemMatch) || keys.has(item.key);
-		if (!orphan || !item.key.startsWith(`${systemId}/`)) {
+		const queuedOrphan = typeof sourceUrl === "string" && urls.has(sourceUrl) && systemMatch;
+		const outsideLive =
+			liveUrls.size > 0 && typeof sourceUrl === "string" && !liveUrls.has(sourceUrl) && systemMatch;
+		if (!queuedOrphan && !outsideLive && !keys.has(item.key)) {
 			continue;
 		}
 		await deleteItem(auth, item.id);
@@ -352,7 +357,7 @@ async function continueDiscover(
 		urls,
 		ok: true,
 		now: iso,
-		deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped),
+		deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(urls)),
 	});
 	await writeIndexedHash(env, run.systemId, systemSeedHash(seed));
 	await writeLastIndexedHashIfComplete(env);

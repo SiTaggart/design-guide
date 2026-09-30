@@ -38,7 +38,13 @@ export function driftBatch(systems: readonly SystemId[], read: ParksRead): Syste
 }
 
 export const RECRAWL_CRON = "0 4 * * *";
-export const RECOVERY_CRON = "0 6 * * 0";
+export const RECOVERY_CRON = "0 6 * * SUN";
+
+const RECOVERY_CRON_ALIASES = new Set([RECOVERY_CRON, "0 6 * * 1", "0 6 * * 0"]);
+
+export function isRecoveryCron(cron: string): boolean {
+	return RECOVERY_CRON_ALIASES.has(cron);
+}
 
 export type TriggerSkipReason = "unbound" | "no-auth" | "running" | "no-drift" | "no-systems" | "unread-parks";
 
@@ -96,7 +102,7 @@ export async function decideReindex(env: WorkerEnv, cron: string): Promise<Trigg
 		}
 		return { action: "start", trigger: "recrawl", systems, catalogHash: SEED_HASH };
 	}
-	if (cron === RECOVERY_CRON) {
+	if (isRecoveryCron(cron)) {
 		const systems = parkedSystemIds(parksRead.parks);
 		if (systems.length === 0) {
 			return { action: "skip", reason: "no-systems" };

@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { seedById } from "../src/config/seed.ts";
 import worker from "../src/worker.ts";
-import { discoverTick, commitDiscoveredUrls, pickDiscoverSystem } from "../src/index/discover.ts";
+import { discoverTick, commitDiscoveredUrls, deleteOrphanDocs, pickDiscoverSystem } from "../src/index/discover.ts";
+import * as itemsRest from "../src/index/items-rest.ts";
 import { drainTick } from "../src/index/drain.ts";
 import { fillTick } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
@@ -343,6 +344,57 @@ describe("continuous fill", () => {
 		const body = (await response.json()) as { results: Array<{ system: string }> };
 		expect(body.results.length).toBeGreaterThan(0);
 		expect(Date.parse(NOW) - Date.parse("2020-01-01T00:00:00.000Z")).toBeGreaterThan(FRESHNESS_MS);
+	});
+});
+
+describe("deleteOrphanDocs", () => {
+	it("deletes system docs whose url is outside the live set and keeps urls still on the map", async () => {
+		const deleted: string[] = [];
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "old-gen",
+				key: "primer/20260101/abc.md",
+				metadata: { system: "primer", source_url: "https://primer.style/retired" },
+			},
+			{
+				id: "kept",
+				key: "primer/page/keep.md",
+				metadata: { system: "primer", source_url: "https://primer.style/keep" },
+			},
+			{
+				id: "other",
+				key: "paste/page/other.md",
+				metadata: { system: "paste", source_url: "https://paste-dsys.com/gone" },
+			},
+		]);
+		vi.spyOn(itemsRest, "deleteItem").mockImplementation(async (_auth, id) => {
+			deleted.push(id);
+		});
+		vi.spyOn(itemsRest, "deleteItemByKey").mockResolvedValue();
+		await deleteOrphanDocs(
+			{ accountId: "acct", apiToken: "token", instanceId: "design-guide" },
+			"primer",
+			[],
+			new Set(["https://primer.style/keep"]),
+		);
+		expect(deleted).toEqual(["old-gen"]);
+	});
+});
+
+describe("recovery cron", () => {
+	it("treats Cloudflare's Sunday forms as the parked-seed slot", () => {
+		const parked = ["vanilla"] as const;
+		for (const cron of ["0 6 * * SUN", "0 6 * * 1", "0 6 * * 0"]) {
+			expect(
+				pickDiscoverSystem({
+					cron,
+					drifted: [],
+					due: ["primer"],
+					parked: [...parked],
+					parks: { vanilla: { reason: "stub", usable: 0, at: NOW } },
+				})?.systemId,
+			).toBe("vanilla");
+		}
 	});
 });
 
