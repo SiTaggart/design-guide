@@ -9,6 +9,9 @@ type FakeCrawl = {
 	jobStatus: string;
 	total: number;
 	finished: number;
+	skipped?: number;
+	disallowed?: number;
+	errored?: number;
 	pages: Record<string, JobPage[]>;
 };
 
@@ -42,7 +45,19 @@ function installFakeCrawl(fake: FakeCrawl): { startedUrls: string[]; requests: s
 			}
 			const recordStatus = url.searchParams.get("status");
 			if (recordStatus === null) {
-				return json({ success: true, result: { id: "job-1", status: fake.jobStatus, total: fake.total, finished: fake.finished, records: [] } });
+				return json({
+					success: true,
+					result: {
+						id: "job-1",
+						status: fake.jobStatus,
+						total: fake.total,
+						finished: fake.finished,
+						skipped: fake.skipped ?? 0,
+						disallowed: fake.disallowed ?? 0,
+						errored: fake.errored ?? 0,
+						records: [],
+					},
+				});
 			}
 			const pages = fake.pages[recordStatus] ?? [{ records: [] }];
 			const cursor = url.searchParams.get("cursor");
@@ -64,6 +79,9 @@ describe("crawlSeed", () => {
 			jobStatus: "completed",
 			total: 7,
 			finished: 7,
+			skipped: 2,
+			disallowed: 1,
+			errored: 0,
 			pages: {
 				completed: [
 					{
@@ -90,6 +108,9 @@ describe("crawlSeed", () => {
 			"https://design.gitlab.com/components/",
 		]);
 		expect(requests.filter((request) => request.includes("status=completed"))).toHaveLength(2);
+		expect(requests.some((request) => request.includes("status=skipped"))).toBe(false);
+		expect(requests.some((request) => request.includes("status=disallowed"))).toBe(false);
+		expect(requests.some((request) => request.includes("status=errored"))).toBe(false);
 		expect(hitCrawlLimit(outcome, outcome.records.length)).toBe(false);
 	});
 
@@ -132,7 +153,8 @@ describe("crawlSeed", () => {
 			jobStatus: "cancelled_due_to_limits",
 			total: 5000,
 			finished: 4200,
-			pages: { errored: [{ records: [{ url: "https://design.gitlab.com/500", status: "errored" }] }] },
+			errored: 1,
+			pages: {},
 		});
 		const outcome = await crawlSeed(auth, seed);
 		expect(outcome.status).toBe("cancelled_due_to_limits");

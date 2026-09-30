@@ -56,7 +56,7 @@ describe("decideReindex", () => {
 		expect(workflow.created).toEqual([]);
 	});
 
-	it("starts a drift workflow for the one changed seed, including a parked seed", async () => {
+	it("does not spend a drift slot on a parked seed", async () => {
 		const kv = memoryKV();
 		const workflow = mockWorkflow();
 		const { env } = envWithIndex(fixtureChunks, true, {
@@ -70,15 +70,39 @@ describe("decideReindex", () => {
 		}
 		await writeIndexedHash(env, "garden", "stale");
 		await writePark(env, "garden", 1);
-		const decision = await decideReindex(env, DRIFT_CRON);
-		expect(decision).toMatchObject({ action: "start", trigger: "deploy-drift", systems: ["garden"] });
+		expect(await decideReindex(env, DRIFT_CRON)).toEqual({ action: "skip", reason: "no-drift" });
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
-		expect(workflow.created).toHaveLength(1);
-		expect(workflow.created[0]?.params?.systems).toEqual(["garden"]);
-		expect(workflow.created[0]?.params?.trigger).toBe("deploy-drift");
+		expect(workflow.created).toEqual([]);
 	});
 
-	it("starts a drift workflow for only the first three stale systems", async () => {
+	it("starts one live system when parked seeds sit ahead of it", async () => {
+		const kv = memoryKV();
+		const workflow = mockWorkflow();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			REINDEX: workflow.binding,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		for (const id of SYSTEM_IDS) {
+			await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
+		}
+		await writeIndexedHash(env, "paste", "stale");
+		await writeIndexedHash(env, "primer", "stale");
+		await writePark(env, "paste", 1);
+		const decision = await decideReindex(env, DRIFT_CRON);
+		expect(decision).toEqual({
+			action: "start",
+			trigger: "deploy-drift",
+			systems: ["primer"],
+			catalogHash: SEED_HASH,
+		});
+		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
+		expect(workflow.created).toHaveLength(1);
+		expect(workflow.created[0]?.params?.systems).toEqual(["primer"]);
+	});
+
+	it("starts one deploy-drift system when every seed is stale", async () => {
 		const kv = memoryKV();
 		const workflow = mockWorkflow();
 		const { env } = envWithIndex(fixtureChunks, true, {
@@ -91,12 +115,12 @@ describe("decideReindex", () => {
 		expect(decision).toEqual({
 			action: "start",
 			trigger: "deploy-drift",
-			systems: ["paste", "primer", "uswds"],
+			systems: ["paste"],
 			catalogHash: SEED_HASH,
 		});
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
 		expect(workflow.created).toHaveLength(1);
-		expect(workflow.created[0]?.params?.systems).toEqual(["paste", "primer", "uswds"]);
+		expect(workflow.created[0]?.params?.systems).toEqual(["paste"]);
 	});
 
 	it("recovers only parked seeds", async () => {

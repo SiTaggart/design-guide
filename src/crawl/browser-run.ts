@@ -40,15 +40,14 @@ export type CrawlJobResult = {
 	status?: string;
 	total?: unknown;
 	finished?: unknown;
+	skipped?: unknown;
+	disallowed?: unknown;
+	errored?: unknown;
 	records?: CrawlRecord[];
 	cursor?: string | number | null;
 };
 
-export type CrawlJobSnapshot = {
-	status: string;
-	total: number;
-	finished: number;
-};
+export type CrawlJobSnapshot = { status: string } & CrawlCounts;
 
 export type StartResult = { jobId: string } | { httpStatus: number; detail: string };
 
@@ -112,11 +111,16 @@ export function hitCrawlLimit(
 	);
 }
 
-export function snapshotJob(job: Pick<CrawlJobResult, "status" | "total" | "finished">): CrawlJobSnapshot {
+export function snapshotJob(
+	job: Pick<CrawlJobResult, "status" | "total" | "finished" | "skipped" | "disallowed" | "errored">,
+): CrawlJobSnapshot {
 	return {
 		status: job.status ?? "unknown",
 		total: toCount(job.total),
 		finished: toCount(job.finished),
+		skipped: toCount(job.skipped),
+		disallowed: toCount(job.disallowed),
+		errored: toCount(job.errored),
 	};
 }
 
@@ -172,6 +176,7 @@ export async function fetchCrawlPage(
 ): Promise<{ records: CrawlRecord[]; cursor: string | number | null }> {
 	const query = new URL(crawlUrl(auth.accountId, jobId));
 	query.searchParams.set("status", recordStatus);
+	query.searchParams.set("limit", "1");
 	if (cursor !== undefined) {
 		query.searchParams.set("cursor", String(cursor));
 	}
@@ -201,14 +206,6 @@ async function* pageRecords(
 		}
 		cursor = page.cursor;
 	}
-}
-
-async function countRecords(auth: CrawlAuth, jobId: string, recordStatus: string): Promise<number> {
-	let count = 0;
-	for await (const page of pageRecords(auth, jobId, recordStatus)) {
-		count += page.length;
-	}
-	return count;
 }
 
 async function completedRecords(auth: CrawlAuth, jobId: string): Promise<CrawlRecord[]> {
@@ -244,17 +241,23 @@ export async function startSeedCrawl(
 	return { startUrl, jobId: started.jobId };
 }
 
-export async function crawlStatusCounts(
-	auth: CrawlAuth,
-	jobId: string,
-	job: Pick<CrawlJobResult, "total" | "finished">,
-): Promise<CrawlCounts> {
+export async function cancelCrawl(auth: CrawlAuth, jobId: string): Promise<void> {
+	const { ok, status, data } = await cfJson(auth, crawlUrl(auth.accountId, jobId), { method: "DELETE" });
+	if (ok || status === 404) {
+		return;
+	}
+	throw new Error(`crawl cancel failed ${status}: ${JSON.stringify(data.errors ?? data)}`);
+}
+
+export function crawlStatusCounts(
+	job: Pick<CrawlJobResult, "total" | "finished" | "skipped" | "disallowed" | "errored">,
+): CrawlCounts {
 	return {
 		total: toCount(job.total),
 		finished: toCount(job.finished),
-		skipped: await countRecords(auth, jobId, "skipped"),
-		disallowed: await countRecords(auth, jobId, "disallowed"),
-		errored: await countRecords(auth, jobId, "errored"),
+		skipped: toCount(job.skipped),
+		disallowed: toCount(job.disallowed),
+		errored: toCount(job.errored),
 	};
 }
 
@@ -262,12 +265,12 @@ export async function collectOutcome(
 	auth: CrawlAuth,
 	jobId: string,
 	startUrl: string,
-	job: Pick<CrawlJobResult, "status" | "total" | "finished">,
+	job: Pick<CrawlJobResult, "status" | "total" | "finished" | "skipped" | "disallowed" | "errored">,
 ): Promise<CrawlOutcome> {
 	return {
 		startUrl,
 		status: job.status ?? "unknown",
-		counts: await crawlStatusCounts(auth, jobId, job),
+		counts: crawlStatusCounts(job),
 		records: await completedRecords(auth, jobId),
 	};
 }

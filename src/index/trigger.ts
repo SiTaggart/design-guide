@@ -2,7 +2,7 @@ import { SEEDS } from "../config/seed.ts";
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
-import { clearPark, liveSystemIds, parkedSystemIds, readParks, writePark, type Parks } from "./parks.ts";
+import { clearPark, liveSystemIds, parkedSystemIds, readParks, writePark, type Parks, type ParksRead } from "./parks.ts";
 import { clearRetrievalHold, holdRetrieval } from "./retrieval-hold.ts";
 import type { SystemReindexResult } from "./reindex.ts";
 import { SEED_HASH, driftedSystems, systemSeedHash } from "./seed-hash.ts";
@@ -18,7 +18,25 @@ import {
 } from "./status.ts";
 
 export const DRIFT_CRON = "*/5 * * * *";
-const DRIFT_BATCH_LIMIT = 3;
+export const DRIFT_BATCH_LIMIT = 1;
+
+export function driftBatch(systems: readonly SystemId[], read: ParksRead): SystemId[] {
+	if (read.kind === "unread") {
+		return [];
+	}
+	const batch: SystemId[] = [];
+	for (const id of systems) {
+		if (read.parks[id] !== undefined) {
+			continue;
+		}
+		batch.push(id);
+		if (batch.length === DRIFT_BATCH_LIMIT) {
+			return batch;
+		}
+	}
+	return batch;
+}
+
 export const RECRAWL_CRON = "0 4 * * *";
 export const RECOVERY_CRON = "0 6 * * 0";
 
@@ -65,7 +83,7 @@ export async function decideReindex(env: WorkerEnv, cron: string): Promise<Trigg
 		return { action: "skip", reason: "unread-parks" };
 	}
 	if (cron === DRIFT_CRON) {
-		const systems = driftedSystems(await readIndexedHashes(env)).slice(0, DRIFT_BATCH_LIMIT);
+		const systems = driftBatch(driftedSystems(await readIndexedHashes(env)), parksRead);
 		if (systems.length === 0) {
 			return { action: "skip", reason: "no-drift" };
 		}
