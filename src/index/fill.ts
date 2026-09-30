@@ -7,7 +7,9 @@ import {
 	sendFinishIndexMail,
 	sendStartIndexMail,
 } from "./mail.ts";
+import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
 import { D1PageQueue, type QueueDepths } from "./page-queue.ts";
+import { systemSeedHash } from "./seed-hash.ts";
 import { clearPark, readParks } from "./parks.ts";
 import { clearRetrievalHold } from "./retrieval-hold.ts";
 import { reindexAuth, isReindexRunning } from "./trigger.ts";
@@ -68,7 +70,8 @@ export async function fillTick(env: WorkerEnv, cron: string, now = new Date()): 
 	}
 	const queue = new D1PageQueue(env.PAGE_QUEUE);
 	await queue.ensure();
-	await unparkFilled(env, queue);
+	await unparkFilled(env, queue, discover.action === "parked" ? discover.systemId : undefined);
+	await noteIndexedSeeds(env, queue, now);
 	const depths = await queue.depths();
 	await noteFill(env, discover, drain, depths, drainError, now);
 	await mailFill(env, discover, drain, depths, drainError, now);
@@ -86,7 +89,7 @@ export async function fillTick(env: WorkerEnv, cron: string, now = new Date()): 
 	);
 }
 
-async function unparkFilled(env: WorkerEnv, queue: D1PageQueue): Promise<void> {
+async function unparkFilled(env: WorkerEnv, queue: D1PageQueue, justParked?: SystemId): Promise<void> {
 	const parksRead = await readParks(env);
 	if (parksRead.kind !== "ok") {
 		return;
@@ -95,7 +98,7 @@ async function unparkFilled(env: WorkerEnv, queue: D1PageQueue): Promise<void> {
 	const unparked = new Set(current.unparked ?? []);
 	let changed = false;
 	for (const row of await queue.freshness()) {
-		if (row.done < 2 || parksRead.parks[row.system] === undefined) {
+		if (row.system === justParked || row.done < 2 || parksRead.parks[row.system] === undefined) {
 			continue;
 		}
 		await clearPark(env, row.system);
@@ -115,6 +118,51 @@ async function unparkFilled(env: WorkerEnv, queue: D1PageQueue): Promise<void> {
 	});
 }
 
+export async function noteIndexedSeeds(env: WorkerEnv, queue: D1PageQueue, now: Date): Promise<void> {
+	const indexed = await readIndexedHashes(env);
+	let wrote = false;
+	for (const row of await queue.freshness()) {
+		if (row.done < 1 || row.pending > 0 || row.claimed > 0 || row.failed > 0) {
+			continue;
+		}
+		const seed = seedById(row.system);
+		const hash = systemSeedHash(seed);
+		if (indexed[seed.id] === hash) {
+			continue;
+		}
+		await writeIndexedHash(env, seed.id, hash);
+		await queue.markDiscovered(seed.id, now.toISOString());
+		indexed[seed.id] = hash;
+		wrote = true;
+	}
+	if (wrote) {
+		await writeLastIndexedHashIfComplete(env);
+	}
+}
+
+function fillOutcome(
+	discover: DiscoverTickResult,
+	drain: DrainCounts,
+	depths: QueueDepths,
+	drainError: string | undefined,
+): { failed: boolean; reason?: string; stuck: boolean } {
+	const stuck = depths.pending === 0 && depths.claimed === 0 && depths.failed > 0 && drain.claimed === 0;
+	const noProgress = drain.claimed > 0 && drain.indexed === 0 && drain.failed === drain.claimed;
+	if (discover.action === "failed") {
+		return { failed: true, reason: discover.error, stuck };
+	}
+	if (drainError) {
+		return { failed: true, reason: drainError, stuck };
+	}
+	if (noProgress) {
+		return { failed: true, reason: "drain made no progress", stuck };
+	}
+	if (stuck) {
+		return { failed: true, reason: "queue stuck", stuck };
+	}
+	return { failed: false, stuck };
+}
+
 async function noteFill(
 	env: WorkerEnv,
 	discover: DiscoverTickResult,
@@ -124,24 +172,24 @@ async function noteFill(
 	now: Date,
 ): Promise<void> {
 	const current = await readStoredStatus(env);
-	const busy = depths.pending + depths.claimed > 0 || discover.action === "started" || discover.action === "continued";
-	const failed = discover.action === "failed" || Boolean(drainError) || (drain.claimed > 0 && drain.indexed === 0);
-	if (discover.action === "skip" && drain.claimed === 0 && !drainError) {
+	const outcome = fillOutcome(discover, drain, depths, drainError);
+	const busy =
+		!outcome.failed &&
+		(depths.pending + depths.claimed > 0 || discover.action === "started" || discover.action === "continued");
+	if (discover.action === "skip" && drain.claimed === 0 && !drainError && !outcome.stuck) {
 		return;
 	}
 	const trigger = triggerOf(discover) ?? current.trigger;
 	const workflowId = workflowOf(discover, now) ?? current.workflowId;
-	const runError = failed
-		? drainError || (discover.action === "failed" ? discover.error : "drain made no progress")
-		: undefined;
-	const state = failed ? "fail" : busy ? "running" : "ok";
+	const runError = outcome.failed ? outcome.reason : undefined;
+	const state = outcome.failed ? "fail" : busy ? "running" : "ok";
 	await writeStatus(env, {
 		...current,
 		workflowId,
 		trigger,
 		state,
 		startedAt: discover.action === "started" ? now.toISOString() : current.startedAt,
-		finishedAt: failed || !busy ? now.toISOString() : null,
+		finishedAt: outcome.failed || !busy ? now.toISOString() : null,
 		runError,
 		errors: errorsFromResults(current.systems, runError),
 		counts: countsFrom(current.systems, current.parks, runError),
@@ -204,12 +252,9 @@ async function mailFill(
 				[result],
 			);
 		}
-		const noProgress = drain.claimed > 0 && drain.indexed === 0;
-		const stuck = depths.pending === 0 && depths.claimed === 0 && depths.failed > 0 && drain.claimed === 0;
-		if (discover.action === "failed" || drainError || noProgress || stuck) {
-			const reason =
-				drainError ||
-				(discover.action === "failed" ? discover.error : noProgress ? "drain made no progress" : "queue stuck");
+		const outcome = fillOutcome(discover, drain, depths, drainError);
+		if (outcome.failed && outcome.reason) {
+			const reason = outcome.reason;
 			if (await failMailDue(env, reason, now)) {
 				const system = "systemId" in discover ? discover.systemId : undefined;
 				const trigger = triggerOf(discover) ?? "recrawl";

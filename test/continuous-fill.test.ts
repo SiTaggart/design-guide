@@ -4,13 +4,15 @@ import { seedById } from "../src/config/seed.ts";
 import worker from "../src/worker.ts";
 import { discoverTick, commitDiscoveredUrls, deleteOrphanDocs, pickDiscoverSystem } from "../src/index/discover.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
-import { drainTick } from "../src/index/drain.ts";
-import { fillTick } from "../src/index/fill.ts";
+import { drainTick, indexQueuedPage } from "../src/index/drain.ts";
+import { fillTick, noteIndexedSeeds } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
-import { D1PageQueue, FRESHNESS_MS } from "../src/index/page-queue.ts";
-import { systemSeedHash } from "../src/index/seed-hash.ts";
+import { D1PageQueue, FRESHNESS_MS, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
+import { readParks } from "../src/index/parks.ts";
+import { holdRetrieval, readRetrievalHold } from "../src/index/retrieval-hold.ts";
+import { seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
 import { readStatus } from "../src/index/status.ts";
-import { DRIFT_CRON } from "../src/index/trigger.ts";
+import { DRIFT_CRON, RECOVERY_CRON } from "../src/index/trigger.ts";
 import { memoryD1 } from "./helpers/d1.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
@@ -32,6 +34,7 @@ async function queue(): Promise<D1PageQueue> {
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 describe("PageQueue claim order", () => {
@@ -307,6 +310,9 @@ describe("continuous fill", () => {
 			vi.fn(async (input: string, init?: RequestInit) => {
 				const url = String(input);
 				const method = init?.method ?? "GET";
+				if (method === "GET" && url.includes("/items")) {
+					return json(200, { result: [], result_info: { total_count: 0 } });
+				}
 				if (method === "GET" && url.includes("/ai-search/instances/")) {
 					return json(200, { result: { id: "design-guide" } });
 				}
@@ -381,7 +387,380 @@ describe("deleteOrphanDocs", () => {
 	});
 });
 
+describe("claim ownership", () => {
+	it("ignores a complete from a tick that no longer owns the claim", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/owned";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		const [owned] = await pageQueue.claim(1, NOW);
+		expect(owned?.claimedAt).toBe(NOW);
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET attempts = attempts + 1, claimed_at = ? WHERE url = ?")
+			.bind("2026-09-30T00:20:00.000Z", url)
+			.run();
+		const wrote = await pageQueue.complete(
+			owned!,
+			{ lastCrawled: NOW, lastIndexed: NOW },
+			"primer/page/stale.md",
+		);
+		expect(wrote).toBe(false);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, attempts, claimed_at, item_key FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; attempts: number; claimed_at: string; item_key: string | null }>();
+		expect(row).toEqual({
+			status: "claimed",
+			attempts: 2,
+			claimed_at: "2026-09-30T00:20:00.000Z",
+			item_key: null,
+		});
+		expect(await pageQueue.fail(owned!, "stale worker")).toBe(false);
+		expect(
+			(
+				await pageQueueDb(pageQueue)
+					.prepare("SELECT status, claimed_at FROM page_work WHERE url = ?")
+					.bind(url)
+					.first<{ status: string; claimed_at: string }>()
+			)?.status,
+		).toBe("claimed");
+	});
+});
+
+describe("live map prune", () => {
+	it("keeps a crawled url that was not usable and still prunes urls absent from the map", async () => {
+		const pageQueue = await queue();
+		const keep = "https://primer.style/keep";
+		const blurry = "https://primer.style/blurry";
+		const gone = "https://primer.style/gone";
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "primer", url: keep, kind: "reindex" },
+				{ systemId: "primer", url: blurry, kind: "reindex" },
+				{ systemId: "primer", url: gone, kind: "reindex" },
+			],
+			NOW,
+		);
+		await pageQueue.complete(
+			{ systemId: "primer", url: blurry },
+			{ lastCrawled: NOW, lastIndexed: NOW },
+			"primer/page/blurry.md",
+		);
+		const deleted: string[] = [];
+		const pruned = await commitDiscoveredUrls({
+			queue: pageQueue,
+			systemId: "primer",
+			kind: "seed",
+			urls: [keep, "https://primer.style/new"],
+			liveUrls: [keep, "https://primer.style/new", blurry],
+			ok: true,
+			now: NOW,
+			deleteDocs: async (dropped) => {
+				deleted.push(...dropped.map((row) => row.url));
+			},
+		});
+		expect(pruned.pruned.map((row) => row.url)).toEqual([gone]);
+		expect(deleted).toEqual([gone]);
+		const blurryRow = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, item_key FROM page_work WHERE url = ?")
+			.bind(blurry)
+			.first<{ status: string; item_key: string }>();
+		expect(blurryRow).toEqual({ status: "done", item_key: "primer/page/blurry.md" });
+	});
+
+	it("does not delete a still-live doc when this crawl could not replace it", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const blurry = "https://primer.style/blurry";
+		const gone = "https://primer.style/gone";
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "primer", url: blurry, kind: "reindex" },
+				{ systemId: "primer", url: gone, kind: "reindex" },
+			],
+			NOW,
+		);
+		await pageQueue.insertRun({
+			systemId: "primer",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-live",
+			startUrl: "https://primer.style/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const deleted: string[] = [];
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "blurry-doc",
+				key: "primer/old/blurry.md",
+				metadata: { system: "primer", source_url: blurry },
+			},
+			{
+				id: "gone-doc",
+				key: "primer/old/gone.md",
+				metadata: { system: "primer", source_url: gone },
+			},
+		]);
+		vi.spyOn(itemsRest, "deleteItem").mockImplementation(async (_auth, id) => {
+			deleted.push(id);
+		});
+		vi.spyOn(itemsRest, "deleteItemByKey").mockResolvedValue();
+		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "completed", finished: 3 }),
+			page: async () => ({
+				records: [
+					{ url: "https://primer.style/keep", status: "completed", markdown: "# keep" },
+					{ url: "https://primer.style/also", status: "completed", markdown: "# also" },
+					{ url: blurry, status: "completed", markdown: "   " },
+				],
+				cursor: null,
+			}),
+			cancel: async () => undefined,
+		});
+		expect(result.action).toBe("enqueued");
+		expect(deleted).toEqual(["gone-doc"]);
+		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		const urlsLeft = await urls(pageQueue);
+		expect(urlsLeft).toContain(blurry);
+		expect(urlsLeft).not.toContain(gone);
+		expect(urlsLeft).toContain("https://primer.style/keep");
+	});
+});
+
+describe("legacy page copies", () => {
+	it("deletes older items for the same url after the new upload succeeds", async () => {
+		const deleted: string[] = [];
+		vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({
+			id: "fresh",
+			key: "primer/page/fresh.md",
+		});
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "legacy",
+				key: "primer/20260101/abc.md",
+				metadata: { system: "primer", source_url: "https://primer.style/select" },
+			},
+			{
+				id: "other-system",
+				key: "paste/page/abc.md",
+				metadata: { system: "paste", source_url: "https://primer.style/select" },
+			},
+		]);
+		vi.spyOn(itemsRest, "deleteItem").mockImplementation(async (_auth, id) => {
+			deleted.push(id);
+		});
+		vi.spyOn(itemsRest, "deleteItemByKey").mockResolvedValue();
+		const key = await indexQueuedPage(
+			{ accountId: "acct", apiToken: "token", instanceId: "design-guide" },
+			seedById("primer"),
+			{
+				systemId: "primer",
+				url: "https://primer.style/select",
+				kind: "seed",
+				enqueuedAt: NOW,
+				attempts: 1,
+				status: "claimed",
+				itemKey: null,
+			},
+			"# select",
+			{ lastCrawled: NOW, lastIndexed: NOW },
+		);
+		expect(key.startsWith("primer/page/")).toBe(true);
+		expect(deleted).toEqual(["legacy"]);
+	});
+});
+
+describe("park stickiness", () => {
+	it("does not unpark a stub because older done rows are still in the queue", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await pageQueue.insertRun({
+			systemId: "vanilla",
+			kind: "reindex",
+			trigger: "recovery",
+			jobId: "job-stub",
+			startUrl: "https://vanillaframework.io/docs/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "vanilla", url: "https://vanillaframework.io/docs/a", kind: "reindex" },
+				{ systemId: "vanilla", url: "https://vanillaframework.io/docs/b", kind: "reindex" },
+			],
+			NOW,
+		);
+		await pageQueue.complete(
+			{ systemId: "vanilla", url: "https://vanillaframework.io/docs/a" },
+			{ lastCrawled: NOW, lastIndexed: NOW },
+			"vanilla/page/a.md",
+		);
+		await pageQueue.complete(
+			{ systemId: "vanilla", url: "https://vanillaframework.io/docs/b" },
+			{ lastCrawled: NOW, lastIndexed: NOW },
+			"vanilla/page/b.md",
+		);
+		await holdRetrieval(env, "vanilla");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string) => {
+				const url = String(input);
+				if (url.includes("status=completed")) {
+					return json(200, {
+						result: {
+							records: [
+								{
+									url: "https://vanillaframework.io/docs/",
+									status: "completed",
+									markdown: "# one",
+								},
+							],
+							cursor: null,
+						},
+					});
+				}
+				return json(200, { result: { status: "completed", finished: 1 } });
+			}),
+		);
+		await fillTick(env, DRIFT_CRON, new Date(NOW));
+		const parks = await readParks(env);
+		expect(parks.kind).toBe("ok");
+		if (parks.kind === "ok") {
+			expect(parks.parks.vanilla?.reason).toBe("stub");
+		}
+		const hold = await readRetrievalHold(env);
+		expect(hold.kind).toBe("ok");
+		if (hold.kind === "ok") {
+			expect(hold.systems.has("vanilla")).toBe(true);
+		}
+		expect(await urls(pageQueue)).toEqual([]);
+	});
+});
+
+describe("indexed seed hash", () => {
+	it("writes the seed hash only after drain has indexed every queued page", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+		});
+		const url = "https://primer.style/components";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		await noteIndexedSeeds(env, pageQueue, new Date(NOW));
+		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		await pageQueue.complete(
+			{ systemId: "primer", url },
+			{ lastCrawled: NOW, lastIndexed: NOW },
+			"primer/page/components.md",
+		);
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url: "https://primer.style/missing", kind: "seed" }], NOW);
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET status = 'failed', attempts = ? WHERE url = ?")
+			.bind(MAX_ATTEMPTS, "https://primer.style/missing")
+			.run();
+		await noteIndexedSeeds(env, pageQueue, new Date(NOW));
+		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		await pageQueueDb(pageQueue).prepare("DELETE FROM page_work WHERE status = 'failed'").run();
+		await noteIndexedSeeds(env, pageQueue, new Date(NOW));
+		expect(await kv.get(seedHashKey("primer"))).toBe(systemSeedHash(seedById("primer")));
+	});
+});
+
+describe("exhausted failures", () => {
+	it("marks status failed when every remaining page has exhausted retries", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const kv = memoryKV();
+		const sent: Array<{ subject?: string }> = [];
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+			EMAIL: {
+				send: async (message) => {
+					sent.push(message as { subject?: string });
+					return { messageId: "m" };
+				},
+			},
+		});
+		for (const id of SYSTEM_IDS) {
+			await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
+			await pageQueue.markDiscovered(id, NOW);
+		}
+		await pageQueue.enqueueUpsert(
+			[{ systemId: "primer", url: "https://primer.style/stuck", kind: "reindex" }],
+			NOW,
+		);
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET status = 'failed', attempts = ?, error = ? WHERE url = ?")
+			.bind(MAX_ATTEMPTS, "gave up", "https://primer.style/stuck")
+			.run();
+		await fillTick(env, DRIFT_CRON, new Date(NOW));
+		const status = await readStatus(env);
+		expect(status.state).toBe("fail");
+		expect(status.runError).toBe("queue stuck");
+		expect(status.queue.failed).toBe(1);
+		expect(sent.map((message) => message.subject ?? "")).toEqual(
+			expect.arrayContaining([expect.stringContaining("fail")]),
+		);
+	});
+});
+
 describe("recovery cron", () => {
+	it("rotates to the parked system that has waited longest", () => {
+		expect(
+			pickDiscoverSystem({
+				cron: RECOVERY_CRON,
+				drifted: [],
+				due: ["primer"],
+				parked: ["vanilla", "garden"],
+				parks: {
+					vanilla: { reason: "stub", usable: 1, at: NOW },
+					garden: { reason: "stub", usable: 1, at: NOW },
+				},
+				recoveryAttempts: { vanilla: "2026-09-28T00:00:00.000Z" },
+			})?.systemId,
+		).toBe("garden");
+	});
+
+	it("does not rediscover a drifted system that still has queued pages", () => {
+		expect(
+			pickDiscoverSystem({
+				cron: DRIFT_CRON,
+				drifted: ["primer", "paste"],
+				due: [],
+				parked: [],
+				parks: {},
+				busy: new Set(["primer"]),
+			}),
+		).toEqual({ systemId: "paste", kind: "seed", trigger: "deploy-drift" });
+	});
+
 	it("treats Cloudflare's Sunday forms as the parked-seed slot", () => {
 		const parked = ["vanilla"] as const;
 		for (const cron of ["0 6 * * SUN", "0 6 * * 1", "0 6 * * 0"]) {

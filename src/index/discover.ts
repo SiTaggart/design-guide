@@ -56,9 +56,12 @@ export function pickDiscoverSystem(input: {
 	due: readonly SystemId[];
 	parked: readonly SystemId[];
 	parks: Parks;
+	busy?: ReadonlySet<SystemId>;
+	recoveryAttempts?: Readonly<Record<string, string>>;
 }): DiscoverPick | null {
+	const busy = input.busy ?? new Set<SystemId>();
 	if (isRecoveryCron(input.cron)) {
-		const systemId = input.parked[0];
+		const systemId = nextParkedSystem(input.parked, input.recoveryAttempts ?? {});
 		if (!systemId) {
 			return null;
 		}
@@ -68,7 +71,7 @@ export function pickDiscoverSystem(input: {
 			trigger: "recovery",
 		};
 	}
-	const drifted = input.drifted.find((id) => input.parks[id] === undefined);
+	const drifted = input.drifted.find((id) => input.parks[id] === undefined && !busy.has(id));
 	if (drifted) {
 		return { systemId: drifted, kind: "seed", trigger: "deploy-drift" };
 	}
@@ -77,6 +80,26 @@ export function pickDiscoverSystem(input: {
 		return { systemId: due, kind: "reindex", trigger: "recrawl" };
 	}
 	return null;
+}
+
+export function nextParkedSystem(
+	parked: readonly SystemId[],
+	attempts: Readonly<Record<string, string>>,
+): SystemId | undefined {
+	return [...parked].sort((left, right) => {
+		const leftAttempt = attempts[left];
+		const rightAttempt = attempts[right];
+		if (leftAttempt === rightAttempt) {
+			return 0;
+		}
+		if (leftAttempt === undefined) {
+			return -1;
+		}
+		if (rightAttempt === undefined) {
+			return 1;
+		}
+		return leftAttempt < rightAttempt ? -1 : 1;
+	})[0];
 }
 
 export function dueSystemIds(
@@ -118,6 +141,7 @@ export async function commitDiscoveredUrls(input: {
 	systemId: SystemId;
 	kind: PageKind;
 	urls: readonly string[];
+	liveUrls?: readonly string[];
 	ok: boolean;
 	now: string;
 	deleteDocs: (dropped: readonly DroppedPage[]) => Promise<void>;
@@ -125,12 +149,15 @@ export async function commitDiscoveredUrls(input: {
 	if (!input.ok) {
 		return { pruned: [] };
 	}
-	const live = [...new Set(input.urls)];
-	await input.queue.enqueueUpsert(
-		live.map((url) => ({ systemId: input.systemId, url, kind: input.kind })),
-		input.now,
-	);
-	const dropped = await input.queue.listAbsent(input.systemId, new Set(live));
+	const enqueue = [...new Set(input.urls)];
+	const live = new Set(input.liveUrls ?? enqueue);
+	if (enqueue.length > 0) {
+		await input.queue.enqueueUpsert(
+			enqueue.map((url) => ({ systemId: input.systemId, url, kind: input.kind })),
+			input.now,
+		);
+	}
+	const dropped = await input.queue.listAbsent(input.systemId, live);
 	if (dropped.length > 0) {
 		await input.deleteDocs(dropped);
 		await input.queue.removeUrls(
@@ -234,11 +261,17 @@ async function runDiscover(
 		due: dueSystemIds(freshness, now.getTime()),
 		parked: parkedSystemIds(parksRead.parks),
 		parks: parksRead.parks,
+		busy: new Set(freshness.filter((row) => row.pending + row.claimed > 0).map((row) => row.system)),
+		recoveryAttempts: await queue.recoveryAttempts(),
 	});
 	if (!pick) {
 		return { action: "skip", reason: "idle" };
 	}
 	const seed = seedById(pick.systemId);
+	const iso = now.toISOString();
+	if (pick.trigger === "recovery") {
+		await queue.noteRecoveryAttempt(pick.systemId, iso);
+	}
 	let started: { startUrl: string; jobId: string };
 	try {
 		started = await deps.start(auth, seed);
@@ -250,7 +283,6 @@ async function runDiscover(
 			error: error instanceof Error ? error.message : String(error),
 		};
 	}
-	const iso = now.toISOString();
 	await queue.insertRun({
 		systemId: pick.systemId,
 		kind: pick.kind,
@@ -313,12 +345,12 @@ async function continueDiscover(
 			for (let i = 0; i < DISCOVER_URLS_PER_TICK; i += 1) {
 				const page = await deps.page(auth, run.jobId, "completed", cursor ?? undefined);
 				for (const record of page.records) {
-					if (
-						record.status === "completed" &&
-						record.url.startsWith("https://") &&
-						fitsItem(record, seed)
-					) {
-						await queue.stageUrl(run.systemId, record.url);
+					if (!record.url.startsWith("https://")) {
+						continue;
+					}
+					await queue.stageUrl(run.systemId, record.url);
+					if (record.status === "completed" && fitsItem(record, seed)) {
+						await queue.stageIndexable(run.systemId, record.url);
 						accepted += 1;
 					}
 				}
@@ -340,35 +372,35 @@ async function continueDiscover(
 	if (cursor !== "done") {
 		return { action: "continued", systemId: run.systemId, accepted };
 	}
-	const urls = await queue.stagedUrls(run.systemId);
-	if (isStubGeneration(urls.length)) {
-		await writePark(env, run.systemId, urls.length, iso);
+	const live = await queue.stagedUrls(run.systemId);
+	const indexable = await queue.indexableUrls(run.systemId);
+	if (isStubGeneration(indexable.length)) {
+		await writePark(env, run.systemId, indexable.length, iso);
 		await writeIndexedHash(env, run.systemId, systemSeedHash(seed));
 		await writeLastIndexedHashIfComplete(env);
 		await queue.markDiscovered(run.systemId, iso);
+		await queue.clearWork(run.systemId);
 		await queue.clearRun(run.systemId);
-		return { action: "parked", systemId: run.systemId, trigger: run.trigger, usable: urls.length };
+		return { action: "parked", systemId: run.systemId, trigger: run.trigger, usable: indexable.length };
 	}
 	const itemsAuth = itemsAuthFrom(env, auth);
 	const committed = await commitDiscoveredUrls({
 		queue,
 		systemId: run.systemId,
 		kind: run.kind,
-		urls,
+		urls: indexable,
+		liveUrls: live,
 		ok: true,
 		now: iso,
-		deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(urls)),
+		deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
 	});
-	await writeIndexedHash(env, run.systemId, systemSeedHash(seed));
-	await writeLastIndexedHashIfComplete(env);
-	await queue.markDiscovered(run.systemId, iso);
 	await queue.clearRun(run.systemId);
 	return {
 		action: "enqueued",
 		systemId: run.systemId,
 		kind: run.kind,
 		trigger: run.trigger,
-		urls: urls.length,
+		urls: indexable.length,
 		pruned: committed.pruned.map((row) => row.url),
 	};
 }
