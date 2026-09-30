@@ -169,13 +169,6 @@ export function renderStatusPage(document: IndexStatusDocument): string {
     </tbody>
   </table>
 </main>
-<script>
-(function () {
-  var token = new URLSearchParams(location.search).get("token");
-  if (!token) return;
-  setInterval(function () { location.reload(); }, 30000);
-})();
-</script>
 </body>
 </html>
 `;

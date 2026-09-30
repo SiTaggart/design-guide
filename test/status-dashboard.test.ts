@@ -194,6 +194,8 @@ describe("GET /status", () => {
 		expect(row(html, "antd")).toContain('data-phase="empty"');
 		expect(html.toLowerCase()).not.toContain("<form");
 		expect(html.toLowerCase()).not.toContain("<button");
+		expect(html.toLowerCase()).not.toContain("<script");
+		expect(html.toLowerCase()).not.toContain("http-equiv");
 		expect(html.toLowerCase()).not.toContain('method="post"');
 	});
 
