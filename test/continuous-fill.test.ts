@@ -2,7 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { seedById } from "../src/config/seed.ts";
 import worker from "../src/worker.ts";
-import { discoverTick, commitDiscoveredUrls, deleteOrphanDocs, pickDiscoverSystem } from "../src/index/discover.ts";
+import {
+	CAP_RECORD_LIMIT,
+	CAP_RETRY_MS,
+	DISCOVER_URLS_PER_TICK,
+	discoverTick,
+	commitDiscoveredUrls,
+	deleteOrphanDocs,
+	pickDiscoverSystem,
+} from "../src/index/discover.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
 import { drainTick, indexQueuedPage, pageItemKey } from "../src/index/drain.ts";
 import { fillTick, noteIndexedSeeds } from "../src/index/fill.ts";
@@ -11,7 +19,7 @@ import { D1PageQueue, FRESHNESS_MS, MAX_ATTEMPTS } from "../src/index/page-queue
 import { readParks } from "../src/index/parks.ts";
 import { holdRetrieval, readRetrievalHold } from "../src/index/retrieval-hold.ts";
 import { seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
-import { readStatus } from "../src/index/status.ts";
+import { emptyStatus, readStatus, writeStatus } from "../src/index/status.ts";
 import { DRIFT_CRON, RECOVERY_CRON } from "../src/index/trigger.ts";
 import { memoryD1 } from "./helpers/d1.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
@@ -1196,6 +1204,421 @@ describe("recovery cron", () => {
 				})?.systemId,
 			).toBe("vanilla");
 		}
+	});
+});
+
+describe("page cap recovery", () => {
+	it("creates later queue tables when a multi-statement exec fails", async () => {
+		const db = memoryD1();
+		const exec = db.exec.bind(db);
+		db.exec = (async (sql: string) => {
+			if (sql.includes("\n")) {
+				throw new Error("D1_EXEC_ERROR: incomplete input");
+			}
+			const parts = sql
+				.split(";")
+				.map((part) => part.trim())
+				.filter(Boolean);
+			if (parts.length > 1) {
+				throw new Error("D1_EXEC_ERROR: multiple statements");
+			}
+			return exec(sql);
+		}) as D1Database["exec"];
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		await expect(pageQueue.capDefers()).resolves.toEqual({});
+		await expect(pageQueue.seedRefreshes()).resolves.toEqual({});
+		await expect(pageQueue.recoveryAttempts()).resolves.toEqual({});
+	});
+
+	it("enqueues pages from a capped crawl and does not prune the previous url", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const previous = "https://paste-dsys.com/old";
+		await pageQueue.enqueueUpsert([{ systemId: "paste", url: previous, kind: "reindex" }], "2020-01-01T00:00:00.000Z");
+		await pageQueue.complete(
+			{ systemId: "paste", url: previous },
+			{ lastCrawled: "2020-01-02T00:00:00.000Z", lastIndexed: "2020-01-02T00:00:00.000Z" },
+			"paste/page/old.md",
+		);
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-cap",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "cancelled_due_to_limits", finished: 533, total: 533 }),
+			page: async () => ({
+				records: [
+					{ url: "https://paste-dsys.com/a", status: "completed", markdown: "# a" },
+					{ url: "https://paste-dsys.com/b", status: "completed", markdown: "# b" },
+				],
+				cursor: null,
+			}),
+			deleteDocs: async () => {
+				throw new Error("page cap must not prune");
+			},
+			cancel: async () => undefined,
+		});
+		expect(result).toMatchObject({ action: "enqueued", systemId: "paste", urls: 2, pruned: [] });
+		expect(await pageQueue.running()).toBeNull();
+		expect(await urls(pageQueue)).toEqual([
+			"https://paste-dsys.com/a",
+			"https://paste-dsys.com/b",
+			previous,
+		]);
+		const parks = await readParks(env);
+		expect(parks.kind).toBe("ok");
+		if (parks.kind === "ok") {
+			expect(parks.parks.paste).toBeUndefined();
+		}
+		expect((await pageQueue.seedRefreshes()).paste?.seedHash).toBe(systemSeedHash(seedById("paste")));
+	});
+
+	it("defers a capped seed with no usable pages so the next tick discovers another drifted seed", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-empty-cap",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const started: string[] = [];
+		const capped = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "cancelled_due_to_limits", finished: 533, total: 533 }),
+			page: async () => ({ records: [{ url: "https://paste-dsys.com/", status: "completed", markdown: "   " }], cursor: null }),
+			cancel: async () => undefined,
+		});
+		expect(capped).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			urls: 0,
+			pruned: [],
+		});
+		expect(await pageQueue.running()).toBeNull();
+		expect(await pageQueue.seedRefreshes()).toEqual({});
+		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
+		const parks = await readParks(env);
+		expect(parks.kind).toBe("ok");
+		if (parks.kind === "ok") {
+			expect(parks.parks.paste).toBeUndefined();
+		}
+		const next = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			start: async (_auth, seed) => {
+				started.push(seed.id);
+				return { startUrl: seed.startUrl, jobId: `job-${seed.id}` };
+			},
+			cancel: async () => undefined,
+		});
+		expect(started).toEqual(["primer"]);
+		expect(next).toMatchObject({ action: "started", systemId: "primer", trigger: "deploy-drift" });
+	});
+
+	it("fails an errored crawl even when finished is past the page cap", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-errored-cap",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		let pages = 0;
+		const cancelled: string[] = [];
+		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "errored", finished: 533, total: 533 }),
+			page: async () => {
+				pages += 1;
+				return { records: [], cursor: null };
+			},
+			cancel: async (_auth, jobId) => {
+				cancelled.push(jobId);
+			},
+		});
+		expect(result).toMatchObject({
+			action: "failed",
+			systemId: "paste",
+			error: "crawl ended errored",
+		});
+		expect(pages).toBe(0);
+		expect(cancelled).toEqual(["job-errored-cap"]);
+		expect(await pageQueue.running()).toBeNull();
+		expect(await urls(pageQueue)).toEqual([]);
+	});
+
+	it("saves a capped cursor after each page and resumes there on the next tick", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-cap-pages",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const limits: Array<number | undefined> = [];
+		const interrupted = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "completed", finished: 500, total: 500 }),
+			page: async (_auth, _job, _status, cursor, limit) => {
+				limits.push(limit);
+				if (cursor === undefined) {
+					return {
+						records: [{ url: "https://paste-dsys.com/a", status: "completed", markdown: "# a" }],
+						cursor: "2",
+					};
+				}
+				throw new Error("second page failed");
+			},
+			cancel: async () => undefined,
+		});
+		expect(interrupted).toMatchObject({ action: "continued", systemId: "paste" });
+		expect(limits).toEqual([CAP_RECORD_LIMIT, CAP_RECORD_LIMIT]);
+		expect((await pageQueue.running())?.cursor).toBe("2");
+
+		const resumed = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "cancelled_due_to_limits", finished: 533, total: 533 }),
+			page: async (_auth, _job, _status, cursor, limit) => {
+				expect(cursor).toBe("2");
+				expect(limit).toBe(CAP_RECORD_LIMIT);
+				return {
+					records: [{ url: "https://paste-dsys.com/b", status: "completed", markdown: "# b" }],
+					cursor: null,
+				};
+			},
+			deleteDocs: async () => {
+				throw new Error("page cap must not prune");
+			},
+			cancel: async () => undefined,
+		});
+		expect(resumed).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			urls: 2,
+			pruned: [],
+			hitLimit: true,
+		});
+		expect(await pageQueue.running()).toBeNull();
+		expect((await urls(pageQueue)).filter((url) => url.includes("paste-dsys.com"))).toEqual([
+			"https://paste-dsys.com/a",
+			"https://paste-dsys.com/b",
+		]);
+	});
+
+	it("keeps a capped discover run when the page budget is spent before the cursor is done", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-cap-budget",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		let calls = 0;
+		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "cancelled_due_to_limits", finished: 533, total: 533 }),
+			page: async () => {
+				calls += 1;
+				return {
+					records: [{ url: `https://paste-dsys.com/${calls}`, status: "completed", markdown: "# page" }],
+					cursor: String(calls),
+				};
+			},
+			cancel: async () => undefined,
+		});
+		expect(result).toMatchObject({ action: "continued", systemId: "paste" });
+		expect(calls).toBe(DISCOVER_URLS_PER_TICK);
+		expect((await pageQueue.running())?.cursor).toBe(String(DISCOVER_URLS_PER_TICK));
+		expect(await urls(pageQueue)).toEqual([]);
+	});
+
+	it("skips a fresh page-cap deferral and retries that seed once the hour has passed", () => {
+		const deferred = { paste: NOW };
+		expect(
+			pickDiscoverSystem({
+				cron: DRIFT_CRON,
+				drifted: ["paste", "primer"],
+				due: ["uswds"],
+				parked: [],
+				parks: {},
+				deferred,
+				now: Date.parse(NOW),
+			}),
+		).toEqual({ systemId: "primer", kind: "seed", trigger: "deploy-drift" });
+		expect(
+			pickDiscoverSystem({
+				cron: DRIFT_CRON,
+				drifted: ["paste"],
+				due: ["paste"],
+				parked: [],
+				parks: {},
+				deferred,
+				now: Date.parse(NOW),
+			}),
+		).toBeNull();
+		expect(
+			pickDiscoverSystem({
+				cron: DRIFT_CRON,
+				drifted: ["paste"],
+				due: ["paste"],
+				parked: [],
+				parks: {},
+				deferred,
+				now: Date.parse(NOW) + CAP_RETRY_MS,
+			}),
+		).toEqual({ systemId: "paste", kind: "seed", trigger: "deploy-drift" });
+	});
+
+	it("clears a page-limit fail by queueing capped pages and discovering the next seed", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await writeStatus(env, {
+			...emptyStatus(false),
+			state: "fail",
+			trigger: "deploy-drift",
+			runError: "crawl hit the 500 page limit",
+			workflowId: "discover-deploy-drift-paste",
+			systems: [
+				{
+					system: "paste",
+					startUrl: "https://paste-dsys.com/",
+					crawl: { total: 533, finished: 533, skipped: 0, disallowed: 0, errored: 0 },
+					indexed: 0,
+					hitLimit: true,
+					keptPrevious: true,
+					usable: 0,
+					error: "crawl hit the 500 page limit",
+				},
+			],
+		});
+		const started: string[] = [];
+		const deps = {
+			start: async (_auth: { accountId: string; apiToken: string }, seed: { id: string; startUrl: string }) => {
+				started.push(seed.id);
+				return { startUrl: seed.startUrl, jobId: `job-${seed.id}` };
+			},
+			poll: async () => ({ status: "cancelled_due_to_limits" as const, finished: 533, total: 533 }),
+			page: async () => ({
+				records: [
+					{ url: "https://paste-dsys.com/a", status: "completed", markdown: "# accessible combobox" },
+					{ url: "https://paste-dsys.com/b", status: "completed", markdown: "# focus guidance" },
+				],
+				cursor: null,
+			}),
+			deleteDocs: async () => {
+				throw new Error("page cap must not prune");
+			},
+			cancel: async () => undefined,
+		};
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string, init?: RequestInit) => {
+				const url = String(input);
+				const method = init?.method ?? "GET";
+				if (method === "GET" && url.includes("/items")) {
+					return json(200, { result: [], result_info: { total_count: 0 } });
+				}
+				if (method === "GET" && url.includes("/ai-search/instances/")) {
+					return json(200, { result: { id: "design-guide" } });
+				}
+				if (url.endsWith("/markdown")) {
+					return json(200, { result: "# accessible combobox guidance" });
+				}
+				if (method === "POST" && url.includes("/items")) {
+					return json(200, { result: { id: "item", key: "paste/page/new.md" } });
+				}
+				return json(500, { errors: [{ code: 1, message: `unexpected ${method} ${url}` }] });
+			}),
+		);
+		await fillTick(env, DRIFT_CRON, new Date(NOW), deps);
+		expect(started).toEqual(["paste"]);
+		await fillTick(env, DRIFT_CRON, new Date("2026-09-30T00:05:00.000Z"), deps);
+		const filled = await readStatus(env);
+		expect(filled.runError).toBeUndefined();
+		expect(filled.state).not.toBe("fail");
+		expect(filled.queue.pending + filled.queue.done).toBeGreaterThan(0);
+		const paste = filled.systems.find((entry) => entry.system === "paste");
+		expect(paste?.error).toBeUndefined();
+		expect(paste).toMatchObject({ hitLimit: true, usable: 2, indexed: 0 });
+		await fillTick(env, DRIFT_CRON, new Date("2026-09-30T00:10:00.000Z"), deps);
+		expect(started).toEqual(["paste", "primer"]);
+		const moved = await readStatus(env);
+		expect(moved.discover?.systemId).toBe("primer");
+		expect(moved.state).toBe("running");
+		expect(moved.runError).toBeUndefined();
 	});
 });
 
