@@ -294,12 +294,12 @@ export class D1PageQueue implements PageQueue {
 		// SIT-68: expiry is a lost lease, not a crawl failure. Return the row to
 		// pending on this tick — including rows already failed as "claim expired" —
 		// and rewind an exhausted attempt count so the lease cannot fill the dead
-		// fail pile while other seeds still have pending work.
+		// fail pile. claimed_at stays, so this system still counts as served and
+		// the next batch can move on to a seed that has not had a turn.
 		await run(
 			this.db,
 			`UPDATE page_work
 			 SET status = 'pending',
-			     claimed_at = NULL,
 			     error = NULL,
 			     attempts = CASE WHEN attempts >= ? THEN ? ELSE attempts END
 			 WHERE (status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?)
@@ -309,48 +309,45 @@ export class D1PageQueue implements PageQueue {
 			staleBefore,
 			CLAIM_EXPIRED,
 		);
-		// One page from each system before any system repeats. Systems with no
-		// claim or index yet go first within a round, so a seed that is pending
-		// and unclaimed is not skipped while another seed keeps the batch.
+		// One claimable page from each system before any system repeats. The
+		// served time is a single aggregate, so done rows are not ranked. A
+		// system with no claim or index yet goes first within a round.
 		const rows = await all<WorkRow>(
 			this.db,
-			`WITH base AS (
-			   SELECT
-			     system_id, url, kind, status, enqueued_at, attempts,
-			     last_crawled, last_indexed, item_key,
-			     CASE
-			       WHEN status = 'pending' OR (status = 'failed' AND attempts < ?) THEN 1
-			       ELSE 0
-			     END AS claimable,
-			     MAX(
-			       CASE
-			         WHEN claimed_at IS NULL THEN last_indexed
-			         WHEN last_indexed IS NULL THEN claimed_at
-			         WHEN claimed_at > last_indexed THEN claimed_at
-			         ELSE last_indexed
-			       END
-			     ) OVER (PARTITION BY system_id) AS served_at
+			`WITH served AS (
+			   SELECT system_id,
+			          MAX(
+			            CASE
+			              WHEN claimed_at IS NULL THEN last_indexed
+			              WHEN last_indexed IS NULL THEN claimed_at
+			              WHEN claimed_at > last_indexed THEN claimed_at
+			              ELSE last_indexed
+			            END
+			          ) AS served_at
 			   FROM page_work
+			   GROUP BY system_id
 			 ),
 			 ranked AS (
 			   SELECT
-			     system_id, url, kind, status, enqueued_at, attempts,
-			     last_crawled, last_indexed, item_key, served_at, claimable,
+			     page_work.system_id, page_work.url, page_work.kind, page_work.status,
+			     page_work.enqueued_at, page_work.attempts, page_work.last_crawled,
+			     page_work.last_indexed, page_work.item_key, served.served_at,
 			     ROW_NUMBER() OVER (
-			       PARTITION BY system_id
+			       PARTITION BY page_work.system_id
 			       ORDER BY
-			         claimable DESC,
-			         CASE kind WHEN 'seed' THEN 0 ELSE 1 END,
-			         CASE WHEN last_indexed IS NULL THEN 0 ELSE 1 END,
-			         last_indexed ASC,
-			         enqueued_at ASC,
-			         url ASC
+			         CASE page_work.kind WHEN 'seed' THEN 0 ELSE 1 END,
+			         CASE WHEN page_work.last_indexed IS NULL THEN 0 ELSE 1 END,
+			         page_work.last_indexed ASC,
+			         page_work.enqueued_at ASC,
+			         page_work.url ASC
 			     ) AS turn
-			   FROM base
+			   FROM page_work
+			   JOIN served ON served.system_id = page_work.system_id
+			   WHERE page_work.status = 'pending'
+			      OR (page_work.status = 'failed' AND page_work.attempts < ?)
 			 )
 			 SELECT system_id, url, kind, status, enqueued_at, attempts, last_crawled, last_indexed, item_key
 			 FROM ranked
-			 WHERE claimable = 1
 			 ORDER BY
 			   turn ASC,
 			   CASE WHEN served_at IS NULL THEN 0 ELSE 1 END,
@@ -430,7 +427,7 @@ export class D1PageQueue implements PageQueue {
 			const changes = await run(
 				this.db,
 				`UPDATE page_work
-				 SET status = 'failed', error = ?, claimed_at = NULL
+				 SET status = 'failed', error = ?
 				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
 				error,
 				item.systemId,
@@ -443,7 +440,7 @@ export class D1PageQueue implements PageQueue {
 		await run(
 			this.db,
 			`UPDATE page_work
-			 SET status = 'failed', error = ?, claimed_at = NULL
+			 SET status = 'failed', error = ?
 			 WHERE system_id = ? AND url = ?`,
 			error,
 			item.systemId,
@@ -688,7 +685,6 @@ export class D1PageQueue implements PageQueue {
 			`UPDATE page_work
 			 SET status = 'pending',
 			     attempts = CASE WHEN attempts >= ? THEN ? ELSE attempts END,
-			     claimed_at = NULL,
 			     error = NULL,
 			     item_key = ?
 			 WHERE system_id = ? AND url = ?

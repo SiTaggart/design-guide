@@ -281,6 +281,31 @@ describe("claim expiry reclaim", () => {
 			.first<{ status: string; attempts: number; claimed_at: string }>();
 		expect(row).toEqual({ status: "claimed", attempts: 1, claimed_at: NOW });
 	});
+
+	it("stays claimable after a second expiry at the cap", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/components/button";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
+		await pageQueue.claim(1, "2026-09-30T00:00:00.000Z");
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET attempts = ?, claimed_at = ? WHERE url = ?")
+			.bind(MAX_ATTEMPTS, "2026-09-30T00:00:00.000Z", url)
+			.run();
+		await pageQueue.claim(1, "2026-09-30T00:16:00.000Z");
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET claimed_at = ? WHERE url = ?")
+			.bind("2026-09-30T00:16:00.000Z", url)
+			.run();
+
+		const again = await pageQueue.claim(1, "2026-09-30T00:32:00.000Z");
+		expect(again.map((item) => item.url)).toEqual([url]);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, error FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; error: string | null }>();
+		expect(row).toEqual({ status: "claimed", error: null });
+		expect((await pageQueue.depths()).failed).toBe(0);
+	});
 });
 
 describe("multi-seed claim fairness", () => {
@@ -369,6 +394,54 @@ describe("multi-seed claim fairness", () => {
 		expect(fresh.antd?.pending).toBe(1);
 		expect(fresh.cloudscape?.claimed).toBe(1);
 		expect(fresh.cloudscape?.done).toBe(0);
+	});
+
+	it("gives the next tick to the idle seed after the other seed's claim fails", async () => {
+		const pageQueue = await queue();
+		await pageQueue.enqueueUpsert(
+			[{ systemId: "antd", url: "https://ant.design/components/hot", kind: "seed" }],
+			"2026-01-01T00:00:00.000Z",
+		);
+		await pageQueue.enqueueUpsert(
+			[{ systemId: "cloudscape", url: "https://cloudscape.design/components/idle", kind: "seed" }],
+			"2026-08-01T00:00:00.000Z",
+		);
+		const [failed] = await pageQueue.claim(1, NOW);
+		expect(failed?.systemId).toBe("antd");
+		expect(await pageQueue.fail(failed!, "render failed")).toBe(true);
+
+		const next = await pageQueue.claim(1, "2026-09-30T00:05:00.000Z");
+		expect(next.map((item) => item.systemId)).toEqual(["cloudscape"]);
+		const fresh = Object.fromEntries((await pageQueue.freshness()).map((row) => [row.system, row]));
+		expect(fresh.antd?.failed).toBe(1);
+		expect(fresh.antd?.claimed).toBe(0);
+		expect(fresh.cloudscape?.claimed).toBe(1);
+	});
+
+	it("gives the next tick to the idle seed after the other seed's claim expires", async () => {
+		const pageQueue = await queue();
+		await pageQueue.enqueueUpsert(
+			[{ systemId: "antd", url: "https://ant.design/components/hot", kind: "seed" }],
+			"2026-01-01T00:00:00.000Z",
+		);
+		await pageQueue.enqueueUpsert(
+			[{ systemId: "cloudscape", url: "https://cloudscape.design/components/idle", kind: "seed" }],
+			"2026-08-01T00:00:00.000Z",
+		);
+		const [expired] = await pageQueue.claim(1, "2026-09-30T00:00:00.000Z");
+		expect(expired?.systemId).toBe("antd");
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET claimed_at = ? WHERE url = ?")
+			.bind("2026-09-30T00:00:00.000Z", expired!.url)
+			.run();
+
+		const next = await pageQueue.claim(1, "2026-09-30T00:16:00.000Z");
+		expect(next.map((item) => item.systemId)).toEqual(["cloudscape"]);
+		const fresh = Object.fromEntries((await pageQueue.freshness()).map((row) => [row.system, row]));
+		expect(fresh.antd?.pending).toBe(1);
+		expect(fresh.antd?.claimed).toBe(0);
+		expect(fresh.antd?.failed).toBe(0);
+		expect(fresh.cloudscape?.claimed).toBe(1);
 	});
 
 	it("drains every filling seed in one batch while two seeds already hold claims", async () => {
@@ -984,7 +1057,7 @@ describe("releaseForRetry", () => {
 			attempts: 1,
 			item_key: "primer/page/replacement.md",
 			error: null,
-			claimed_at: null,
+			claimed_at: NOW,
 		});
 		await pageQueueDb(pageQueue)
 			.prepare(
