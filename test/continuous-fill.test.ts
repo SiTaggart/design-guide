@@ -46,7 +46,7 @@ afterEach(() => {
 });
 
 describe("PageQueue claim order", () => {
-	it("claims seed before reindex, then oldest lastIndexed, then enqueuedAt", async () => {
+	it("spreads a batch across systems, then seed, oldest lastIndexed, and enqueuedAt within a system", async () => {
 		const pageQueue = await queue();
 		await pageQueue.enqueueUpsert(
 			[
@@ -91,14 +91,17 @@ describe("PageQueue claim order", () => {
 			.bind("2026-04-01T00:00:00.000Z", "https://primer.style/seed-new")
 			.run();
 
-		const claimed = await pageQueue.claim(3, NOW);
+		const claimed = await pageQueue.claim(5, NOW);
 		expect(claimed.map((item) => item.url)).toEqual([
+			"https://paste-dsys.com/reindex-missing",
+			"https://design-system.service.gov.uk/reindex-old",
 			"https://primer.style/seed-missing",
 			"https://primer.style/seed-fresh",
 			"https://primer.style/seed-new",
 		]);
-		expect(claimed.every((item) => item.kind === "seed")).toBe(true);
-		expect(claimed[1]?.lastIndexed).toBe("2024-06-01T00:00:00.000Z");
+		expect(claimed[2]?.kind).toBe("seed");
+		expect(claimed[3]?.lastIndexed).toBe("2024-06-01T00:00:00.000Z");
+		expect(claimed[4]?.lastIndexed).toBe("2024-06-01T00:00:00.000Z");
 	});
 
 	it("keeps enqueuedAt and lastIndexed when a url is rediscovered", async () => {
@@ -130,6 +133,353 @@ describe("PageQueue claim order", () => {
 			last_crawled: "2026-01-02T00:00:00.000Z",
 			item_key: "primer/page/old.md",
 		});
+	});
+
+	it("keeps seed, then oldest lastIndexed, then enqueuedAt inside one system", async () => {
+		const pageQueue = await queue();
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "primer", url: "https://primer.style/reindex-old", kind: "reindex" },
+				{ systemId: "primer", url: "https://primer.style/seed-fresh", kind: "seed" },
+				{ systemId: "primer", url: "https://primer.style/seed-new", kind: "seed" },
+				{ systemId: "primer", url: "https://primer.style/seed-missing", kind: "seed" },
+			],
+			"2026-01-01T00:00:00.000Z",
+		);
+		await pageQueue.complete(
+			{ systemId: "primer", url: "https://primer.style/reindex-old" },
+			{ lastCrawled: "2020-01-01T00:00:00.000Z", lastIndexed: "2020-01-01T00:00:00.000Z" },
+			null,
+		);
+		await pageQueue.complete(
+			{ systemId: "primer", url: "https://primer.style/seed-fresh" },
+			{ lastCrawled: "2024-06-01T00:00:00.000Z", lastIndexed: "2024-06-01T00:00:00.000Z" },
+			null,
+		);
+		await pageQueue.complete(
+			{ systemId: "primer", url: "https://primer.style/seed-new" },
+			{ lastCrawled: "2024-06-01T00:00:00.000Z", lastIndexed: "2024-06-01T00:00:00.000Z" },
+			null,
+		);
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "primer", url: "https://primer.style/reindex-old", kind: "reindex" },
+				{ systemId: "primer", url: "https://primer.style/seed-fresh", kind: "reindex" },
+				{ systemId: "primer", url: "https://primer.style/seed-new", kind: "seed" },
+			],
+			"2026-02-01T00:00:00.000Z",
+		);
+		const db = pageQueueDb(pageQueue);
+		await db
+			.prepare("UPDATE page_work SET enqueued_at = ? WHERE url = ?")
+			.bind("2026-03-01T00:00:00.000Z", "https://primer.style/seed-fresh")
+			.run();
+		await db
+			.prepare("UPDATE page_work SET enqueued_at = ? WHERE url = ?")
+			.bind("2026-04-01T00:00:00.000Z", "https://primer.style/seed-new")
+			.run();
+
+		const claimed = await pageQueue.claim(4, NOW);
+		expect(claimed.map((item) => item.url)).toEqual([
+			"https://primer.style/seed-missing",
+			"https://primer.style/seed-fresh",
+			"https://primer.style/seed-new",
+			"https://primer.style/reindex-old",
+		]);
+		expect(claimed[1]?.kind).toBe("seed");
+		expect(claimed[3]?.kind).toBe("reindex");
+	});
+});
+
+describe("claim expiry reclaim", () => {
+	it("returns a max-attempt expired claim to the same tick instead of failing it", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/components/button";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
+		await pageQueue.claim(1, "2026-09-30T00:00:00.000Z");
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET attempts = ?, claimed_at = ? WHERE url = ?")
+			.bind(MAX_ATTEMPTS, "2026-09-30T00:00:00.000Z", url)
+			.run();
+
+		const claimed = await pageQueue.claim(1, "2026-09-30T00:16:00.000Z");
+		expect(claimed.map((item) => item.url)).toEqual([url]);
+		expect(claimed[0]?.attempts).toBe(MAX_ATTEMPTS);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, attempts, error FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; attempts: number; error: string | null }>();
+		expect(row).toEqual({ status: "claimed", attempts: MAX_ATTEMPTS, error: null });
+		expect((await pageQueue.depths()).failed).toBe(0);
+	});
+
+	it("reclaims an existing claim-expired failure to pending even when the batch is full", async () => {
+		const pageQueue = await queue();
+		const expired = ["https://primer.style/a", "https://primer.style/b", "https://primer.style/c"];
+		await pageQueue.enqueueUpsert(
+			expired.map((url) => ({ systemId: "primer", url, kind: "seed" as const })),
+			"2026-01-01T00:00:00.000Z",
+		);
+		for (const url of expired) {
+			await pageQueueDb(pageQueue)
+				.prepare("UPDATE page_work SET status = 'failed', attempts = ?, error = 'claim expired', claimed_at = NULL WHERE url = ?")
+				.bind(MAX_ATTEMPTS, url)
+				.run();
+		}
+
+		const claimed = await pageQueue.claim(1, NOW);
+		expect(claimed).toHaveLength(1);
+		const rows = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, error FROM page_work ORDER BY url ASC")
+			.all<{ status: string; error: string | null }>();
+		expect(rows.results.every((row) => row.error !== "claim expired")).toBe(true);
+		expect(rows.results.filter((row) => row.status === "failed")).toEqual([]);
+		expect(rows.results.filter((row) => row.status === "claimed")).toHaveLength(1);
+		expect(rows.results.filter((row) => row.status === "pending")).toHaveLength(2);
+		expect((await pageQueue.depths()).failed).toBe(0);
+	});
+
+	it("leaves a real exhausted failure failed", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/stuck";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET status = 'failed', attempts = ?, error = ? WHERE url = ?")
+			.bind(MAX_ATTEMPTS, "gave up", url)
+			.run();
+
+		expect(await pageQueue.claim(1, NOW)).toEqual([]);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, attempts, error FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; attempts: number; error: string | null }>();
+		expect(row).toEqual({ status: "failed", attempts: MAX_ATTEMPTS, error: "gave up" });
+	});
+
+	it("still retries a real failure that has attempts left", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/retry";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		const [owned] = await pageQueue.claim(1, NOW);
+		expect(await pageQueue.fail(owned!, "render failed")).toBe(true);
+
+		const claimed = await pageQueue.claim(1, "2026-09-30T00:05:00.000Z");
+		expect(claimed.map((item) => item.url)).toEqual([url]);
+		expect(claimed[0]?.attempts).toBe(2);
+	});
+
+	it("does not reclaim a claim that is still inside the lease", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/live";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		await pageQueue.claim(1, NOW);
+
+		expect(await pageQueue.claim(1, "2026-09-30T00:14:00.000Z")).toEqual([]);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, attempts, claimed_at FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; attempts: number; claimed_at: string }>();
+		expect(row).toEqual({ status: "claimed", attempts: 1, claimed_at: NOW });
+	});
+
+	it("stays claimable after a second expiry at the cap", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/components/button";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
+		await pageQueue.claim(1, "2026-09-30T00:00:00.000Z");
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET attempts = ?, claimed_at = ? WHERE url = ?")
+			.bind(MAX_ATTEMPTS, "2026-09-30T00:00:00.000Z", url)
+			.run();
+		await pageQueue.claim(1, "2026-09-30T00:16:00.000Z");
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET claimed_at = ? WHERE url = ?")
+			.bind("2026-09-30T00:16:00.000Z", url)
+			.run();
+
+		const again = await pageQueue.claim(1, "2026-09-30T00:32:00.000Z");
+		expect(again.map((item) => item.url)).toEqual([url]);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, error FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; error: string | null }>();
+		expect(row).toEqual({ status: "claimed", error: null });
+		expect((await pageQueue.depths()).failed).toBe(0);
+	});
+});
+
+describe("multi-seed claim fairness", () => {
+	it("does not fill the batch from the oldest backlog while another seed has no claim", async () => {
+		const pageQueue = await queue();
+		const antd = Array.from({ length: 50 }, (_, index) => `https://ant.design/components/a-${index}`);
+		const cloudscape = Array.from({ length: 5 }, (_, index) => `https://cloudscape.design/components/c-${index}`);
+		await pageQueue.enqueueUpsert(
+			antd.map((url) => ({ systemId: "antd", url, kind: "seed" as const })),
+			"2026-01-01T00:00:00.000Z",
+		);
+		await pageQueue.enqueueUpsert(
+			cloudscape.map((url) => ({ systemId: "cloudscape", url, kind: "seed" as const })),
+			"2026-08-01T00:00:00.000Z",
+		);
+
+		const claimed = await pageQueue.claim(10, NOW);
+		const counts = countSystems(claimed.map((item) => item.systemId));
+		expect(counts).toEqual({ antd: 5, cloudscape: 5 });
+		const fresh = Object.fromEntries((await pageQueue.freshness()).map((row) => [row.system, row]));
+		expect(fresh.cloudscape?.claimed).toBe(5);
+		expect(fresh.cloudscape?.pending).toBe(0);
+		expect(fresh.antd?.claimed).toBe(5);
+		expect(fresh.antd?.pending).toBe(45);
+	});
+
+	it("claims a seed that was pending and unclaimed on the following tick", async () => {
+		const pageQueue = await queue();
+		await pageQueue.enqueueUpsert(
+			Array.from({ length: 5 }, (_, index) => ({
+				systemId: "antd" as const,
+				url: `https://ant.design/components/hot-${index}`,
+				kind: "seed" as const,
+			})),
+			"2026-01-01T00:00:00.000Z",
+		);
+		await pageQueue.enqueueUpsert(
+			Array.from({ length: 5 }, (_, index) => ({
+				systemId: "cloudscape" as const,
+				url: `https://cloudscape.design/components/idle-${index}`,
+				kind: "seed" as const,
+			})),
+			"2026-08-01T00:00:00.000Z",
+		);
+
+		const first = await pageQueue.claim(1, NOW);
+		expect(first.map((item) => item.systemId)).toEqual(["antd"]);
+		const mid = Object.fromEntries((await pageQueue.freshness()).map((row) => [row.system, row]));
+		expect(mid.antd?.claimed).toBe(1);
+		expect(mid.cloudscape?.pending).toBe(5);
+		expect(mid.cloudscape?.claimed).toBe(0);
+
+		const second = await pageQueue.claim(1, "2026-09-30T00:05:00.000Z");
+		expect(second.map((item) => item.systemId)).toEqual(["cloudscape"]);
+		const after = Object.fromEntries((await pageQueue.freshness()).map((row) => [row.system, row]));
+		expect(after.antd?.claimed).toBe(1);
+		expect(after.antd?.pending).toBeGreaterThan(0);
+		expect(after.cloudscape?.claimed).toBe(1);
+		expect(after.cloudscape?.pending).toBeGreaterThan(0);
+	});
+
+	it("claims the idle seed on the next tick after the other seed's claim finishes", async () => {
+		const pageQueue = await queue();
+		const antdUrl = "https://ant.design/components/done";
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "antd", url: antdUrl, kind: "seed" },
+				{ systemId: "antd", url: "https://ant.design/components/still", kind: "seed" },
+			],
+			"2026-01-01T00:00:00.000Z",
+		);
+		await pageQueue.enqueueUpsert(
+			[{ systemId: "cloudscape", url: "https://cloudscape.design/components/idle", kind: "seed" }],
+			"2026-08-01T00:00:00.000Z",
+		);
+		const [finished] = await pageQueue.claim(1, NOW);
+		expect(finished?.systemId).toBe("antd");
+		expect(
+			await pageQueue.complete(finished!, { lastCrawled: NOW, lastIndexed: NOW }, "antd/page/done.md"),
+		).toBe(true);
+
+		const next = await pageQueue.claim(1, "2026-09-30T00:05:00.000Z");
+		expect(next.map((item) => item.systemId)).toEqual(["cloudscape"]);
+		const fresh = Object.fromEntries((await pageQueue.freshness()).map((row) => [row.system, row]));
+		expect(fresh.antd?.done).toBe(1);
+		expect(fresh.antd?.pending).toBe(1);
+		expect(fresh.cloudscape?.claimed).toBe(1);
+		expect(fresh.cloudscape?.done).toBe(0);
+	});
+
+	it("gives the next tick to the idle seed after the other seed's claim fails", async () => {
+		const pageQueue = await queue();
+		await pageQueue.enqueueUpsert(
+			[{ systemId: "antd", url: "https://ant.design/components/hot", kind: "seed" }],
+			"2026-01-01T00:00:00.000Z",
+		);
+		await pageQueue.enqueueUpsert(
+			[{ systemId: "cloudscape", url: "https://cloudscape.design/components/idle", kind: "seed" }],
+			"2026-08-01T00:00:00.000Z",
+		);
+		const [failed] = await pageQueue.claim(1, NOW);
+		expect(failed?.systemId).toBe("antd");
+		expect(await pageQueue.fail(failed!, "render failed")).toBe(true);
+
+		const next = await pageQueue.claim(1, "2026-09-30T00:05:00.000Z");
+		expect(next.map((item) => item.systemId)).toEqual(["cloudscape"]);
+		const fresh = Object.fromEntries((await pageQueue.freshness()).map((row) => [row.system, row]));
+		expect(fresh.antd?.failed).toBe(1);
+		expect(fresh.antd?.claimed).toBe(0);
+		expect(fresh.cloudscape?.claimed).toBe(1);
+	});
+
+	it("gives the next tick to the idle seed after the other seed's claim expires", async () => {
+		const pageQueue = await queue();
+		await pageQueue.enqueueUpsert(
+			[{ systemId: "antd", url: "https://ant.design/components/hot", kind: "seed" }],
+			"2026-01-01T00:00:00.000Z",
+		);
+		await pageQueue.enqueueUpsert(
+			[{ systemId: "cloudscape", url: "https://cloudscape.design/components/idle", kind: "seed" }],
+			"2026-08-01T00:00:00.000Z",
+		);
+		const [expired] = await pageQueue.claim(1, "2026-09-30T00:00:00.000Z");
+		expect(expired?.systemId).toBe("antd");
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET claimed_at = ? WHERE url = ?")
+			.bind("2026-09-30T00:00:00.000Z", expired!.url)
+			.run();
+
+		const next = await pageQueue.claim(1, "2026-09-30T00:16:00.000Z");
+		expect(next.map((item) => item.systemId)).toEqual(["cloudscape"]);
+		const fresh = Object.fromEntries((await pageQueue.freshness()).map((row) => [row.system, row]));
+		expect(fresh.antd?.pending).toBe(1);
+		expect(fresh.antd?.claimed).toBe(0);
+		expect(fresh.antd?.failed).toBe(0);
+		expect(fresh.cloudscape?.claimed).toBe(1);
+	});
+
+	it("drains every filling seed in one batch while two seeds already hold claims", async () => {
+		const pageQueue = await queue();
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "antd", url: "https://ant.design/components/held", kind: "seed" },
+				{ systemId: "patternfly", url: "https://patternfly.org/components/held", kind: "seed" },
+			],
+			"2026-01-01T00:00:00.000Z",
+		);
+		await pageQueue.claim(2, "2026-09-30T00:00:00.000Z");
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "antd", url: "https://ant.design/components/more-0", kind: "seed" },
+				{ systemId: "antd", url: "https://ant.design/components/more-1", kind: "seed" },
+				{ systemId: "patternfly", url: "https://patternfly.org/components/more-0", kind: "seed" },
+				{ systemId: "patternfly", url: "https://patternfly.org/components/more-1", kind: "seed" },
+				{ systemId: "cloudscape", url: "https://cloudscape.design/components/wait-0", kind: "seed" },
+				{ systemId: "cloudscape", url: "https://cloudscape.design/components/wait-1", kind: "seed" },
+				{ systemId: "siemens-ix", url: "https://ix.siemens.io/docs/wait-0", kind: "seed" },
+				{ systemId: "siemens-ix", url: "https://ix.siemens.io/docs/wait-1", kind: "seed" },
+			],
+			"2026-08-01T00:00:00.000Z",
+		);
+
+		const claimed = await pageQueue.claim(4, "2026-09-30T00:05:00.000Z");
+		expect(countSystems(claimed.map((item) => item.systemId))).toEqual({
+			antd: 1,
+			cloudscape: 1,
+			patternfly: 1,
+			"siemens-ix": 1,
+		});
+		const fresh = Object.fromEntries((await pageQueue.freshness()).map((row) => [row.system, row]));
+		expect(fresh.cloudscape?.claimed).toBeGreaterThan(0);
+		expect(fresh["siemens-ix"]?.claimed).toBeGreaterThan(0);
+		expect(fresh.antd?.claimed).toBeGreaterThan(0);
+		expect(fresh.patternfly?.claimed).toBeGreaterThan(0);
 	});
 });
 
@@ -707,7 +1057,7 @@ describe("releaseForRetry", () => {
 			attempts: 1,
 			item_key: "primer/page/replacement.md",
 			error: null,
-			claimed_at: null,
+			claimed_at: NOW,
 		});
 		await pageQueueDb(pageQueue)
 			.prepare(
@@ -1637,6 +1987,14 @@ async function workRow(
 		.prepare("SELECT status, claimed_at, item_key, error FROM page_work WHERE url = ?")
 		.bind(url)
 		.first<{ status: string; claimed_at: string | null; item_key: string | null; error: string | null }>();
+}
+
+function countSystems(ids: readonly string[]): Record<string, number> {
+	const counts: Record<string, number> = {};
+	for (const id of ids) {
+		counts[id] = (counts[id] ?? 0) + 1;
+	}
+	return counts;
 }
 
 function pageQueueDb(pageQueue: D1PageQueue): D1Database {
