@@ -291,32 +291,76 @@ export class D1PageQueue implements PageQueue {
 
 	async claim(limit: number, now: string): Promise<PageWorkItem[]> {
 		const staleBefore = new Date(Date.parse(now) - STALE_CLAIM_MS).toISOString();
+		// SIT-68: expiry is a lost lease, not a crawl failure. Return the row to
+		// pending on this tick — including rows already failed as "claim expired" —
+		// and rewind an exhausted attempt count so the lease cannot fill the dead
+		// fail pile while other seeds still have pending work.
 		await run(
 			this.db,
 			`UPDATE page_work
-			 SET status = 'pending', claimed_at = NULL
-			 WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ? AND attempts < ?`,
-			staleBefore,
+			 SET status = 'pending',
+			     claimed_at = NULL,
+			     error = NULL,
+			     attempts = CASE WHEN attempts >= ? THEN ? ELSE attempts END
+			 WHERE (status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?)
+			    OR (status = 'failed' AND error = ?)`,
 			MAX_ATTEMPTS,
-		);
-		await run(
-			this.db,
-			`UPDATE page_work
-			 SET status = 'failed', claimed_at = NULL, error = COALESCE(error, '${CLAIM_EXPIRED}')
-			 WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ? AND attempts >= ?`,
+			MAX_ATTEMPTS - 1,
 			staleBefore,
-			MAX_ATTEMPTS,
+			CLAIM_EXPIRED,
 		);
+		// One page from each system before any system repeats. Systems with no
+		// claim or index yet go first within a round, so a seed that is pending
+		// and unclaimed is not skipped while another seed keeps the batch.
 		const rows = await all<WorkRow>(
 			this.db,
-			`SELECT system_id, url, kind, status, enqueued_at, attempts, last_crawled, last_indexed, item_key
-			 FROM page_work
-			 WHERE status = 'pending' OR (status = 'failed' AND attempts < ?)
+			`WITH base AS (
+			   SELECT
+			     system_id, url, kind, status, enqueued_at, attempts,
+			     last_crawled, last_indexed, item_key,
+			     CASE
+			       WHEN status = 'pending' OR (status = 'failed' AND attempts < ?) THEN 1
+			       ELSE 0
+			     END AS claimable,
+			     MAX(
+			       CASE
+			         WHEN claimed_at IS NULL THEN last_indexed
+			         WHEN last_indexed IS NULL THEN claimed_at
+			         WHEN claimed_at > last_indexed THEN claimed_at
+			         ELSE last_indexed
+			       END
+			     ) OVER (PARTITION BY system_id) AS served_at
+			   FROM page_work
+			 ),
+			 ranked AS (
+			   SELECT
+			     system_id, url, kind, status, enqueued_at, attempts,
+			     last_crawled, last_indexed, item_key, served_at, claimable,
+			     ROW_NUMBER() OVER (
+			       PARTITION BY system_id
+			       ORDER BY
+			         claimable DESC,
+			         CASE kind WHEN 'seed' THEN 0 ELSE 1 END,
+			         CASE WHEN last_indexed IS NULL THEN 0 ELSE 1 END,
+			         last_indexed ASC,
+			         enqueued_at ASC,
+			         url ASC
+			     ) AS turn
+			   FROM base
+			 )
+			 SELECT system_id, url, kind, status, enqueued_at, attempts, last_crawled, last_indexed, item_key
+			 FROM ranked
+			 WHERE claimable = 1
 			 ORDER BY
+			   turn ASC,
+			   CASE WHEN served_at IS NULL THEN 0 ELSE 1 END,
+			   served_at ASC,
 			   CASE kind WHEN 'seed' THEN 0 ELSE 1 END,
 			   CASE WHEN last_indexed IS NULL THEN 0 ELSE 1 END,
 			   last_indexed ASC,
-			   enqueued_at ASC
+			   enqueued_at ASC,
+			   system_id ASC,
+			   url ASC
 			 LIMIT ?`,
 			MAX_ATTEMPTS,
 			limit,
