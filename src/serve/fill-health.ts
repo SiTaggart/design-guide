@@ -1,9 +1,9 @@
+import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
 import { capCooling } from "../index/discover.ts";
-import { readIndexedHashes } from "../index/indexed-hashes.ts";
 import { D1PageQueue } from "../index/page-queue.ts";
-import { driftedSystems } from "../index/seed-hash.ts";
+import { seedHashKey, systemSeedHash } from "../index/seed-hash.ts";
 import type { IndexStatusDocument } from "../index/status.ts";
 import { readIndexOverlay } from "./index-status.ts";
 import { systemPhase, type SystemPhase } from "./status-page.ts";
@@ -59,8 +59,35 @@ export async function handleFillHealth(env: WorkerEnv): Promise<Response> {
 }
 
 async function readFillSchedule(env: WorkerEnv): Promise<FillSchedule> {
-	const [deferred, indexed] = await Promise.all([readCapDefers(env), readIndexedHashes(env)]);
-	return { deferred, drifted: new Set(driftedSystems(indexed)) };
+	const [deferred, drifted] = await Promise.all([readCapDefers(env), readDriftedSeeds(env)]);
+	return { deferred, drifted };
+}
+
+async function readDriftedSeeds(env: WorkerEnv): Promise<Set<SystemId>> {
+	const index = env.INDEX;
+	if (!index) {
+		return new Set();
+	}
+	const drifted = new Set<SystemId>();
+	await Promise.all(
+		SYSTEM_IDS.map(async (id) => {
+			try {
+				const hash = await index.get(seedHashKey(id));
+				if (hash !== systemSeedHash(seedById(id))) {
+					drifted.add(id);
+				}
+			} catch (error) {
+				console.log(
+					JSON.stringify({
+						event: "fill_health_hash_unread",
+						system: id,
+						error: error instanceof Error ? error.message : String(error),
+					}),
+				);
+			}
+		}),
+	);
+	return drifted;
 }
 
 async function readCapDefers(env: WorkerEnv): Promise<Record<string, string>> {

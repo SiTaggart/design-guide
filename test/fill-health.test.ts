@@ -355,6 +355,32 @@ describe("GET /v1/fill-health", () => {
 		expect(queryText).not.toContain(STATUS_TOKEN);
 	});
 
+	it("stays JSON 200 when one seed hash read fails", async () => {
+		const now = new Date().toISOString();
+		const { env } = await fleetEnv(now);
+		const index = env.INDEX;
+		if (!index) {
+			throw new Error("INDEX required");
+		}
+		const get = index.get.bind(index);
+		const failing = seedHashKey("antd");
+		index.get = (async (key: string) => {
+			if (key === failing) {
+				throw new Error("kv hash timeout");
+			}
+			return get(key);
+		}) as KVNamespace["get"];
+
+		const response = await worker.fetch(authed("https://example.test/v1/fill-health"), env);
+		expect(response.status).toBe(200);
+		const text = await response.text();
+		const body = JSON.parse(text) as FillHealthBody;
+		expect(text).toContain('"fill":"ok"');
+		expect(body).toMatchObject({ fill: "ok", alarms: [] });
+		expect(body.alarms).not.toContain("fleet_freeze");
+		expect(text).not.toContain("kv hash timeout");
+	});
+
 	it("reads the index overlay once and matches that document", async () => {
 		const now = new Date().toISOString();
 		const { env } = await fleetEnv(now);
