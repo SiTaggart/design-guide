@@ -8,7 +8,7 @@ See [docs/architecture.md](docs/architecture.md).
 
 `https://design-guide.me-2c5.workers.dev`
 
-Deploy prints the live URL. `/health`, `/v1/search`, and `/mcp` are public. `GET /status` and `GET /v1/index-status` require the Worker secret `STATUS_TOKEN` (`Authorization: Bearer` or `?token=`). A missing or wrong token is `401`.
+Deploy prints the live URL. `/health`, `/v1/search`, and `/mcp` are public. `GET /status`, `GET /v1/index-status`, and `GET /v1/fill-health` require the Worker secret `STATUS_TOKEN` (`Authorization: Bearer` or `?token=`). A missing or wrong token is `401`.
 
 ## MCP
 
@@ -168,7 +168,7 @@ A missing query returns `400` with `{ "error": "query_required" }`. No matches a
 
 `GET /health` returns `200` when at least one completed item exists. Otherwise it returns `503`.
 
-`GET /v1/index-status` returns last-run JSON plus page-queue depths, per-system `lastCrawled`, `lastIndexed`, and `lastDiscovered`, and `discover` (`null` or `{ systemId, jobId, kind, trigger, startedAt }` from the live D1 discover run). `GET /status` is the read-only HTML overview of that same document. Set the secret with `bunx wrangler secret put STATUS_TOKEN`. Do not commit the value.
+`GET /v1/index-status` returns last-run JSON plus page-queue depths, per-system `lastCrawled`, `lastIndexed`, and `lastDiscovered`, and `discover` (`null` or `{ systemId, jobId, kind, trigger, startedAt }` from the live D1 discover run). `GET /status` is the read-only HTML overview of that same document. `GET /v1/fill-health` is the Better Stack keyword probe of that same overlay: HTTP 200 with `"fill":"ok"` when healthy, or HTTP 200 with `"fill":"alarm"` and a non-empty `alarms` list. Fill state does not change the HTTP status. Set the secret with `bunx wrangler secret put STATUS_TOKEN`. Do not commit the value.
 
 ## Seed
 
@@ -195,7 +195,7 @@ Spectrum and Carbon are parked as crawl misses. Their items are deleted. They ar
 
 Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron discovers one drifted or due system and drains up to 100 queued pages. A daily cron uses the same fill. A Sunday 06:00 UTC recovery discovers the parked seed that has waited longest. `GET /status` is a read-only overview. It does not edit the queue, reindex, or parks. There is no GitHub Actions crawl job.
 
-`GET /status` and `GET /v1/index-status` are the fill record: queue depths, per-system crawl and index timestamps, parks, unparked ids, crawl/render/index errors, and the live discover run. Slack is not the health path. Both routes require `STATUS_TOKEN`.
+`GET /status` and `GET /v1/index-status` are the fill record: queue depths, per-system crawl and index timestamps, parks, unparked ids, crawl/render/index errors, and the live discover run. `GET /v1/fill-health` alarms from that record only: `fleet_freeze`, `stuck:<systemId>`, `pending_no_claims:<systemId>`, or `hard_fail`. Slack is not the health path. Those routes require `STATUS_TOKEN`.
 
 The worker emails start and finish through the Worker `send_email` binding with `env.EMAIL.send({ from, to, subject, text })`. There is no REST/SMTP path, no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift`, `recrawl`, or `recovery`), discover id, and the one system kicked. Finish mail on a successful discover is not a failure while drain continues. Fail mail is for a discover that errors or a drain tick that claims pages and indexes none. A mid-fill tick that indexes pages does not send fail mail.
 

@@ -1,6 +1,7 @@
 import type { WorkerEnv } from "./index/ai-search.ts";
 import { handleScheduled } from "./schedule.ts";
 import { handleHealth } from "./serve/health.ts";
+import { handleFillHealth } from "./serve/fill-health.ts";
 import { handleIndexStatus } from "./serve/index-status.ts";
 import { handleMcp } from "./serve/mcp.ts";
 import { handleSearch } from "./serve/search.ts";
@@ -16,14 +17,24 @@ export default {
 		if (url.pathname === "/health" && request.method === "GET") {
 			return handleHealth(env);
 		}
-		if (url.pathname === "/status" || url.pathname === "/v1/index-status") {
+		if (
+			url.pathname === "/status" ||
+			url.pathname === "/v1/index-status" ||
+			url.pathname === "/v1/fill-health"
+		) {
 			if (!statusTokenOk(request, env)) {
 				return statusUnauthorized();
 			}
 			if (request.method !== "GET") {
 				return statusMethodNotAllowed();
 			}
-			return url.pathname === "/status" ? handleStatusPage(env) : handleIndexStatus(env);
+			if (url.pathname === "/status") {
+				return handleStatusPage(env);
+			}
+			if (url.pathname === "/v1/fill-health") {
+				return handleFillHealth(env);
+			}
+			return handleIndexStatus(env);
 		}
 		if (url.pathname === "/v1/search") {
 			return handleSearch(request, env, url);
