@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../src/config/types.ts";
 import type { WorkerEnv } from "../src/index/ai-search.ts";
+import { CAP_RETRY_MS } from "../src/index/discover.ts";
+import { readIndexedHashes, writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import { D1PageQueue, type SystemFreshness } from "../src/index/page-queue.ts";
 import { writePark } from "../src/index/parks.ts";
+import { driftedSystems, seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
 import { emptyStatus, readStatus, writeStatus, type IndexStatusDocument } from "../src/index/status.ts";
 import { fillHealthFrom, type FillHealthBody } from "../src/serve/fill-health.ts";
 import worker from "../src/worker.ts";
@@ -92,8 +96,11 @@ describe("fillHealthFrom", () => {
 		expectAlarm(body, ["fleet_freeze"]);
 	});
 
-	it("alarms fleet_freeze for a due seed that is not Empty", () => {
-		const body = fillHealthFrom(
+	it("alarms fleet_freeze for a seed-drifted seed and not for Live idle", () => {
+		const drifted = fillHealthFrom(overlay(), CHECKED, { drifted: new Set(["antd"]) });
+		expectAlarm(drifted, ["fleet_freeze"]);
+
+		const live = fillHealthFrom(
 			overlay({
 				freshness: liveRows({
 					antd: { lastCrawled: STALE, lastIndexed: STALE, lastDiscovered: STALE },
@@ -101,7 +108,42 @@ describe("fillHealthFrom", () => {
 			}),
 			CHECKED,
 		);
-		expectAlarm(body, ["fleet_freeze"]);
+		expect(live).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
+	});
+
+	it("does not fleet_freeze a capped seed while its cap-defer cooldown is open", () => {
+		const drained = overlay();
+		const deferred = { paste: CHECKED };
+		const drifted = new Set<SystemId>(["paste"]);
+		const cooling = fillHealthFrom(drained, CHECKED, { deferred, drifted });
+		expect(cooling).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
+
+		const emptyCooling = fillHealthFrom(
+			overlay({
+				freshness: liveRows({
+					paste: { lastCrawled: null, lastIndexed: null, lastDiscovered: null, done: 0 },
+				}),
+			}),
+			CHECKED,
+			{ deferred: { paste: CHECKED } },
+		);
+		expect(emptyCooling.fill).toBe("ok");
+
+		const expiredAt = new Date(Date.parse(CHECKED) + CAP_RETRY_MS).toISOString();
+		const expired = fillHealthFrom(drained, expiredAt, { deferred, drifted });
+		expect(expired).toEqual({ fill: "alarm", alarms: ["fleet_freeze"], checkedAt: expiredAt });
+
+		const stillWaiting = fillHealthFrom(
+			overlay({
+				freshness: liveRows({
+					paste: { lastCrawled: null, lastIndexed: null, lastDiscovered: null, done: 0 },
+					antd: { lastCrawled: null, lastIndexed: null, lastDiscovered: null, done: 0 },
+				}),
+			}),
+			CHECKED,
+			{ deferred: { paste: CHECKED } },
+		);
+		expectAlarm(stillWaiting, ["fleet_freeze"]);
 	});
 
 	it("does not fleet_freeze for Parked stubs, Live idle, or an active discover", () => {
@@ -325,20 +367,29 @@ describe("GET /v1/fill-health", () => {
 		const body = JSON.parse(text) as FillHealthBody;
 		const mark = watch.counts();
 		const overlayDoc = await readStatus(env);
-		const second = watch.counts();
+		const afterOverlay = watch.counts();
+		const indexed = await readIndexedHashes(env);
+		const afterHashes = watch.counts();
+		const deferred = await new D1PageQueue(env.PAGE_QUEUE!).capDefers();
+		const afterDefer = watch.counts();
 
 		expect(response.status).toBe(200);
 		expect(text).toContain('"fill":"ok"');
 		expect(body.alarms).toEqual([]);
 		expect(body.fill).toBe("ok");
 		expect(body.checkedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-		expect(body).toEqual(fillHealthFrom(overlayDoc, body.checkedAt));
+		expect(body).toEqual(
+			fillHealthFrom(overlayDoc, body.checkedAt, {
+				deferred,
+				drifted: new Set(driftedSystems(indexed)),
+			}),
+		);
 		expect(routeReads).toEqual({
-			gets: second.gets - mark.gets,
-			prepares: second.prepares - mark.prepares,
+			gets: afterOverlay.gets - mark.gets + (afterHashes.gets - afterOverlay.gets),
+			prepares: afterOverlay.prepares - mark.prepares + (afterDefer.prepares - afterHashes.prepares),
 		});
-		expect(routeReads.gets).toBeGreaterThan(0);
-		expect(routeReads.prepares).toBeGreaterThan(0);
+		expect(afterHashes.gets - afterOverlay.gets).toBe(SYSTEM_IDS.length);
+		expect(afterDefer.prepares - afterHashes.prepares).toBe(1);
 		expect(index.store).toEqual(stored);
 	});
 
@@ -353,24 +404,16 @@ describe("GET /v1/fill-health", () => {
 
 	it("alarms each predicate from the live overlay and never returns fill ok", async () => {
 		const now = new Date().toISOString();
-		const stale = new Date(Date.parse(now) - 31 * 24 * 60 * 60 * 1000).toISOString();
 
 		const frozen = await probe(await fleetEnv(now, ["antd"]));
 		expect(frozen.body.alarms).toEqual(["fleet_freeze"]);
 		expect(frozen.text).not.toContain('"fill":"ok"');
 
-		const due = await fleetEnv(now);
-		await due.db
-			.prepare("UPDATE page_work SET last_crawled = ?, last_indexed = ? WHERE system_id = ?")
-			.bind(stale, stale, "antd")
-			.run();
-		await due.db
-			.prepare("UPDATE system_mark SET last_discovered = ? WHERE system_id = ?")
-			.bind(stale, "antd")
-			.run();
-		const dueProbe = await probe(due);
-		expect(dueProbe.body.alarms).toEqual(["fleet_freeze"]);
-		expect(dueProbe.text).not.toContain('"fill":"ok"');
+		const drifted = await fleetEnv(now);
+		await drifted.env.INDEX?.delete(seedHashKey("antd"));
+		const driftedProbe = await probe(drifted);
+		expect(driftedProbe.body.alarms).toEqual(["fleet_freeze"]);
+		expect(driftedProbe.text).not.toContain('"fill":"ok"');
 
 		const stuck = await fleetEnv(now, ["uswds"]);
 		await stuck.queue.enqueueUpsert(
@@ -420,6 +463,23 @@ describe("GET /v1/fill-health", () => {
 		const erroredProbe = await probe(errored);
 		expect(erroredProbe.body.alarms).toEqual(["hard_fail"]);
 		expect(erroredProbe.text).not.toContain('"fill":"ok"');
+	});
+
+	it("does not fleet_freeze a drained capped seed during the cap-defer hour", async () => {
+		const now = new Date().toISOString();
+		const fleet = await fleetEnv(now);
+		await fleet.env.INDEX?.delete(seedHashKey("paste"));
+		await fleet.queue.noteCapDefer("paste", now);
+		const cooling = await probe(fleet);
+		expect(cooling.body.fill).toBe("ok");
+		expect(cooling.body.alarms).not.toContain("fleet_freeze");
+		expect(cooling.text).toContain('"fill":"ok"');
+
+		const openedAt = new Date(Date.now() - CAP_RETRY_MS).toISOString();
+		await fleet.queue.noteCapDefer("paste", openedAt);
+		const expired = await probe(fleet);
+		expect(expired.body.alarms).toEqual(["fleet_freeze"]);
+		expect(expired.text).not.toContain('"fill":"ok"');
 	});
 
 	it("stays ok for mid-fill, a Parked stub, and Live idle", async () => {
@@ -484,6 +544,9 @@ async function fleetEnv(now: string, skip: readonly SystemId[] = []): Promise<Fl
 	}
 	const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });
 	await writeStatus(env, { ...emptyStatus(false), state: "ok" });
+	for (const systemId of SYSTEM_IDS) {
+		await writeIndexedHash(env, systemId, systemSeedHash(seedById(systemId)));
+	}
 	return { env, db, queue };
 }
 

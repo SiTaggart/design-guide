@@ -1,6 +1,9 @@
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
-import { isDue } from "../index/page-queue.ts";
+import { capCooling } from "../index/discover.ts";
+import { readIndexedHashes } from "../index/indexed-hashes.ts";
+import { D1PageQueue } from "../index/page-queue.ts";
+import { driftedSystems } from "../index/seed-hash.ts";
 import type { IndexStatusDocument } from "../index/status.ts";
 import { readIndexOverlay } from "./index-status.ts";
 import { systemPhase, type SystemPhase } from "./status-page.ts";
@@ -16,6 +19,11 @@ export type FillHealthBody = {
 	checkedAt: string;
 };
 
+export type FillSchedule = {
+	deferred?: Readonly<Record<string, string>>;
+	drifted?: ReadonlySet<SystemId>;
+};
+
 type SeedView = {
 	system: SystemId;
 	parked: boolean;
@@ -24,13 +32,15 @@ type SeedView = {
 	claimed: number;
 	failed: number;
 	done: number;
-	lastIndexed: string | null;
-	lastDiscovered: string | null;
 	error?: string;
 };
 
-export function fillHealthFrom(document: IndexStatusDocument, checkedAt: string): FillHealthBody {
-	const alarms = fillAlarms(document, Date.parse(checkedAt));
+export function fillHealthFrom(
+	document: IndexStatusDocument,
+	checkedAt: string,
+	schedule: FillSchedule = {},
+): FillHealthBody {
+	const alarms = fillAlarms(document, Date.parse(checkedAt), schedule);
 	return {
 		fill: alarms.length === 0 ? "ok" : "alarm",
 		alarms,
@@ -41,17 +51,42 @@ export function fillHealthFrom(document: IndexStatusDocument, checkedAt: string)
 export async function handleFillHealth(env: WorkerEnv): Promise<Response> {
 	const checkedAt = new Date().toISOString();
 	const document = await readIndexOverlay(env);
-	return new Response(JSON.stringify(fillHealthFrom(document, checkedAt)), {
+	const schedule = await readFillSchedule(env);
+	return new Response(JSON.stringify(fillHealthFrom(document, checkedAt, schedule)), {
 		status: 200,
 		headers: JSON_HEADERS,
 	});
 }
 
-function fillAlarms(document: IndexStatusDocument, now: number): string[] {
+async function readFillSchedule(env: WorkerEnv): Promise<FillSchedule> {
+	const [deferred, indexed] = await Promise.all([readCapDefers(env), readIndexedHashes(env)]);
+	return { deferred, drifted: new Set(driftedSystems(indexed)) };
+}
+
+async function readCapDefers(env: WorkerEnv): Promise<Record<string, string>> {
+	if (!env.PAGE_QUEUE) {
+		return {};
+	}
+	try {
+		const queue = new D1PageQueue(env.PAGE_QUEUE);
+		await queue.ensure();
+		return await queue.capDefers();
+	} catch (error) {
+		console.log(
+			JSON.stringify({
+				event: "fill_health_defer_unread",
+				error: error instanceof Error ? error.message : String(error),
+			}),
+		);
+		return {};
+	}
+}
+
+function fillAlarms(document: IndexStatusDocument, now: number, schedule: FillSchedule): string[] {
 	const seeds = seedViews(document);
 	const alarms: string[] = [];
 	const idle = document.queue.pending + document.queue.claimed === 0;
-	if (document.discover === null && idle && seeds.some((seed) => emptyOrDue(seed, now))) {
+	if (document.discover === null && idle && seeds.some((seed) => freezeEligible(seed, now, schedule))) {
 		alarms.push("fleet_freeze");
 	}
 	for (const seed of seeds) {
@@ -115,26 +150,19 @@ function seedViews(document: IndexStatusDocument): SeedView[] {
 			claimed,
 			failed,
 			done,
-			lastIndexed,
-			lastDiscovered,
 			error,
 		};
 	});
 }
 
-function emptyOrDue(seed: SeedView, now: number): boolean {
-	if (seed.parked) {
+function freezeEligible(seed: SeedView, now: number, schedule: FillSchedule): boolean {
+	if (seed.parked || capCooling(seed.system, schedule.deferred ?? {}, now)) {
 		return false;
 	}
 	if (seed.phase === "empty") {
 		return true;
 	}
-	return isDue({
-		lastIndexed: seed.lastIndexed,
-		lastDiscovered: seed.lastDiscovered,
-		pending: seed.pending + seed.claimed,
-		now,
-	});
+	return schedule.drifted?.has(seed.system) ?? false;
 }
 
 function hardFail(document: IndexStatusDocument, seeds: readonly SeedView[]): boolean {
