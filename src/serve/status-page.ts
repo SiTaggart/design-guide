@@ -1,9 +1,10 @@
 import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
-import type { ParkRecord } from "../index/parks.ts";
-import { emptyStatus, readStatus, type IndexStatusDocument } from "../index/status.ts";
 import type { QueueDepths } from "../index/page-queue.ts";
+import type { ParkRecord } from "../index/parks.ts";
+import type { IndexStatusDocument } from "../index/status.ts";
+import { readIndexOverlay } from "./index-status.ts";
 
 export type SystemPhase = "empty" | "mid-fill" | "parked" | "stuck" | "live";
 export type QueueMotion = "stuck" | "filling" | "idle";
@@ -53,7 +54,7 @@ export function systemPhase(input: {
 }
 
 export async function handleStatusPage(env: WorkerEnv): Promise<Response> {
-	const document = env.INDEX ? await readStatus(env) : emptyStatus(true);
+	const document = await readIndexOverlay(env);
 	return new Response(renderStatusPage(document), {
 		status: 200,
 		headers: {

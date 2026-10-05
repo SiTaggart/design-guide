@@ -90,7 +90,7 @@ export function pickDiscoverSystem(input: {
 	return null;
 }
 
-function capCooling(id: SystemId, deferred: Readonly<Record<string, string>>, now: number | undefined): boolean {
+export function capCooling(id: SystemId, deferred: Readonly<Record<string, string>>, now: number | undefined): boolean {
 	const at = deferred[id];
 	if (!at) {
 		return false;

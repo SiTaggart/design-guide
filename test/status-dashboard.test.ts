@@ -24,9 +24,9 @@ function row(html: string, system: string): string {
 }
 
 describe("status token gate", () => {
-	it("returns 401 for /status and /v1/index-status without a token", async () => {
+	it("returns 401 for /status, /v1/index-status, and /v1/fill-health without a token", async () => {
 		const { env } = envWithIndex(fixtureChunks, true, { STATUS_TOKEN, INDEX: memoryKV() });
-		for (const path of ["/status", "/v1/index-status"]) {
+		for (const path of ["/status", "/v1/index-status", "/v1/fill-health"]) {
 			const response = await worker.fetch(new Request(`https://example.test${path}`), env);
 			expect(response.status).toBe(401);
 			expect(await response.json()).toEqual({ error: "unauthorized" });
@@ -220,7 +220,7 @@ describe("GET /status", () => {
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });
 		await writeStatus(env, { ...emptyStatus(false), state: "ok", trigger: "recrawl" });
 		const before = kv.store.get("status");
-		for (const path of ["/status", "/v1/index-status"]) {
+		for (const path of ["/status", "/v1/index-status", "/v1/fill-health"]) {
 			const response = await worker.fetch(
 				new Request(`https://example.test${path}`, {
 					method: "POST",
