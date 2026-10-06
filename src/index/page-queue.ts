@@ -3,6 +3,8 @@ import { SYSTEM_IDS, isSystemId, type SystemId } from "../config/types.ts";
 export const DRAIN_LIMIT = 100;
 export const MAX_ATTEMPTS = 5;
 export const FRESHNESS_MS = 30 * 24 * 60 * 60 * 1000;
+/** Same hour as discover cap defer. A real exhausted failure waits this long, then claim() tries it again. */
+export const EXHAUSTED_RETRY_MS = 60 * 60 * 1000;
 const STALE_CLAIM_MS = 15 * 60 * 1000;
 const CLAIM_EXPIRED = "claim expired";
 
@@ -291,11 +293,15 @@ export class D1PageQueue implements PageQueue {
 
 	async claim(limit: number, now: string): Promise<PageWorkItem[]> {
 		const staleBefore = new Date(Date.parse(now) - STALE_CLAIM_MS).toISOString();
+		const exhaustedBefore = new Date(Date.parse(now) - EXHAUSTED_RETRY_MS).toISOString();
 		// SIT-68: expiry is a lost lease, not a crawl failure. Return the row to
 		// pending on this tick — including rows already failed as "claim expired" —
 		// and rewind an exhausted attempt count so the lease cannot fill the dead
 		// fail pile. claimed_at stays, so this system still counts as served and
 		// the next batch can move on to a seed that has not had a turn.
+		// SIT-70: a real failure that has used its attempts stays failed until an
+		// hour after claimed_at, then takes the same rewind. A row with no claim
+		// time stays failed. claim-expired rows do not wait out that hour.
 		await run(
 			this.db,
 			`UPDATE page_work
@@ -303,10 +309,20 @@ export class D1PageQueue implements PageQueue {
 			     error = NULL,
 			     attempts = CASE WHEN attempts >= ? THEN ? ELSE attempts END
 			 WHERE (status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?)
-			    OR (status = 'failed' AND error = ?)`,
+			    OR (status = 'failed' AND error = ?)
+			    OR (
+			      status = 'failed'
+			      AND attempts >= ?
+			      AND claimed_at IS NOT NULL
+			      AND claimed_at < ?
+			      AND (error IS NULL OR error != ?)
+			    )`,
 			MAX_ATTEMPTS,
 			MAX_ATTEMPTS - 1,
 			staleBefore,
+			CLAIM_EXPIRED,
+			MAX_ATTEMPTS,
+			exhaustedBefore,
 			CLAIM_EXPIRED,
 		);
 		// One claimable page from each system before any system repeats. The

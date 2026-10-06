@@ -15,7 +15,7 @@ import * as itemsRest from "../src/index/items-rest.ts";
 import { drainTick, indexQueuedPage, pageItemKey } from "../src/index/drain.ts";
 import { fillTick, noteIndexedSeeds } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
-import { D1PageQueue, FRESHNESS_MS, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
+import { D1PageQueue, EXHAUSTED_RETRY_MS, FRESHNESS_MS, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
 import { readParks } from "../src/index/parks.ts";
 import { holdRetrieval, readRetrievalHold } from "../src/index/retrieval-hold.ts";
 import { seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
@@ -254,6 +254,49 @@ describe("claim expiry reclaim", () => {
 			.bind(url)
 			.first<{ status: string; attempts: number; error: string | null }>();
 		expect(row).toEqual({ status: "failed", attempts: MAX_ATTEMPTS, error: "gave up" });
+	});
+
+	it("leaves an exhausted real failure failed until the retry hour", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/cooling";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		const claimedAt = new Date(Date.parse(NOW) - EXHAUSTED_RETRY_MS + 1000).toISOString();
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET status = 'failed', attempts = ?, error = ?, claimed_at = ? WHERE url = ?")
+			.bind(MAX_ATTEMPTS, "markdown fetch failed 422", claimedAt, url)
+			.run();
+
+		expect(await pageQueue.claim(1, NOW)).toEqual([]);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, attempts, error FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; attempts: number; error: string | null }>();
+		expect(row).toEqual({
+			status: "failed",
+			attempts: MAX_ATTEMPTS,
+			error: "markdown fetch failed 422",
+		});
+	});
+
+	it("reclaims an exhausted real failure an hour after its claim", async () => {
+		const pageQueue = await queue();
+		const url = "https://primer.style/retry-later";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], NOW);
+		const claimedAt = new Date(Date.parse(NOW) - EXHAUSTED_RETRY_MS - 1000).toISOString();
+		await pageQueueDb(pageQueue)
+			.prepare("UPDATE page_work SET status = 'failed', attempts = ?, error = ?, claimed_at = ? WHERE url = ?")
+			.bind(MAX_ATTEMPTS, "markdown fetch failed 422", claimedAt, url)
+			.run();
+
+		const claimed = await pageQueue.claim(1, NOW);
+		expect(claimed.map((item) => item.url)).toEqual([url]);
+		expect(claimed[0]?.attempts).toBe(MAX_ATTEMPTS);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, attempts, error FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; attempts: number; error: string | null }>();
+		expect(row).toEqual({ status: "claimed", attempts: MAX_ATTEMPTS, error: null });
+		expect((await pageQueue.depths()).failed).toBe(0);
 	});
 
 	it("still retries a real failure that has attempts left", async () => {
