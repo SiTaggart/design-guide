@@ -193,8 +193,12 @@ function freezeEligible(seed: SeedView, now: number, schedule: FillSchedule): bo
 }
 
 function hardFail(document: IndexStatusDocument, seeds: readonly SeedView[]): boolean {
-	if (document.state === "fail" || document.runError) {
+	if (seeds.some((seed) => !seed.parked && seed.error !== undefined && seed.pending + seed.claimed === 0)) {
 		return true;
 	}
-	return seeds.some((seed) => !seed.parked && seed.error !== undefined && seed.pending + seed.claimed === 0);
+	// A finished fail sticks in KV after a transient blip. Keep paging only once the fleet is idle.
+	if (document.discover !== null || document.queue.pending + document.queue.claimed > 0) {
+		return false;
+	}
+	return document.state === "fail" || Boolean(document.runError);
 }
