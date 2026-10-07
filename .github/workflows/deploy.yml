@@ -1,0 +1,70 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["Checks"]
+    types:
+      - completed
+    branches:
+      - main
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version-file: package.json
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Apply D1 migrations
+        run: bunx wrangler d1 migrations apply PAGE_QUEUE --remote
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Deploy Worker
+        id: deploy
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/wrangler-deploy.log"
+          bunx wrangler deploy 2>&1 | tee "$log"
+          version_id="$(
+            sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' "$log" \
+              | grep -oE 'Current Version ID:[[:space:]]*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' \
+              | awk 'END { print $NF }' \
+              || true
+          )"
+          if [[ ! "${version_id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "No Worker version id found in wrangler deploy output." >&2
+            exit 1
+          fi
+          echo "version_id=${version_id}" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Write deployment summary
+        run: |
+          set -euo pipefail
+          version_id="${{ steps.deploy.outputs.version_id }}"
+          sha="${{ github.event.workflow_run.head_sha }}"
+          if [[ ! "${version_id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "No Worker version id found." >&2
+            exit 1
+          fi
+          {
+            echo "### Deployed design-guide"
+            echo ""
+            echo "- Worker version id: \`${version_id}\`"
+            echo "- Git SHA: \`${sha}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
