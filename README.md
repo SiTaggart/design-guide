@@ -248,7 +248,7 @@ bunx wrangler deploy
 
 ## Deploy
 
-A merge to `main` deploys the production Worker `design-guide` only after the `Checks` workflow succeeds for that exact commit (`push` on `main`). The deploy job applies D1 migrations to `PAGE_QUEUE`, then runs `bunx wrangler deploy`. One deploy runs at a time. Better Stack already watches `/v1/fill-health`, so this workflow has no health probe.
+A merge to `main` deploys the production Worker `design-guide` only after the `Checks` workflow succeeds for that exact commit (`push` whose head branch is `main`). The deploy job applies D1 migrations to `PAGE_QUEUE`, then runs `bunx wrangler deploy`. One deploy runs at a time. Better Stack already watches `/v1/fill-health`, so this workflow has no health probe. If that commit is no longer `main` HEAD when the job starts, the job skips migrations and deploy and finishes green; the newer run deploys. Because only `main` HEAD deploys, if the newest `main` commit fails Checks, earlier green commits are skipped too and nothing deploys until a fix lands on `main`. This is intentional: a red tip never deploys.
 
 Create a custom API token scoped to this one account, with only these account permissions:
 
