@@ -193,8 +193,32 @@ function freezeEligible(seed: SeedView, now: number, schedule: FillSchedule): bo
 }
 
 function hardFail(document: IndexStatusDocument, seeds: readonly SeedView[]): boolean {
-	if (document.state === "fail" || document.runError) {
+	if (seeds.some((seed) => !seed.parked && seed.error !== undefined && seed.pending + seed.claimed === 0)) {
 		return true;
 	}
-	return seeds.some((seed) => !seed.parked && seed.error !== undefined && seed.pending + seed.claimed === 0);
+	if (document.state !== "fail" && !document.runError) {
+		return false;
+	}
+	// A leftover fail stays quiet only when crawl, index, or discover moved after finishedAt.
+	// A stalled tick rewrites finishedAt, so claimed pages alone no longer hide it.
+	const filling = document.discover !== null || document.queue.pending + document.queue.claimed > 0;
+	if (filling && progressedSince(document)) {
+		return false;
+	}
+	return true;
+}
+
+function progressedSince(document: IndexStatusDocument): boolean {
+	const finishedAt = document.finishedAt;
+	if (!finishedAt) {
+		return false;
+	}
+	const marks: Array<string | null> = [];
+	for (const row of document.freshness) {
+		marks.push(row.lastCrawled, row.lastIndexed, row.lastDiscovered);
+	}
+	if (document.discover) {
+		marks.push(document.discover.startedAt);
+	}
+	return marks.some((mark) => mark !== null && mark > finishedAt);
 }

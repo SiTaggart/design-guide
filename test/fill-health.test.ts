@@ -36,6 +36,15 @@ function liveRows(overrides: Partial<Record<SystemId, Partial<SystemFreshness>>>
 	}));
 }
 
+function staleRows(overrides: Partial<Record<SystemId, Partial<SystemFreshness>>> = {}): SystemFreshness[] {
+	return liveRows(overrides).map((row) => ({
+		...row,
+		lastCrawled: STALE,
+		lastIndexed: STALE,
+		lastDiscovered: STALE,
+	}));
+}
+
 function overlay(partial: Partial<IndexStatusDocument> = {}): IndexStatusDocument {
 	const freshness = partial.freshness ?? liveRows();
 	const queue = partial.queue ?? {
@@ -278,6 +287,96 @@ describe("fillHealthFrom", () => {
 		);
 	});
 
+	it("does not hard_fail a sticky fail or runError while discover or the queue is still filling", () => {
+		const sticky = {
+			state: "fail" as const,
+			runError: "D1_ERROR: Network connection lost.",
+			finishedAt: STALE,
+			systems: [systemError("paste", "crawl hit the 500 page limit")],
+		};
+		const discovering = fillHealthFrom(
+			overlay({
+				...sticky,
+				systems: [],
+				freshness: staleRows(),
+				discover: {
+					systemId: "nhs",
+					jobId: "job-nhs",
+					kind: "seed",
+					trigger: "deploy-drift",
+					startedAt: CHECKED,
+				},
+			}),
+			CHECKED,
+		);
+		expect(discovering).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
+
+		const draining = fillHealthFrom(
+			overlay({
+				...sticky,
+				freshness: liveRows({ paste: { pending: 72, claimed: 60 } }),
+			}),
+			CHECKED,
+		);
+		expect(draining).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
+
+		const runErrorOnly = fillHealthFrom(
+			overlay({
+				state: "ok",
+				runError: "D1_ERROR: Network connection lost.",
+				finishedAt: STALE,
+				freshness: liveRows({ cloudscape: { pending: 1, claimed: 1 } }),
+			}),
+			CHECKED,
+		);
+		expect(runErrorOnly).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
+
+		const idleSeed = fillHealthFrom(
+			overlay({
+				...sticky,
+				systems: [
+					systemError("paste", "crawl hit the 500 page limit"),
+					systemError("primer", "crawl ended failed"),
+				],
+				freshness: liveRows({ paste: { pending: 72, claimed: 60 } }),
+			}),
+			CHECKED,
+		);
+		expectAlarm(idleSeed, ["hard_fail"]);
+	});
+
+	it("alarms hard_fail when claimed work has not moved since the run error", () => {
+		const stalled = staleRows({ paste: { pending: 72, claimed: 60 } });
+		const claimed = fillHealthFrom(
+			overlay({
+				state: "fail",
+				runError: "D1_ERROR: Network connection lost.",
+				finishedAt: CHECKED,
+				freshness: stalled,
+			}),
+			CHECKED,
+		);
+		expectAlarm(claimed, ["hard_fail"]);
+
+		const discovering = fillHealthFrom(
+			overlay({
+				state: "fail",
+				runError: "ensureInstance failed",
+				finishedAt: CHECKED,
+				freshness: stalled,
+				discover: {
+					systemId: "nhs",
+					jobId: "job-nhs",
+					kind: "seed",
+					trigger: "deploy-drift",
+					startedAt: STALE,
+				},
+			}),
+			CHECKED,
+		);
+		expectAlarm(discovering, ["hard_fail"]);
+	});
+
 	it("does not hard_fail a Parked stub or an error that is still mid-fill", () => {
 		const parked = fillHealthFrom(
 			overlay({
@@ -506,6 +605,67 @@ describe("GET /v1/fill-health", () => {
 		const expired = await probe(fleet);
 		expect(expired.body.alarms).toEqual(["fleet_freeze"]);
 		expect(expired.text).not.toContain('"fill":"ok"');
+	});
+
+	it("does not hard_fail a sticky run error while discover or the queue is still filling", async () => {
+		const now = new Date().toISOString();
+		const draining = await fleetEnv(now);
+		await draining.queue.enqueueUpsert(
+			[{ systemId: "paste", url: "https://example.test/paste-pending", kind: "reindex" }],
+			now,
+		);
+		await writeStatus(draining.env, {
+			...emptyStatus(false),
+			state: "fail",
+			runError: "D1_ERROR: Network connection lost.",
+			finishedAt: new Date(Date.parse(now) - 60_000).toISOString(),
+			systems: [systemError("paste", "crawl hit the 500 page limit")],
+		});
+		const drainingProbe = await probe(draining);
+		expect(drainingProbe.body).toMatchObject({ fill: "ok", alarms: [] });
+		expect(drainingProbe.text).toContain('"fill":"ok"');
+		expect(drainingProbe.text).not.toContain("hard_fail");
+
+		const discovering = await fleetEnv(now);
+		await discovering.queue.insertRun({
+			systemId: "nhs",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-nhs",
+			startUrl: "https://example.test/nhs",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: now,
+			now,
+		});
+		await writeStatus(discovering.env, {
+			...emptyStatus(false),
+			state: "fail",
+			runError: "D1_ERROR: Network connection lost.",
+			finishedAt: new Date(Date.parse(now) - 60_000).toISOString(),
+		});
+		const discoveringProbe = await probe(discovering);
+		expect(discoveringProbe.body).toMatchObject({ fill: "ok", alarms: [] });
+		expect(discoveringProbe.text).toContain('"fill":"ok"');
+
+		const stalled = await fleetEnv(now);
+		await stalled.queue.enqueueUpsert(
+			[{ systemId: "paste", url: "https://example.test/paste-stuck", kind: "reindex" }],
+			now,
+		);
+		await stalled.db
+			.prepare("UPDATE page_work SET status = 'claimed', claimed_at = ? WHERE system_id = ? AND url = ?")
+			.bind(now, "paste", "https://example.test/paste-stuck")
+			.run();
+		await writeStatus(stalled.env, {
+			...emptyStatus(false),
+			state: "fail",
+			runError: "ensureInstance failed",
+			finishedAt: new Date(Date.parse(now) + 60_000).toISOString(),
+		});
+		const stalledProbe = await probe(stalled);
+		expect(stalledProbe.body.alarms).toEqual(["hard_fail"]);
+		expect(stalledProbe.text).not.toContain('"fill":"ok"');
 	});
 
 	it("stays ok for mid-fill, a Parked stub, and Live idle", async () => {
