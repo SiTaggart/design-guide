@@ -1,5 +1,6 @@
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
+import { isCrawlCapError } from "./crawl-cap.ts";
 import {
 	D1PageQueue,
 	emptyDepths,
@@ -7,9 +8,9 @@ import {
 	type QueueDepths,
 	type SystemFreshness,
 } from "./page-queue.ts";
-import { SEED_HASH } from "./seed-hash.ts";
 import { readParks, type Parks } from "./parks.ts";
 import type { SystemReindexResult } from "./reindex.ts";
+import { SEED_HASH } from "./seed-hash.ts";
 
 export const STATUS_KEY = "status";
 export const LAST_INDEXED_HASH_KEY = "lastIndexedHash";
@@ -100,7 +101,7 @@ export function classifyMessage(error: string): IndexErrorChannel {
 }
 
 export function classifyError(result: SystemReindexResult): IndexErrorChannel | null {
-	if (result.parked || !result.error) {
+	if (result.parked || !result.error || isCrawlCapError(result.error)) {
 		return null;
 	}
 	return classifyMessage(result.error);
