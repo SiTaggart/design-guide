@@ -239,6 +239,7 @@ describe("swapFromOutcome", () => {
 		expect(failed).toMatchObject({ indexed: 0, keptPrevious: true, error: "crawl ended failed" });
 		expect(failed.parked).toBeUndefined();
 		expect(limited).toMatchObject({ indexed: 0, keptPrevious: true, hitLimit: true });
+		expect(limited.error).toBeUndefined();
 		expect(stub).toMatchObject({ indexed: 0, keptPrevious: true, parked: true, usable: 1 });
 		expect(items).toEqual([prior]);
 		expect(uploadItem).not.toHaveBeenCalled();
@@ -753,6 +754,7 @@ describe("streamSwap", () => {
 		});
 		expect(failed).toMatchObject({ indexed: 0, keptPrevious: true, error: "crawl ended failed" });
 		expect(limited).toMatchObject({ indexed: 0, keptPrevious: true, hitLimit: true });
+		expect(limited.error).toBeUndefined();
 		expect(items).toEqual([{ id: "old-1", key: "primer/oldgen/aaaa.md" }]);
 		expect(uploadItem).not.toHaveBeenCalled();
 	});

@@ -1,6 +1,7 @@
 import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
+import { capHitNote, capHitPageCount, isCrawlCapError, seedFailure } from "../index/crawl-cap.ts";
 import type { QueueDepths } from "../index/page-queue.ts";
 import type { ParkRecord } from "../index/parks.ts";
 import type { IndexStatusDocument } from "../index/status.ts";
@@ -218,13 +219,14 @@ type Row = {
 
 function systemRows(document: IndexStatusDocument): Row[] {
 	const freshness = new Map(document.freshness.map((row) => [row.system, row]));
-	const errors = new Map(
-		document.systems.filter((entry) => entry.error).map((entry) => [entry.system, entry.error ?? ""]),
-	);
+	const results = new Map(document.systems.map((entry) => [entry.system, entry]));
 	return SYSTEM_IDS.map((system) => {
 		const row = freshness.get(system);
 		const park = document.parks[system];
-		const error = errors.get(system);
+		const result = results.get(system);
+		const rawError = result?.error;
+		const error = seedFailure(rawError);
+		const capped = result?.hitLimit === true || isCrawlCapError(rawError);
 		const pending = Number(row?.pending ?? 0);
 		const claimed = Number(row?.claimed ?? 0);
 		const failed = Number(row?.failed ?? 0);
@@ -253,15 +255,32 @@ function systemRows(document: IndexStatusDocument): Row[] {
 			lastCrawled,
 			lastIndexed,
 			lastDiscovered,
-			notes: notes(park, error),
+			notes: notes(
+				park,
+				error,
+				capped
+					? capHitNote(
+							capHitPageCount({
+								pending,
+								claimed,
+								failed,
+								done,
+								crawlFinished: result?.crawl.finished,
+							}),
+						)
+					: undefined,
+			),
 		};
 	});
 }
 
-function notes(park: ParkRecord | undefined, error: string | undefined): string {
+function notes(park: ParkRecord | undefined, error: string | undefined, capNote?: string): string {
 	const parts: string[] = [];
 	if (park) {
 		parts.push(`park ${park.reason} usable ${park.usable} at ${park.at}`);
+	}
+	if (capNote) {
+		parts.push(capNote);
 	}
 	if (error) {
 		parts.push(error);

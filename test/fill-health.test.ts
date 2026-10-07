@@ -287,6 +287,45 @@ describe("fillHealthFrom", () => {
 		);
 	});
 
+	it("does not hard_fail a drained seed that hit the crawl page cap", () => {
+		const freshness = liveRows({ paste: { pending: 0, claimed: 0, failed: 0, done: 513 } });
+		const capped = {
+			system: "paste" as const,
+			startUrl: "https://paste-dsys.com/",
+			crawl: { total: 533, finished: 533, skipped: 0, disallowed: 0, errored: 0 },
+			indexed: 0,
+			hitLimit: true,
+			keptPrevious: true,
+			usable: 513,
+			error: "crawl hit the 500 page limit",
+		};
+		expect(fillHealthFrom(overlay({ state: "running", systems: [capped], freshness }), CHECKED)).toEqual({
+			fill: "ok",
+			alarms: [],
+			checkedAt: CHECKED,
+		});
+		const { error: _capNote, ...cleared } = capped;
+		expect(fillHealthFrom(overlay({ state: "running", systems: [cleared], freshness }), CHECKED)).toEqual({
+			fill: "ok",
+			alarms: [],
+			checkedAt: CHECKED,
+		});
+	});
+
+	it("still hard_fails a drained seed with a real crawl error", () => {
+		expectAlarm(
+			fillHealthFrom(
+				overlay({
+					state: "running",
+					systems: [systemError("paste", "crawl ended failed")],
+					freshness: liveRows({ paste: { pending: 0, claimed: 0, failed: 0, done: 513 } }),
+				}),
+				CHECKED,
+			),
+			["hard_fail"],
+		);
+	});
+
 	it("does not hard_fail a sticky fail or runError while discover or the queue is still filling", () => {
 		const sticky = {
 			state: "fail" as const,

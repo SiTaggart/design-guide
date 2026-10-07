@@ -344,6 +344,46 @@ describe("stuck versus mid-fill", () => {
 		expect(primer).toContain("crawl ended failed");
 	});
 
+	it("shows a drained crawl cap as Live with the page count and limit", () => {
+		const freshness = [
+			{
+				system: "paste" as const,
+				lastCrawled: "2026-10-07T19:55:09.039Z",
+				lastIndexed: "2026-10-07T19:55:09.039Z",
+				lastDiscovered: null,
+				pending: 0,
+				claimed: 0,
+				failed: 0,
+				done: 513,
+			},
+		];
+		const queue = { pending: 0, claimed: 0, failed: 0, done: 513 };
+		const base = {
+			system: "paste" as const,
+			startUrl: "https://paste-dsys.com/",
+			crawl: { total: 533, finished: 533, skipped: 0, disallowed: 0, errored: 0 },
+			indexed: 0,
+			hitLimit: true,
+			keptPrevious: true,
+			usable: 513,
+		};
+		for (const system of [base, { ...base, error: "crawl hit the 500 page limit" }]) {
+			const html = renderStatusPage({
+				...emptyStatus(false),
+				state: "running",
+				trigger: "deploy-drift",
+				queue,
+				systems: [system],
+				freshness,
+			});
+			const paste = row(html, "paste");
+			expect(paste).toContain('data-phase="live"');
+			expect(paste).not.toContain(">Stuck<");
+			expect(paste).toContain("cap hit: 513 pages, limit 500");
+			expect(paste).not.toContain("crawl hit the 500 page limit");
+		}
+	});
+
 	it("paints Live after recovery once the current error is gone", () => {
 		expect(
 			systemPhase({

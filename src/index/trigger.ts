@@ -1,6 +1,7 @@
 import { SEEDS } from "../config/seed.ts";
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "./ai-search.ts";
+import { seedFailure } from "./crawl-cap.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
 import { clearPark, liveSystemIds, parkedSystemIds, readParks, writePark, type Parks, type ParksRead } from "./parks.ts";
 import { clearRetrievalHold, holdRetrieval } from "./retrieval-hold.ts";
@@ -182,7 +183,7 @@ export async function persistSystemOutcome(
 	const document = await recordSystemResult(env, result, unparked);
 	if (result.parked) {
 		await notifyFailOrPark(env, document, "park");
-	} else if (result.error) {
+	} else if (seedFailure(result.error)) {
 		await notifyFailOrPark(env, document, "fail");
 	}
 }

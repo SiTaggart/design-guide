@@ -149,7 +149,7 @@ function itemsAuthFrom(auth: ReindexAuth): ItemsAuth {
 }
 
 type SwapDecision =
-	| { action: "keep"; hitLimit: boolean; parked: boolean; error: string }
+	| { action: "keep"; hitLimit: boolean; parked: boolean; error?: string }
 	| { action: "commit" };
 
 function swapDecision(input: {
@@ -166,7 +166,6 @@ function swapDecision(input: {
 			action: "keep",
 			hitLimit: true,
 			parked: false,
-			error: `crawl hit the ${CRAWL_LIMIT} page limit`,
 		};
 	}
 	if (input.status !== "completed") {
@@ -206,7 +205,7 @@ function keepResult(
 		keptPrevious,
 		usable,
 		...(decision.parked ? { parked: true } : {}),
-		error: decision.error,
+		...(decision.error ? { error: decision.error } : {}),
 	};
 }
 
