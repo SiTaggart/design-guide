@@ -245,3 +245,23 @@ The CLI exits 1 when any system has `hitLimit`, or when the run has results and 
 bun run test
 bunx wrangler deploy
 ```
+
+## Deploy
+
+A merge to `main` deploys the production Worker `design-guide` only after the `Checks` workflow succeeds for that exact commit (`push` whose head branch is `main`). The deploy job applies D1 migrations to `PAGE_QUEUE`, then runs `bunx wrangler deploy`. One deploy runs at a time. Better Stack already watches `/v1/fill-health`, so this workflow has no health probe. If that commit is no longer `main` HEAD when the job starts, the job skips migrations and deploy and finishes green; the newer run deploys. Because only `main` HEAD deploys, if the newest `main` commit fails Checks, earlier green commits are skipped too and nothing deploys until a fix lands on `main`. This is intentional: a red tip never deploys.
+
+Create a custom API token scoped to this one account, with only these account permissions:
+
+- **Workers Scripts Edit.** This is the permission `wrangler deploy` uses for the existing Worker. It covers cron triggers (`PUT /accounts/{account_id}/workers/scripts/{script}/schedules`; Workers Scripts write includes triggers), the `design-guide-reindex` Workflow (`PUT /accounts/{account_id}/workflows/{name}` accepts Workers Scripts Write), the `send_email` binding, and attaching the existing KV, D1, and AI Search bindings. This repo's Wrangler (`4.129.1`) treats a KV namespace with an `id` and a D1 database with a `database_id` as fully specified, so deploy does not call the KV or D1 APIs to bind them. [Workers authorization](https://developers.cloudflare.com/workers/authorization/) says deploying a binding does not need a separate permission on the bound resource.
+- **D1 Edit.** `wrangler d1 migrations apply PAGE_QUEUE --remote` reads and writes the database directly. That is the only direct resource call in this job.
+
+`wrangler.jsonc` has no `account_id`. Set the repository variable `CLOUDFLARE_ACCOUNT_ID` and the repository secret `CLOUDFLARE_API_TOKEN`. With the account id set, Wrangler does not list accounts, so the token does not need Account Settings Read or Memberships Read. The Edit Cloudflare Workers template includes permissions this job does not use.
+
+Migrations run before the new Worker is deployed, so the previous Worker keeps serving while each migration runs. Migrations must be additive only: new tables and nullable columns. Drops and renames ship as a separate follow-up once nothing reads the old shape.
+
+Manual `wrangler deploy` remains a fallback. Apply migrations first:
+
+```bash
+bunx wrangler d1 migrations apply PAGE_QUEUE --remote
+bunx wrangler deploy
+```
