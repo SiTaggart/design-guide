@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../src/config/types.ts";
 import type { WorkerEnv } from "../src/index/ai-search.ts";
@@ -7,7 +7,9 @@ import { readIndexedHashes, writeIndexedHash } from "../src/index/indexed-hashes
 import { D1PageQueue, type SystemFreshness } from "../src/index/page-queue.ts";
 import { writePark } from "../src/index/parks.ts";
 import { driftedSystems, seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
-import { emptyStatus, readStatus, writeStatus, type IndexStatusDocument } from "../src/index/status.ts";
+import { streamSwap, swapFromOutcome } from "../src/index/reindex.ts";
+import { emptyStatus, readStatus, runStateFrom, writeStatus, type IndexStatusDocument } from "../src/index/status.ts";
+import { persistSystemOutcome } from "../src/index/trigger.ts";
 import { fillHealthFrom, type FillHealthBody } from "../src/serve/fill-health.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
@@ -310,6 +312,70 @@ describe("fillHealthFrom", () => {
 			alarms: [],
 			checkedAt: CHECKED,
 		});
+	});
+
+	it("failed at cap keeps error + hard_fail", async () => {
+		const seed = seedById("paste");
+		const counts = { total: 533, finished: 533, skipped: 0, disallowed: 0, errored: 1 };
+		const auth = { accountId: "acct", apiToken: "token" };
+		const outcome = {
+			startUrl: seed.startUrl,
+			status: "failed",
+			counts,
+			records: [],
+		};
+		const fromSwap = await swapFromOutcome(auth, seed, outcome);
+		const fromStream = await streamSwap(auth, seed, {
+			startUrl: seed.startUrl,
+			snapshot: { status: "failed", total: 533, finished: 533, errored: 1 },
+			generation: "gen-failed-cap",
+			fetchPage: async () => {
+				throw new Error("failed crawl must not page");
+			},
+			countStatuses: async () => counts,
+		});
+		for (const result of [fromSwap, fromStream]) {
+			expect(result).toMatchObject({
+				indexed: 0,
+				keptPrevious: true,
+				hitLimit: false,
+				error: "crawl ended failed",
+			});
+		}
+		expect(runStateFrom([fromSwap])).toBe("fail");
+		expectAlarm(
+			fillHealthFrom(
+				overlay({
+					state: "running",
+					systems: [fromSwap],
+					freshness: liveRows({ paste: { pending: 0, claimed: 0, failed: 0, done: 513 } }),
+				}),
+				CHECKED,
+			),
+			["hard_fail"],
+		);
+		expectAlarm(
+			fillHealthFrom(
+				overlay({
+					state: "running",
+					systems: [{ ...fromSwap, hitLimit: true }],
+					freshness: liveRows({ paste: { pending: 0, claimed: 0, failed: 0, done: 513 } }),
+				}),
+				CHECKED,
+			),
+			["hard_fail"],
+		);
+		const logged: string[] = [];
+		const spy = vi.spyOn(console, "log").mockImplementation((line?: unknown) => {
+			logged.push(String(line));
+		});
+		try {
+			const { env } = envWithIndex(fixtureChunks, true, { INDEX: memoryKV() });
+			await persistSystemOutcome(env, fromSwap);
+		} finally {
+			spy.mockRestore();
+		}
+		expect(logged.some((line) => line.includes('"event":"index_fail"'))).toBe(true);
 	});
 
 	it("still hard_fails a drained seed with a real crawl error", () => {
