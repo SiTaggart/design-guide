@@ -12,7 +12,7 @@ import {
 	pickDiscoverSystem,
 } from "../src/index/discover.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
-import { drainTick, indexQueuedPage, pageItemKey } from "../src/index/drain.ts";
+import { drainTick, indexQueuedPage, pageItemKey, uploadQueuedPage } from "../src/index/drain.ts";
 import { fillTick, noteIndexedSeeds } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import { D1PageQueue, EXHAUSTED_RETRY_MS, FRESHNESS_MS, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
@@ -814,6 +814,30 @@ describe("held index clock", () => {
 			[{ url, itemKey: "paste/page/previous-run.md" }],
 		);
 		expect(items).toEqual([]);
+	});
+
+	it("uses the run time for the item key when a claim time is missing", async () => {
+		const url = "https://paste-dsys.com/components/button";
+		const held = "2026-01-02T00:00:00.000Z";
+		vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({ id: "fresh", key: "paste/page/fresh.md" });
+		const key = await uploadQueuedPage(
+			{ accountId: "acct", apiToken: "token", instanceId: "design-guide" },
+			seedById("paste"),
+			{
+				systemId: "paste",
+				url,
+				kind: "reindex",
+				enqueuedAt: NOW,
+				attempts: 1,
+				status: "claimed",
+				itemKey: null,
+			},
+			"# new button",
+			{ lastCrawled: NOW, lastIndexed: held },
+			NOW,
+		);
+		expect(key).toBe(pageItemKey("paste", url, 1, NOW));
+		expect(key).not.toBe(pageItemKey("paste", url, 1, held));
 	});
 });
 

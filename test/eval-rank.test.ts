@@ -171,6 +171,114 @@ describe("held-out common-word paraphrases", () => {
 		).toBe("primer");
 	});
 
+	it("names a system when punctuation sits around the name", () => {
+		const other = paraphrase({
+			url: "https://www.patternfly.org/components/button",
+			score: 0.99,
+			system: "patternfly",
+			source: "PatternFly",
+		});
+		const paste = paraphrase({
+			url: "https://paste-dsys.com/components/button",
+			score: 0.7,
+			system: "paste",
+			source: "Paste",
+		});
+		const govuk = paraphrase({
+			url: "https://design-system.service.gov.uk/components/button",
+			score: 0.7,
+			system: "govuk",
+			source: "GOV.UK Design System",
+		});
+		for (const query of [
+			"button guidance from Paste.",
+			"button guidance from Paste!",
+			"button guidance from Paste?",
+			"button guidance from (Paste)",
+			"button guidance from Paste,",
+			'button guidance from "Paste"',
+			"error summary from GOV.UK.",
+		]) {
+			const named = query.includes("GOV.UK") ? govuk : paste;
+			expect(rankCitations([other, named], query)[0]?.system, query).toBe(named.system);
+		}
+	});
+
+	it("keeps a distinctive name beside a determiner and still drops an ordinary use", () => {
+		const other = paraphrase({
+			url: "https://www.patternfly.org/components/table",
+			score: 0.99,
+			system: "patternfly",
+			source: "PatternFly",
+		});
+		expect(
+			rankCitations(
+				[
+					other,
+					paraphrase({
+						url: "https://cloudscape.design/components/table/",
+						score: 0.7,
+						system: "cloudscape",
+						source: "Cloudscape",
+					}),
+				],
+				"the Cloudscape table guidance",
+			)[0]?.system,
+		).toBe("cloudscape");
+		expect(
+			rankCitations(
+				[
+					other,
+					paraphrase({
+						url: "https://primer.style/product/components/button",
+						score: 0.7,
+						system: "primer",
+						source: "Primer",
+					}),
+				],
+				"a Primer button",
+			)[0]?.system,
+		).toBe("primer");
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://paste-dsys.com/components/input",
+						score: 0.7,
+						system: "paste",
+						source: "Paste",
+					}),
+					paraphrase({
+						url: "https://primer.style/product/components/text-input",
+						score: 0.85,
+						system: "primer",
+						source: "Primer",
+					}),
+				],
+				"Paste the text into an input",
+			)[0]?.system,
+		).toBe("primer");
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://primer.style/product/ui-patterns/forms",
+						score: 0.7,
+						system: "primer",
+						source: "Primer",
+					}),
+					paraphrase({
+						url: "https://cloudscape.design/patterns/general/errors/validation/",
+						score: 0.85,
+						system: "cloudscape",
+						source: "Cloudscape",
+					}),
+				],
+				"a primer on form validation",
+			)[0]?.system,
+		).toBe("cloudscape");
+	});
+
 	it("does not name a system from a determiner phrase", () => {
 		const primer = paraphrase({
 			url: "https://primer.style/product/components/text-input",
