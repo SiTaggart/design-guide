@@ -667,6 +667,69 @@ describe("drain wipe bar", () => {
 	});
 });
 
+describe("held index clock", () => {
+	it("writes the stored index time to AI Search and reads the cap defer once for the system", async () => {
+		const raw = memoryD1();
+		let selects = 0;
+		const prepare = raw.prepare.bind(raw);
+		const db = {
+			prepare(sql: string) {
+				if (sql.includes("FROM cap_defer") && sql.includes("SELECT")) {
+					selects += 1;
+				}
+				return prepare(sql);
+			},
+			exec: raw.exec.bind(raw),
+			batch: raw.batch.bind(raw),
+		} as D1Database;
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const old = "2026-01-02T00:00:00.000Z";
+		const urls = [
+			"https://paste-dsys.com/components/button",
+			"https://paste-dsys.com/components/alert",
+			"https://paste-dsys.com/components/input",
+		];
+		await pageQueue.enqueueUpsert(
+			urls.map((url) => ({ systemId: "paste" as const, url, kind: "seed" as const })),
+			old,
+		);
+		for (const url of urls) {
+			await pageQueue.complete(
+				{ systemId: "paste", url },
+				{ lastCrawled: old, lastIndexed: old },
+				"paste/page/old.md",
+			);
+		}
+		await pageQueue.enqueueUpsert(
+			urls.map((url) => ({ systemId: "paste" as const, url, kind: "reindex" as const })),
+			NOW,
+		);
+		await pageQueue.noteCapDefer("paste", old);
+		selects = 0;
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		const written: string[] = [];
+		const counts = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => "# guidance",
+			indexPage: async (_auth, _seed, _item, _markdown, timestamps) => {
+				written.push(timestamps.lastIndexed);
+				return "paste/page/new.md";
+			},
+		});
+		expect(counts.indexed).toBe(3);
+		expect(written).toEqual([old, old, old]);
+		const rows = await db
+			.prepare("SELECT last_indexed FROM page_work WHERE system_id = ?")
+			.bind("paste")
+			.all<{ last_indexed: string }>();
+		expect(rows.results.every((row) => row.last_indexed === old)).toBe(true);
+		expect(selects).toBe(1);
+	});
+});
+
 describe("continuous fill", () => {
 	it("prefers a drifted live system over a parked seed and a due recheck", () => {
 		expect(
