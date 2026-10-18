@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SearchCall, WorkerEnv } from "../src/index/ai-search.ts";
 import { SYSTEM_IDS, type SearchChunk } from "../src/config/types.ts";
 import worker from "../src/worker.ts";
-import { fixtureChunks, withRerank } from "./fixtures/chunks.ts";
+import { fixtureChunks, withVectorScore } from "./fixtures/chunks.ts";
 
 const GOLDEN_QUERY = "accessible combobox or listbox keyboard and focus guidance";
 
@@ -248,7 +248,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 
 	it("drops a 0.59 hit from the tool text and keeps a 0.6 hit", async () => {
 		const extra: SearchChunk[] = [
-			withRerank(
+			withVectorScore(
 				{
 					text: "just below",
 					score: 1,
@@ -262,7 +262,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 				},
 				0.59,
 			),
-			withRerank(
+			withVectorScore(
 				{
 					text: "boundary keep",
 					score: 1,

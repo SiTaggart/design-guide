@@ -134,7 +134,7 @@ The tool text is the same citation JSON as `POST /v1/search`:
 }
 ```
 
-Each hit has `passage`, `source`, `url`, `system`, and `score`. `score` is the AI Search reranker score. It is a ranking signal only. The calling agent decides relevance. Hits with that score below 0.6 are dropped. If no matches remain after the filter, the tool returns `{ "results": [] }`. The MCP schema requires `query`. HTTP search returns `400` `{ "error": "query_required" }` when `query` is missing.
+Each hit has `passage`, `source`, `url`, `system`, and `score`. `score` is the AI Search vector similarity score. The calling agent decides relevance. Hits with that score below 0.6 are dropped. If no matches remain after the filter, the tool returns `{ "results": [] }`. The MCP schema requires `query`. HTTP search returns `400` `{ "error": "query_required" }` when `query` is missing.
 
 If the MCP client cannot call the tool, use HTTP:
 
@@ -164,7 +164,7 @@ curl -sS -X POST "$BASE_URL/v1/search" \
 curl -sS "$BASE_URL/v1/search?query=accessible+combobox+or+listbox+keyboard+and+focus+guidance&k=8"
 ```
 
-A missing query returns `400` with `{ "error": "query_required" }`. No matches after the score filter returns `{ "results": [] }`. Each result is `{ passage, source, url, system, score }`. `passage` is the AI Search chunk text. `url` is the https `source_url` stored on the item. `score` is the AI Search reranker score (`@cf/baai/bge-reranker-base`). Hits below 0.6 are dropped. Results are best first, one per normalized URL, at most 50.
+A missing query returns `400` with `{ "error": "query_required" }`. No matches after the score filter returns `{ "results": [] }`. Each result is `{ passage, source, url, system, score }`. `passage` is the AI Search chunk text. `url` is the https `source_url` stored on the item. `score` is the AI Search vector similarity score (`scoring_details.vector_score`). Hits below 0.6 are dropped. `llms.txt` index files are dropped. Results are highest similarity first, one chunk per page, at most 50.
 
 `GET /health` returns `200` when at least one completed item exists. Otherwise it returns `503`.
 

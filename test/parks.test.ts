@@ -141,7 +141,7 @@ describe("park state", () => {
 		const gardenChunk = {
 			text: "Garden combobox keeps keyboard focus in the input while the listbox is open.",
 			score: 0.84,
-			scoring_details: { reranking_score: 0.84 },
+			scoring_details: { vector_score: 0.84 },
 			item: {
 				key: "garden/gen/dddd.md",
 				metadata: {

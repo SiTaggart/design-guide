@@ -20,12 +20,6 @@ export type SystemId = (typeof SYSTEM_IDS)[number];
 export type Seed = {
 	id: SystemId;
 	source: string;
-	/** Extra names. A one-word name matches only with this casing. A phrase matches in any case. */
-	aliases?: readonly string[];
-	/** The one-word source matches only with its written capitalization. */
-	matchCase?: boolean;
-	/** The short name is also an ordinary English word. It counts as the system only as a proper name, or alongside a design word. */
-	commonWord?: boolean;
 	startUrl: string;
 	fallbackStartUrl?: string;
 	includePatterns?: string[];
@@ -67,7 +61,6 @@ export type SearchChunk = {
 	score?: unknown;
 	scoring_details?: {
 		vector_score?: unknown;
-		reranking_score?: unknown;
 	};
 	item?: {
 		key?: string;

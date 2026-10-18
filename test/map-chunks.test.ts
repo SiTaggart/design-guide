@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { keepScoredChunks, mapChunks } from "../src/serve/map-chunks.ts";
-import { fixtureChunks, invalidChunks, withRerank } from "./fixtures/chunks.ts";
+import { mapChunks } from "../src/serve/map-chunks.ts";
+import { fixtureChunks, invalidChunks, withVectorScore } from "./fixtures/chunks.ts";
 
 const fixtureCitations = [
 	{
@@ -30,7 +30,7 @@ const fixtureCitations = [
 ];
 
 describe("mapChunks", () => {
-	it("copies passage text, https metadata, and the reranker score", () => {
+	it("copies passage text, https metadata, and the vector similarity score", () => {
 		expect(mapChunks(fixtureChunks)).toEqual(fixtureCitations);
 	});
 
@@ -47,7 +47,7 @@ describe("mapChunks", () => {
 			{
 				text: "keyboard focus remains on the combobox input",
 				score: 1,
-				scoring_details: { reranking_score: 0.7 },
+				scoring_details: { vector_score: 0.7 },
 				item: {
 					key: "govuk/gen/dddd.md",
 					metadata: {
@@ -67,9 +67,9 @@ describe("mapChunks", () => {
 		]);
 	});
 
-	it("publishes the reranker score and ignores a fused chunk score of 1", () => {
+	it("publishes the vector similarity score and ignores a fused chunk score of 1", () => {
 		const mapped = mapChunks([
-			withRerank(
+			withVectorScore(
 				{
 					text: "boundary keep",
 					score: 1,
@@ -83,7 +83,7 @@ describe("mapChunks", () => {
 				},
 				0.6,
 			),
-			withRerank(
+			withVectorScore(
 				{
 					text: "just below",
 					score: 1,
@@ -99,7 +99,6 @@ describe("mapChunks", () => {
 			),
 		]);
 		expect(mapped.map((hit) => hit.score)).toEqual([0.6, 0.59]);
-		expect(keepScoredChunks([withRerank({ text: "boundary keep", score: 1 }, 0.6), withRerank({ text: "just below", score: 1 }, 0.59)])).toHaveLength(1);
 	});
 
 	it("drops missing, string, out-of-range, and NaN scores without inventing a value", () => {
@@ -110,11 +109,11 @@ describe("mapChunks", () => {
 		};
 		expect(
 			mapChunks([
-				{ text: "kept", score: 1, scoring_details: { reranking_score: 0.9 }, item: { metadata } },
+				{ text: "kept", score: 1, scoring_details: { vector_score: 0.9 }, item: { metadata } },
 				{ text: "missing score", score: 1, item: { metadata } },
-				{ text: "string score", score: 1, scoring_details: { reranking_score: "0.9" }, item: { metadata } },
-				{ text: "out of range", score: 0.9, scoring_details: { reranking_score: 1.1 }, item: { metadata } },
-				{ text: "nan score", score: 0.9, scoring_details: { reranking_score: Number.NaN }, item: { metadata } },
+				{ text: "string score", score: 1, scoring_details: { vector_score: "0.9" }, item: { metadata } },
+				{ text: "out of range", score: 0.9, scoring_details: { vector_score: 1.1 }, item: { metadata } },
+				{ text: "nan score", score: 0.9, scoring_details: { vector_score: Number.NaN }, item: { metadata } },
 			]),
 		).toEqual([
 			{

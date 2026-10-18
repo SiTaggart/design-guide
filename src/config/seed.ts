@@ -15,16 +15,12 @@ export const SEEDS: readonly Seed[] = [
 	{
 		id: "paste",
 		source: "Paste",
-		matchCase: true,
-		commonWord: true,
-		aliases: ["Twilio Paste"],
 		startUrl: "https://paste-dsys.com/",
 		excludePatterns: HARD_OUTS,
 	},
 	{
 		id: "primer",
 		source: "Primer",
-		commonWord: true,
 		startUrl: "https://primer.style/",
 		excludePatterns: HARD_OUTS,
 	},
@@ -50,14 +46,12 @@ export const SEEDS: readonly Seed[] = [
 	{
 		id: "antd",
 		source: "Ant Design",
-		commonWord: true,
 		startUrl: "https://ant.design/",
 		excludePatterns: HARD_OUTS,
 	},
 	{
 		id: "gitlab-pajamas",
 		source: "Pajamas",
-		commonWord: true,
 		startUrl: "https://design.gitlab.com/",
 		fallbackStartUrl: "https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com",
 		excludePatterns: HARD_OUTS,
@@ -80,7 +74,6 @@ export const SEEDS: readonly Seed[] = [
 	{
 		id: "vanilla",
 		source: "Vanilla Framework",
-		commonWord: true,
 		startUrl: "https://vanillaframework.io/docs/",
 		excludePatterns: HARD_OUTS,
 	},
@@ -96,7 +89,6 @@ export const SEEDS: readonly Seed[] = [
 	{
 		id: "backpack",
 		source: "Backpack",
-		commonWord: true,
 		startUrl: "https://www.skyscanner.design/latest/welcome-to-backpack-Mtf5OEo4",
 		includePatterns: ["https://www.skyscanner.design/latest/**"],
 		excludePatterns: HARD_OUTS,
@@ -105,7 +97,6 @@ export const SEEDS: readonly Seed[] = [
 	{
 		id: "garden",
 		source: "Zendesk Garden",
-		commonWord: true,
 		startUrl: "https://garden.zendesk.com/",
 		excludePatterns: HARD_OUTS,
 	},
@@ -113,8 +104,6 @@ export const SEEDS: readonly Seed[] = [
 	{
 		id: "ouds-web",
 		source: "OUDS Web",
-		aliases: ["Orange"],
-		commonWord: true,
 		startUrl: "https://web.unified-design-system.orange.com/orange/",
 		includePatterns: [
 			"https://web.unified-design-system.orange.com/orange/",

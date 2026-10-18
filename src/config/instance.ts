@@ -15,5 +15,3 @@ export const MIN_K = 1;
 /** AI Search `max_num_results` ceiling. https://developers.cloudflare.com/ai-search/configuration/retrieval/result-controls/ */
 export const MAX_K = 50;
 export const RETRIEVAL_CANDIDATES = MAX_K;
-/** BGE reranker. https://developers.cloudflare.com/ai-search/configuration/retrieval/reranking/ */
-export const RERANK_MODEL = "@cf/baai/bge-reranker-base";
