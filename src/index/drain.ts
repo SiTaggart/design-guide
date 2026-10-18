@@ -37,7 +37,7 @@ export async function uploadQueuedPage(
 	if (!fitsItem({ url: item.url, status: "completed", markdown }, seed)) {
 		throw new Error("page is not indexable");
 	}
-	const key = pageItemKey(item.systemId, item.url, item.attempts, timestamps.lastIndexed);
+	const key = pageItemKey(item.systemId, item.url, item.attempts, item.claimedAt ?? timestamps.lastIndexed);
 	await uploadItem(auth, key, markdown, {
 		system: seed.id,
 		source: seed.source,
