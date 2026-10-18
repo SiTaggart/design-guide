@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS discover_run (
   state TEXT NOT NULL,
   cursor TEXT,
   poll_failures INTEGER NOT NULL DEFAULT 0,
+  start_failures INTEGER NOT NULL DEFAULT 0,
   capped_any INTEGER NOT NULL DEFAULT 0,
   skipped_any INTEGER NOT NULL DEFAULT 0,
   error TEXT,
@@ -688,6 +689,30 @@ export class D1PageQueue implements PageQueue {
 		);
 	}
 
+	async noteStartFailure(systemId: SystemId, now: string): Promise<number> {
+		await run(
+			this.db,
+			"UPDATE discover_run SET start_failures = start_failures + 1, updated_at = ? WHERE system_id = ?",
+			now,
+			systemId,
+		);
+		const row = await first<{ start_failures: number }>(
+			this.db,
+			"SELECT start_failures FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		return row?.start_failures ?? 0;
+	}
+
+	async clearStartFailures(systemId: SystemId, now: string): Promise<void> {
+		await run(
+			this.db,
+			"UPDATE discover_run SET start_failures = 0, updated_at = ? WHERE system_id = ?",
+			now,
+			systemId,
+		);
+	}
+
 	async notePollFailure(systemId: SystemId, now: string): Promise<number> {
 		await run(
 			this.db,
@@ -715,7 +740,7 @@ export class D1PageQueue implements PageQueue {
 		await run(
 			this.db,
 			`UPDATE discover_run
-			 SET job_id = ?, start_url = ?, cursor = NULL, poll_failures = 0, updated_at = ?
+			 SET job_id = ?, start_url = ?, cursor = NULL, poll_failures = 0, start_failures = 0, updated_at = ?
 			 WHERE system_id = ?`,
 			jobId,
 			startUrl,

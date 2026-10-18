@@ -446,12 +446,13 @@ async function continueDiscover(
 					await queue.noteAttempt(run.systemId, frontierUrl);
 					break;
 				}
-				const failures = await queue.notePollFailure(run.systemId, iso);
+				const failures = await queue.noteStartFailure(run.systemId, iso);
 				if (failures < MAX_POLL_FAILURES) {
 					return { action: "continued", systemId: run.systemId, accepted };
 				}
 				const skipped = await queue.noteSkipped(run.systemId, iso);
 				await queue.noteAttempt(run.systemId, frontierUrl);
+				await queue.clearStartFailures(run.systemId, iso);
 				await queue.clearPollFailures(run.systemId, iso);
 				if (skipped >= MAX_SKIPPED_STARTS) {
 					break;
