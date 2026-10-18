@@ -180,11 +180,24 @@ export async function drainTick(input: {
 	await ensureInstance(itemsAuth);
 	const fetchMarkdown = input.fetchMarkdown ?? ((url: string) => fetchPageMarkdown(input.auth, url));
 	const catalog: { items: ItemRecord[] | null } = { items: null };
+	const heldClock = new Map<SystemId, boolean>();
+	const keepsClock = async (systemId: SystemId): Promise<boolean> => {
+		const cached = heldClock.get(systemId);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const held = await input.queue.holdsFreshness(systemId);
+		heldClock.set(systemId, held);
+		return held;
+	};
 	let indexed = 0;
 	let failed = 0;
 	for (const item of claimed) {
-		const timestamps = { lastCrawled: input.now, lastIndexed: input.now };
-		const keepIndexedAt = await input.queue.holdsFreshness(item.systemId);
+		const keepIndexedAt = await keepsClock(item.systemId);
+		const timestamps = {
+			lastCrawled: input.now,
+			lastIndexed: keepIndexedAt && item.lastIndexed ? item.lastIndexed : input.now,
+		};
 		if (!(await input.queue.owns(item))) {
 			continue;
 		}
