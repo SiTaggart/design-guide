@@ -738,6 +738,7 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async replaceJob(systemId: SystemId, jobId: string, startUrl: string, now: string): Promise<void> {
+		// started_at stays put. The 7-day deadline covers the whole follow-up chain.
 		await run(
 			this.db,
 			`UPDATE discover_run
