@@ -13,6 +13,25 @@ function matchesPattern(url: string, pattern: string): boolean {
 	return globToRegExp(pattern).test(url);
 }
 
+const STATIC_EXTENSION =
+	/\.(?:avif|bmp|gif|ico|jpe?g|png|svg|tiff?|webp|eot|otf|ttf|woff2?|css|cjs|js|mjs|aac|avi|flac|m4a|m4v|mov|mp3|mp4|mpe?g|ogg|ogv|wav|webm|7z|bz2|gz|rar|tar|tgz|zip)$/i;
+
+const STATIC_PATH =
+	/\/(?:_next\/static|_next\/image|static\/media|static\/chunks|static\/css|static\/js|wp-content\/uploads|wp-includes)(?:\/|$)/i;
+
+export function isStaticAsset(url: string): boolean {
+	try {
+		const path = new URL(url).pathname;
+		if (STATIC_PATH.test(path)) {
+			return true;
+		}
+		const file = path.split("/").filter(Boolean).pop() ?? "";
+		return STATIC_EXTENSION.test(file);
+	} catch {
+		return false;
+	}
+}
+
 export function isLlmsIndexFile(url: string): boolean {
 	try {
 		const segment = new URL(url).pathname.split("/").filter(Boolean).pop() ?? "";
@@ -75,13 +94,13 @@ export function frontierLinks(markdown: string, pageUrl: string, seed: Seed): st
 	for (const match of raw) {
 		const cleaned = match.replace(/[),.;]+$/g, "");
 		const link = canonicalLink(cleaned, pageUrl);
-		if (link && linkAllowed(link, seed) && !isLlmsIndexFile(link)) {
+		if (link && linkAllowed(link, seed) && !isLlmsIndexFile(link) && !isStaticAsset(link)) {
 			found.add(link);
 		}
 	}
 	for (const match of markdown.matchAll(/\[[^\]]*]\(([^)\s]+)\)/g)) {
 		const link = canonicalLink(match[1] ?? "", pageUrl);
-		if (link && linkAllowed(link, seed) && !isLlmsIndexFile(link)) {
+		if (link && linkAllowed(link, seed) && !isLlmsIndexFile(link) && !isStaticAsset(link)) {
 			found.add(link);
 		}
 	}

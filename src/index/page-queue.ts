@@ -1,5 +1,5 @@
 import { SYSTEM_IDS, isSystemId, type SystemId } from "../config/types.ts";
-import { pageKey } from "../crawl/links.ts";
+import { isStaticAsset, pageKey } from "../crawl/links.ts";
 
 export const DRAIN_LIMIT = 100;
 export const MAX_ATTEMPTS = 5;
@@ -714,7 +714,7 @@ export class D1PageQueue implements PageQueue {
 			"SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC",
 			systemId,
 		);
-		return rows.find((row) => !blocked.has(pageKey(row.url)))?.url ?? null;
+		return rows.find((row) => !blocked.has(pageKey(row.url)) && !isStaticAsset(row.url))?.url ?? null;
 	}
 
 	async indexableCount(systemId: SystemId): Promise<number> {
