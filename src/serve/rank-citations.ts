@@ -107,16 +107,46 @@ function contentTokens(query: string, named: ReadonlySet<string>): string[] {
 	return tokens;
 }
 
+function wordBases(word: string): Set<string> {
+	const bases = new Set<string>([word]);
+	if (word.length >= 4 && word.endsWith("s") && !word.endsWith("ss")) {
+		bases.add(word.slice(0, -1));
+	}
+	if (word.length >= 5 && word.endsWith("es")) {
+		bases.add(word.slice(0, -2));
+	}
+	if (word.length >= 5 && word.endsWith("ies")) {
+		bases.add(`${word.slice(0, -3)}y`);
+	}
+	return bases;
+}
+
+function sameToken(token: string, segment: string): boolean {
+	if (token === segment) {
+		return true;
+	}
+	const bases = wordBases(token);
+	if (bases.has(segment)) {
+		return true;
+	}
+	for (const base of wordBases(segment)) {
+		if (base === token || bases.has(base)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function pathAffinity(url: string, tokens: readonly string[]): number {
 	if (tokens.length === 0) {
 		return 0;
 	}
 	const parts = segments(url).map((segment) => segment.replace(/\.html$|\.md$/i, ""));
 	const last = parts[parts.length - 1] ?? "";
-	if (tokens.includes(last)) {
+	if (tokens.some((token) => sameToken(token, last))) {
 		return 2;
 	}
-	if (parts.some((part) => tokens.includes(part))) {
+	if (parts.some((part) => tokens.some((token) => sameToken(token, part)))) {
 		return 1;
 	}
 	return 0;
