@@ -14,8 +14,7 @@ export const PROBE_QUERIES: readonly ProbeQuery[] = [
 		id: "p-paste-buttons",
 		query: "how does Paste say to use buttons",
 		firstSystem: "paste",
-		firstUrl: "https://paste-dsys.com/page-templates/wizard",
-		absentUrl: "https://paste-dsys.com/components/button",
+		firstUrl: "https://paste-dsys.com/components/button",
 	},
 	{
 		id: "p-form-validation",
