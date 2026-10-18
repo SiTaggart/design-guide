@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { crawlStatusCounts, fetchCrawlPage } from "../src/crawl/browser-run.ts";
+import { seedById } from "../src/config/seed.ts";
+import { crawlStatusCounts, fetchCrawlPage, startSeedCrawl } from "../src/crawl/browser-run.ts";
 
 const auth = { accountId: "acct", apiToken: "token" };
 
@@ -59,5 +60,13 @@ describe("crawl step bounds", () => {
 		const query = new URL(calls[0] ?? "");
 		expect(query.searchParams.get("status")).toBe("completed");
 		expect(query.searchParams.get("limit")).toBe("1");
+	});
+
+	it("throws the Browser Run HTTP status when a crawl start is rejected", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(JSON.stringify({ errors: [{ message: "rejected" }] }), { status: 401 })),
+		);
+		await expect(startSeedCrawl(auth, seedById("paste"))).rejects.toMatchObject({ httpStatus: 401 });
 	});
 });
