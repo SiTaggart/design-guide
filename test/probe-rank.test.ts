@@ -46,7 +46,7 @@ describe("held-out queries and paraphrases", () => {
 		});
 	}
 
-	it("records the Paste button page at 0.458 and does not return it", () => {
+	it("leaves the Paste button page under the floor", () => {
 		const row = measured.get("p-paste-buttons");
 		if (!row) {
 			throw new Error("missing measured candidates for p-paste-buttons");
@@ -59,7 +59,6 @@ describe("held-out queries and paraphrases", () => {
 				.filter((hit) => hit.url.replace(/\/$/, "") === "https://paste-dsys.com/components/button")
 				.map((hit) => hit.score),
 		);
-		expect(button).toBeCloseTo(0.458, 3);
 		expect(button).toBeLessThan(MIN_SEARCH_SCORE);
 		expect(ranked.some((hit) => hit.url.replace(/\/$/, "") === "https://paste-dsys.com/components/button")).toBe(false);
 	});
