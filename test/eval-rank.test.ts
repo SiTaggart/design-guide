@@ -171,6 +171,49 @@ describe("held-out common-word paraphrases", () => {
 		).toBe("primer");
 	});
 
+	it("does not name a system from a determiner phrase", () => {
+		const primer = paraphrase({
+			url: "https://primer.style/product/components/text-input",
+			score: 0.85,
+			system: "primer",
+			source: "Primer",
+			passage: "A text input accepts typed text.",
+		});
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://paste-dsys.com/components/input",
+						score: 0.7,
+						system: "paste",
+						source: "Paste",
+					}),
+					primer,
+				],
+				"Paste the text into an input",
+			)[0]?.system,
+		).toBe("primer");
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://primer.style/product/ui-patterns/forms",
+						score: 0.7,
+						system: "primer",
+						source: "Primer",
+					}),
+					paraphrase({
+						url: "https://cloudscape.design/patterns/general/errors/validation/",
+						score: 0.85,
+						system: "cloudscape",
+						source: "Cloudscape",
+					}),
+				],
+				"a primer on form validation",
+			)[0]?.system,
+		).toBe("cloudscape");
+	});
+
 	it("boosts an unambiguous system name and keeps the button page first", () => {
 		const wizard = paraphrase({
 			url: "https://paste-dsys.com/page-templates/wizard",
