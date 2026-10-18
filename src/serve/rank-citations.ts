@@ -51,29 +51,45 @@ function hasPhrase(query: string, phrase: string, fold: boolean): boolean {
 	return new RegExp(`(?:^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`).test(haystack);
 }
 
-function namesInContext(query: string, phrase: string, fold: boolean): boolean {
-	if (/\s/.test(phrase)) {
+function queryWords(query: string): string[] {
+	return query
+		.split(/\s+/)
+		.map((word) => word.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, ""))
+		.filter(Boolean);
+}
+
+function ordinaryCommonWord(word: string, previous: string | undefined, next: string | undefined, fold: boolean): boolean {
+	const before = previous !== undefined && DETERMINER.test(previous);
+	const after = next !== undefined && DETERMINER.test(next);
+	if (after) {
+		return true;
+	}
+	return before && fold && word === word.toLowerCase();
+}
+
+function namesInContext(query: string, phrase: string, fold: boolean, commonWord: boolean): boolean {
+	if (/\s/.test(phrase) || !commonWord) {
 		return hasPhrase(query, phrase, fold);
 	}
-	if (!hasPhrase(query, phrase, fold)) {
-		return false;
-	}
-	const words = query.split(/[^A-Za-z0-9.]+/).filter(Boolean);
+	const words = queryWords(query);
 	const needle = fold ? phrase.toLowerCase() : phrase;
 	return words.some((word, index) => {
 		const current = fold ? word.toLowerCase() : word;
 		if (current !== needle) {
 			return false;
 		}
-		const previous = words[index - 1];
-		const next = words[index + 1];
-		return !((previous && DETERMINER.test(previous)) || (next && DETERMINER.test(next)));
+		return !ordinaryCommonWord(word, words[index - 1], words[index + 1], fold);
 	});
 }
 
-type NamePhrase = { phrase: string; fold: boolean };
+type NamePhrase = { phrase: string; fold: boolean; commonWord: boolean };
 
-function addName(names: NamePhrase[], seen: Set<string>, phrase: string, fold: boolean): void {
+function distinctiveToken(word: string): boolean {
+	const rest = word.slice(1);
+	return /[^A-Za-z]/.test(word) || (word.length >= 3 && word === word.toUpperCase()) || /[A-Z]/.test(rest);
+}
+
+function addName(names: NamePhrase[], seen: Set<string>, phrase: string, fold: boolean, commonWord = false): void {
 	const trimmed = phrase.trim();
 	if (!trimmed) {
 		return;
@@ -83,7 +99,11 @@ function addName(names: NamePhrase[], seen: Set<string>, phrase: string, fold: b
 		return;
 	}
 	seen.add(key);
-	names.push({ phrase: trimmed, fold });
+	names.push({
+		phrase: trimmed,
+		fold,
+		commonWord: commonWord && !/\s/.test(trimmed) && !distinctiveToken(trimmed),
+	});
 }
 
 function catalogNames(seed: (typeof SEEDS)[number]): NamePhrase[] {
@@ -101,9 +121,9 @@ function catalogNames(seed: (typeof SEEDS)[number]): NamePhrase[] {
 			}
 		}
 	} else if (seed.matchCase) {
-		addName(names, seen, seed.source, false);
+		addName(names, seen, seed.source, false, seed.commonWord === true);
 	} else {
-		addName(names, seen, seed.source, true);
+		addName(names, seen, seed.source, true, seed.commonWord === true);
 	}
 	if (seed.id.includes("-")) {
 		for (const part of seed.id.split("-")) {
@@ -121,7 +141,7 @@ function catalogNames(seed: (typeof SEEDS)[number]): NamePhrase[] {
 	for (const alias of seed.aliases ?? []) {
 		const rest = alias.slice(1);
 		const fold = /\s/.test(alias) || /[A-Z]/.test(rest);
-		addName(names, seen, alias, fold);
+		addName(names, seen, alias, fold, seed.commonWord === true);
 	}
 	return names;
 }
@@ -129,7 +149,7 @@ function catalogNames(seed: (typeof SEEDS)[number]): NamePhrase[] {
 export function namedSystemIds(query: string): Set<string> {
 	const named = new Set<string>();
 	for (const seed of SEEDS) {
-		if (catalogNames(seed).some((name) => namesInContext(query, name.phrase, name.fold))) {
+		if (catalogNames(seed).some((name) => namesInContext(query, name.phrase, name.fold, name.commonWord))) {
 			named.add(seed.id);
 		}
 	}

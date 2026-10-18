@@ -33,11 +33,12 @@ export async function uploadQueuedPage(
 	item: PageWorkItem,
 	markdown: string,
 	timestamps: { lastCrawled: string; lastIndexed: string },
+	now: string,
 ): Promise<string> {
 	if (!fitsItem({ url: item.url, status: "completed", markdown }, seed)) {
 		throw new Error("page is not indexable");
 	}
-	const key = pageItemKey(item.systemId, item.url, item.attempts, item.claimedAt ?? timestamps.lastIndexed);
+	const key = pageItemKey(item.systemId, item.url, item.attempts, item.claimedAt ?? now);
 	await uploadItem(auth, key, markdown, {
 		system: seed.id,
 		source: seed.source,
@@ -54,9 +55,10 @@ export async function indexQueuedPage(
 	item: PageWorkItem,
 	markdown: string,
 	timestamps: { lastCrawled: string; lastIndexed: string },
+	now: string,
 	catalog?: { items: ItemRecord[] | null },
 ): Promise<string> {
-	const key = await uploadQueuedPage(auth, seed, item, markdown, timestamps);
+	const key = await uploadQueuedPage(auth, seed, item, markdown, timestamps, now);
 	const cleaned = await cleanupReplacedItems(auth, item.systemId, item.url, key, item.itemKey, catalog);
 	if (cleaned !== "clean") {
 		throw new Error("legacy cleanup failed");
@@ -206,9 +208,10 @@ export async function drainTick(input: {
 			if (!(await input.queue.owns(item))) {
 				continue;
 			}
+			const stamp = item.claimedAt ?? input.now;
 			const itemKey = input.indexPage
-				? await input.indexPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps)
-				: await uploadQueuedPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps);
+				? await input.indexPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps, stamp)
+				: await uploadQueuedPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps, stamp);
 			if (!input.indexPage) {
 				const cleaned = await cleanupReplacedItems(
 					itemsAuth,

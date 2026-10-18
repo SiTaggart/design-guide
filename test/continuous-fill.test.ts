@@ -1503,6 +1503,7 @@ describe("legacy page copies", () => {
 			},
 			"# select",
 			{ lastCrawled: NOW, lastIndexed: NOW },
+			NOW,
 		);
 		expect(key.startsWith("primer/page/")).toBe(true);
 		expect(deleted).toEqual(["legacy"]);

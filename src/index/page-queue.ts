@@ -105,6 +105,8 @@ export type PageWorkItem = {
 	claimedAt?: string;
 };
 
+export type ClaimedPage = PageWorkItem & { claimedAt: string };
+
 export type QueueDepths = {
 	pending: number;
 	claimed: number;
@@ -128,7 +130,7 @@ export type PageQueue = {
 		items: ReadonlyArray<{ systemId: SystemId; url: string; kind: PageKind }>,
 		now: string,
 	): Promise<void>;
-	claim(limit: number, now: string): Promise<PageWorkItem[]>;
+	claim(limit: number, now: string): Promise<ClaimedPage[]>;
 	complete(
 		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
 		timestamps: { lastCrawled: string; lastIndexed: string },
@@ -310,7 +312,7 @@ export class D1PageQueue implements PageQueue {
 		}
 	}
 
-	async claim(limit: number, now: string): Promise<PageWorkItem[]> {
+	async claim(limit: number, now: string): Promise<ClaimedPage[]> {
 		const staleBefore = new Date(Date.parse(now) - STALE_CLAIM_MS).toISOString();
 		const exhaustedBefore = new Date(Date.parse(now) - EXHAUSTED_RETRY_MS).toISOString();
 		// SIT-68: expiry is a lost lease, not a crawl failure. Return the row to
@@ -397,7 +399,7 @@ export class D1PageQueue implements PageQueue {
 			MAX_ATTEMPTS,
 			limit,
 		);
-		const claimed: PageWorkItem[] = [];
+		const claimed: ClaimedPage[] = [];
 		for (const row of rows) {
 			const item = toItem(row);
 			if (!item) {
