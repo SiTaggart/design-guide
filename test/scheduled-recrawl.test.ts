@@ -253,6 +253,78 @@ describe("scheduled recrawl", () => {
 		expect(pasteStarts.length).toBeLessThanOrEqual(4);
 		expect(starts).toContain("primer");
 	});
+
+	it("starts a system whose follow-up always errors at most four times in seven days", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		await queue.ensure();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		for (const id of SYSTEM_IDS) {
+			if (id === "paste") {
+				continue;
+			}
+			await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
+			await indexed(queue, id, `${seedById(id).startUrl}page`, ago(1));
+			await indexed(queue, id, `${seedById(id).startUrl}other`, ago(1));
+		}
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([]);
+		vi.spyOn(itemsRest, "deleteItem").mockResolvedValue();
+		vi.spyOn(itemsRest, "deleteItemByKey").mockResolvedValue();
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({ id: "fresh", key: "page.md" });
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string) => {
+				if (String(input).includes("/browser-rendering/markdown")) {
+					return json(200, { result: "# page" });
+				}
+				return json(200, { result: {} });
+			}),
+		);
+		const roots: string[] = [];
+		const deps = {
+			start: async (_auth: unknown, seed: { id: string; startUrl: string }, startUrl?: string) => {
+				const follow = startUrl !== undefined;
+				if (!follow) {
+					roots.push(seed.id);
+				}
+				return {
+					startUrl: startUrl ?? seed.startUrl,
+					jobId: follow ? `job-${seed.id}:follow:${roots.length}` : `job-${seed.id}:root:${roots.length}`,
+				};
+			},
+			poll: async (_auth: unknown, jobId: string) => {
+				if (jobId.includes(":follow:")) {
+					return { status: "errored" as const, finished: 1, total: 1 };
+				}
+				return { status: "completed" as const, finished: 2, total: 2 };
+			},
+			page: async () => ({
+				records: [
+					{
+						url: "https://paste-dsys.com/components/form",
+						status: "completed",
+						markdown: "See [button](https://paste-dsys.com/components/button).",
+					},
+					{ url: "https://paste-dsys.com/components/input", status: "completed", markdown: "# input" },
+				],
+				cursor: null,
+			}),
+			cancel: async () => undefined,
+		};
+		const week = 7 * 24 * HOUR_MS;
+		for (let elapsed = 0; elapsed <= week; elapsed += HOUR_MS) {
+			await fillTick(env, DRIFT_CRON, new Date(Date.parse(NOW) + elapsed), deps);
+		}
+		expect(roots.filter((id) => id === "paste").length).toBeGreaterThan(1);
+		expect(roots.filter((id) => id === "paste").length).toBeLessThanOrEqual(4);
+	});
 });
 
 async function catalog(input: { pasteDays: number }): Promise<{ env: ReturnType<typeof envWithIndex>["env"]; queue: D1PageQueue }> {

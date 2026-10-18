@@ -659,4 +659,176 @@ describe("discover continuation", () => {
 			spy.mockRestore();
 		}
 	});
+
+	it("keeps staged pages when a follow-up job errors and does not record a refresh", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const kept = "https://paste-dsys.com/components/form";
+		const also = "https://paste-dsys.com/components/input";
+		const removed = "https://paste-dsys.com/components/removed";
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-follow-error",
+			startUrl: "https://paste-dsys.com/components/button",
+			cursor: "done",
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await pageQueue.stageUrl("paste", kept);
+		await pageQueue.stageUrl("paste", also);
+		await pageQueue.stageIndexable("paste", kept);
+		await pageQueue.stageIndexable("paste", also);
+		await pageQueue.enqueueUpsert([{ systemId: "paste", url: removed, kind: "seed" }], NOW);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "errored", finished: 4, total: 4 }),
+			page: async () => {
+				throw new Error("an errored follow-up must not page");
+			},
+			start: async () => {
+				throw new Error("an errored follow-up must not start another crawl");
+			},
+			deleteDocs: async () => {
+				throw new Error("an errored follow-up must not prune");
+			},
+			cancel: async () => undefined,
+		});
+		expect(result).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			incomplete: true,
+			pruned: [],
+		});
+		expect(await pageQueue.seedRefreshes()).toEqual({});
+		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
+		expect(await pageQueue.running()).toBeNull();
+		const queued = await db
+			.prepare("SELECT url FROM page_work WHERE system_id = ? ORDER BY url ASC")
+			.bind("paste")
+			.all<{ url: string }>();
+		expect(queued.results?.map((row) => row.url)).toEqual([kept, also, removed]);
+	});
+
+	it("keeps staged pages when poll errors exhaust the retry budget", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const kept = "https://paste-dsys.com/components/form";
+		const also = "https://paste-dsys.com/components/input";
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-poll-storm",
+			startUrl: "https://paste-dsys.com/components/button",
+			cursor: "done",
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await pageQueue.stageUrl("paste", kept);
+		await pageQueue.stageUrl("paste", also);
+		await pageQueue.stageIndexable("paste", kept);
+		await pageQueue.stageIndexable("paste", also);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const deps = {
+			poll: async () => {
+				throw new Error("crawl poll failed 500: temporary");
+			},
+			page: async () => {
+				throw new Error("poll failures must not page");
+			},
+			deleteDocs: async () => {
+				throw new Error("poll failures must not prune");
+			},
+			cancel: async () => undefined,
+		};
+		let result: Awaited<ReturnType<typeof discoverTick>> = { action: "continued", systemId: "paste", accepted: 0 };
+		for (let tick = 0; tick < 5; tick += 1) {
+			result = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		}
+		expect(result).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			incomplete: true,
+			pruned: [],
+		});
+		expect(await pageQueue.seedRefreshes()).toEqual({});
+		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
+		const queued = await db
+			.prepare("SELECT url FROM page_work WHERE system_id = ? ORDER BY url ASC")
+			.bind("paste")
+			.all<{ url: string }>();
+		expect(queued.results?.map((row) => row.url)).toEqual([kept, also]);
+	});
+
+	it("keeps staged pages when paging errors exhaust the retry budget", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const kept = "https://paste-dsys.com/components/form";
+		const also = "https://paste-dsys.com/components/input";
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-page-storm",
+			startUrl: "https://paste-dsys.com/components/button",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await pageQueue.stageUrl("paste", kept);
+		await pageQueue.stageUrl("paste", also);
+		await pageQueue.stageIndexable("paste", kept);
+		await pageQueue.stageIndexable("paste", also);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const deps = {
+			poll: async () => ({ status: "completed" as const, finished: 4, total: 4 }),
+			page: async () => {
+				throw new Error("crawl results failed 500: temporary");
+			},
+			deleteDocs: async () => {
+				throw new Error("paging failures must not prune");
+			},
+			cancel: async () => undefined,
+		};
+		let result: Awaited<ReturnType<typeof discoverTick>> = { action: "continued", systemId: "paste", accepted: 0 };
+		for (let tick = 0; tick < 5; tick += 1) {
+			result = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		}
+		expect(result).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			incomplete: true,
+			pruned: [],
+		});
+		expect(await pageQueue.seedRefreshes()).toEqual({});
+		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
+		const queued = await db
+			.prepare("SELECT url FROM page_work WHERE system_id = ? ORDER BY url ASC")
+			.bind("paste")
+			.all<{ url: string }>();
+		expect(queued.results?.map((row) => row.url)).toEqual([kept, also]);
+	});
 });
