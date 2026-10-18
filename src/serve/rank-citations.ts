@@ -38,6 +38,8 @@ export function isReferencePage(url: string, passage: string): boolean {
 	return pipes >= 8 && /\b(props?|properties|tokens?)\b/i.test(passage);
 }
 
+const DETERMINER = /^(a|an|the)$/i;
+
 function hasPhrase(query: string, phrase: string, fold: boolean): boolean {
 	const needle = phrase.trim();
 	if (!needle) {
@@ -47,6 +49,26 @@ function hasPhrase(query: string, phrase: string, fold: boolean): boolean {
 	const token = fold ? needle.toLowerCase() : needle;
 	const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	return new RegExp(`(?:^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`).test(haystack);
+}
+
+function namesInContext(query: string, phrase: string, fold: boolean): boolean {
+	if (/\s/.test(phrase)) {
+		return hasPhrase(query, phrase, fold);
+	}
+	if (!hasPhrase(query, phrase, fold)) {
+		return false;
+	}
+	const words = query.split(/[^A-Za-z0-9.]+/).filter(Boolean);
+	const needle = fold ? phrase.toLowerCase() : phrase;
+	return words.some((word, index) => {
+		const current = fold ? word.toLowerCase() : word;
+		if (current !== needle) {
+			return false;
+		}
+		const previous = words[index - 1];
+		const next = words[index + 1];
+		return !((previous && DETERMINER.test(previous)) || (next && DETERMINER.test(next)));
+	});
 }
 
 type NamePhrase = { phrase: string; fold: boolean };
@@ -107,7 +129,7 @@ function catalogNames(seed: (typeof SEEDS)[number]): NamePhrase[] {
 export function namedSystemIds(query: string): Set<string> {
 	const named = new Set<string>();
 	for (const seed of SEEDS) {
-		if (catalogNames(seed).some((name) => hasPhrase(query, name.phrase, name.fold))) {
+		if (catalogNames(seed).some((name) => namesInContext(query, name.phrase, name.fold))) {
 			named.add(seed.id);
 		}
 	}
