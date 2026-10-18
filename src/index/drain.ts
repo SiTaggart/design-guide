@@ -184,6 +184,7 @@ export async function drainTick(input: {
 	let failed = 0;
 	for (const item of claimed) {
 		const timestamps = { lastCrawled: input.now, lastIndexed: input.now };
+		const keepIndexedAt = await input.queue.holdsFreshness(item.systemId);
 		if (!(await input.queue.owns(item))) {
 			continue;
 		}
@@ -222,7 +223,7 @@ export async function drainTick(input: {
 					continue;
 				}
 			}
-			if (await input.queue.complete(item, timestamps, itemKey)) {
+			if (await input.queue.complete(item, timestamps, itemKey, { keepIndexedAt })) {
 				indexed += 1;
 			}
 		} catch (error) {

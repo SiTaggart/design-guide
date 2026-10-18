@@ -1,0 +1,1 @@
+ALTER TABLE discover_run ADD COLUMN skipped_any INTEGER NOT NULL DEFAULT 0;

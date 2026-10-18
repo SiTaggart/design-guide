@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS discover_run (
   cursor TEXT,
   poll_failures INTEGER NOT NULL DEFAULT 0,
   capped_any INTEGER NOT NULL DEFAULT 0,
+  skipped_any INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   started_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -130,7 +131,9 @@ export type PageQueue = {
 		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
 		timestamps: { lastCrawled: string; lastIndexed: string },
 		itemKey: string | null,
+		options?: { keepIndexedAt?: boolean },
 	): Promise<boolean>;
+	holdsFreshness(systemId: SystemId): Promise<boolean>;
 	fail(
 		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
 		error: string,
@@ -418,35 +421,52 @@ export class D1PageQueue implements PageQueue {
 		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
 		timestamps: { lastCrawled: string; lastIndexed: string },
 		itemKey: string | null,
+		options?: { keepIndexedAt?: boolean },
 	): Promise<boolean> {
+		const keepIndexedAt = options?.keepIndexedAt === true;
 		if (item.claimedAt !== undefined && item.attempts !== undefined) {
 			const changes = await run(
 				this.db,
-				`UPDATE page_work
-				 SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
-				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
-				timestamps.lastCrawled,
-				timestamps.lastIndexed,
-				itemKey,
-				item.systemId,
-				item.url,
-				item.attempts,
-				item.claimedAt,
+				keepIndexedAt
+					? `UPDATE page_work
+					   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL
+					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`
+					: `UPDATE page_work
+					   SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
+					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
+				...(keepIndexedAt
+					? [timestamps.lastCrawled, itemKey, item.systemId, item.url, item.attempts, item.claimedAt]
+					: [
+							timestamps.lastCrawled,
+							timestamps.lastIndexed,
+							itemKey,
+							item.systemId,
+							item.url,
+							item.attempts,
+							item.claimedAt,
+						]),
 			);
 			return changes === 1;
 		}
 		await run(
 			this.db,
-			`UPDATE page_work
-			 SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
-			 WHERE system_id = ? AND url = ?`,
-			timestamps.lastCrawled,
-			timestamps.lastIndexed,
-			itemKey,
-			item.systemId,
-			item.url,
+			keepIndexedAt
+				? `UPDATE page_work
+				   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL
+				   WHERE system_id = ? AND url = ?`
+				: `UPDATE page_work
+				   SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
+				   WHERE system_id = ? AND url = ?`,
+			...(keepIndexedAt
+				? [timestamps.lastCrawled, itemKey, item.systemId, item.url]
+				: [timestamps.lastCrawled, timestamps.lastIndexed, itemKey, item.systemId, item.url]),
 		);
 		return true;
+	}
+
+	async holdsFreshness(systemId: SystemId): Promise<boolean> {
+		const deferred = await this.capDefers();
+		return deferred[systemId] !== undefined;
 	}
 
 	async fail(
@@ -633,6 +653,24 @@ export class D1PageQueue implements PageQueue {
 			systemId,
 		);
 		return row?.capped_any === 1;
+	}
+
+	async noteSkipped(systemId: SystemId, now: string): Promise<void> {
+		await run(
+			this.db,
+			"UPDATE discover_run SET skipped_any = 1, updated_at = ? WHERE system_id = ?",
+			now,
+			systemId,
+		);
+	}
+
+	async skippedAny(systemId: SystemId): Promise<boolean> {
+		const row = await first<{ skipped_any: number }>(
+			this.db,
+			"SELECT skipped_any FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		return row?.skipped_any === 1;
 	}
 
 	async clearPollFailures(systemId: SystemId, now: string): Promise<void> {

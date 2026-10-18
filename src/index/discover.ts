@@ -428,13 +428,14 @@ async function continueDiscover(
 				if (failures < MAX_POLL_FAILURES) {
 					return { action: "continued", systemId: run.systemId, accepted };
 				}
+				await queue.noteSkipped(run.systemId, iso);
 				await queue.noteAttempt(run.systemId, next);
 				await queue.clearPollFailures(run.systemId, iso);
 				next = await queue.nextFrontier(run.systemId, seen);
 			}
 		}
 	}
-	const incomplete = runaway || (await queue.cappedAny(run.systemId));
+	const incomplete = runaway || (await queue.cappedAny(run.systemId)) || (await queue.skippedAny(run.systemId));
 	const live = await queue.stagedUrls(run.systemId);
 	const indexable = await queue.indexableUrls(run.systemId);
 	if (!incomplete && isStubGeneration(indexable.length)) {
