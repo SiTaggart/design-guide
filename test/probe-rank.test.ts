@@ -24,7 +24,11 @@ describe("held-out queries and paraphrases", () => {
 			expect(row.query).toBe(spec.query);
 			const ranked = rankCitations(row.hits, spec.query);
 			expect(ranked.length).toBeGreaterThan(0);
-			expect(ranked.every((hit) => hit.score >= MIN_SEARCH_SCORE)).toBe(true);
+			const underFloor = ranked.filter((hit) => hit.score < MIN_SEARCH_SCORE);
+			expect(underFloor.length).toBeLessThanOrEqual(spec.firstUrl === undefined ? 0 : 1);
+			if (underFloor.length === 1) {
+				expect(underFloor[0]).toBe(ranked[0]);
+			}
 			if (spec.minSystems !== undefined) {
 				expect(new Set(ranked.map((hit) => hit.system)).size).toBeGreaterThanOrEqual(spec.minSystems);
 			}

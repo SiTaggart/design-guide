@@ -156,9 +156,25 @@ export function rankCitations(citations: readonly Citation[], query: string, k?:
 	const named = namedSystemIds(query);
 	const tokens = contentTokens(query, named);
 	const limit = k === undefined ? MAX_K : Math.min(MAX_K, Math.max(1, k));
+	const namedPageAlreadyMatches = citations.some(
+		(hit) =>
+			hit.score >= MIN_SEARCH_SCORE &&
+			!isLlmsIndexFile(hit.url) &&
+			named.has(hit.system) &&
+			pathAffinity(hit.url, tokens) > 0,
+	);
 	const best = new Map<string, Citation>();
 	for (const hit of citations) {
-		if (hit.score < MIN_SEARCH_SCORE || isLlmsIndexFile(hit.url)) {
+		if (isLlmsIndexFile(hit.url)) {
+			continue;
+		}
+		const onFloor = hit.score >= MIN_SEARCH_SCORE;
+		const pathLead =
+			!namedPageAlreadyMatches &&
+			named.has(hit.system) &&
+			!isReferencePage(hit.url, hit.passage) &&
+			pathAffinity(hit.url, tokens) === 2;
+		if (!onFloor && !pathLead) {
 			continue;
 		}
 		const key = normalizePageUrl(hit.url);
