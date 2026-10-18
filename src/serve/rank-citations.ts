@@ -38,30 +38,76 @@ export function isReferencePage(url: string, passage: string): boolean {
 	return pipes >= 8 && /\b(props?|properties|tokens?)\b/i.test(passage);
 }
 
-function hasPhrase(query: string, phrase: string): boolean {
-	const needle = phrase.toLowerCase().trim();
+function hasPhrase(query: string, phrase: string, fold: boolean): boolean {
+	const needle = phrase.trim();
 	if (!needle) {
 		return false;
 	}
-	const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	return new RegExp(`(?:^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, "i").test(query);
+	const haystack = fold ? query.toLowerCase() : query;
+	const token = fold ? needle.toLowerCase() : needle;
+	const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`(?:^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`).test(haystack);
+}
+
+type NamePhrase = { phrase: string; fold: boolean };
+
+function addName(names: NamePhrase[], seen: Set<string>, phrase: string, fold: boolean): void {
+	const trimmed = phrase.trim();
+	if (!trimmed) {
+		return;
+	}
+	const key = `${fold ? "1" : "0"}:${trimmed.toLowerCase()}`;
+	if (seen.has(key)) {
+		return;
+	}
+	seen.add(key);
+	names.push({ phrase: trimmed, fold });
+}
+
+function catalogNames(seed: (typeof SEEDS)[number]): NamePhrase[] {
+	const names: NamePhrase[] = [];
+	const seen = new Set<string>();
+	const words = seed.source.split(/\s+/).filter(Boolean);
+	if (words.length >= 2) {
+		addName(names, seen, seed.source, true);
+		for (const word of words) {
+			const rest = word.slice(1);
+			const distinctive =
+				/[^A-Za-z]/.test(word) || (word.length >= 3 && word === word.toUpperCase()) || /[A-Z]/.test(rest);
+			if (distinctive) {
+				addName(names, seen, word, true);
+			}
+		}
+	} else if (seed.matchCase) {
+		addName(names, seen, seed.source, false);
+	} else {
+		addName(names, seen, seed.source, true);
+	}
+	if (seed.id.includes("-")) {
+		for (const part of seed.id.split("-")) {
+			if (part.length >= 4) {
+				addName(names, seen, part, true);
+			}
+		}
+	} else if (!seed.matchCase) {
+		const compact = seed.source.toLowerCase().replace(/[^a-z0-9]/g, "");
+		const sourceWords = new Set(seed.source.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+		if (seed.id.toLowerCase() !== compact && !sourceWords.has(seed.id.toLowerCase())) {
+			addName(names, seen, seed.id, true);
+		}
+	}
+	for (const alias of seed.aliases ?? []) {
+		const rest = alias.slice(1);
+		const fold = /\s/.test(alias) || /[A-Z]/.test(rest);
+		addName(names, seen, alias, fold);
+	}
+	return names;
 }
 
 export function namedSystemIds(query: string): Set<string> {
 	const named = new Set<string>();
 	for (const seed of SEEDS) {
-		const id = seed.id.toLowerCase();
-		const phrases = [seed.source, id, id.replace(/-/g, " ")];
-		const head = seed.source.split(/\s+/)[0] ?? "";
-		if (head.length >= 3) {
-			phrases.push(head);
-		}
-		for (const part of id.split("-")) {
-			if (part.length >= 4) {
-				phrases.push(part);
-			}
-		}
-		if (phrases.some((phrase) => hasPhrase(query, phrase))) {
+		if (catalogNames(seed).some((name) => hasPhrase(query, name.phrase, name.fold))) {
 			named.add(seed.id);
 		}
 	}

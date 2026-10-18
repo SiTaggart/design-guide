@@ -15,6 +15,8 @@ export const SEEDS: readonly Seed[] = [
 	{
 		id: "paste",
 		source: "Paste",
+		matchCase: true,
+		aliases: ["Twilio Paste"],
 		startUrl: "https://paste-dsys.com/",
 		excludePatterns: HARD_OUTS,
 	},
@@ -104,6 +106,7 @@ export const SEEDS: readonly Seed[] = [
 	{
 		id: "ouds-web",
 		source: "OUDS Web",
+		aliases: ["Orange"],
 		startUrl: "https://web.unified-design-system.orange.com/orange/",
 		includePatterns: [
 			"https://web.unified-design-system.orange.com/orange/",

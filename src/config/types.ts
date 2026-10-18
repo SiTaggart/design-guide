@@ -20,6 +20,10 @@ export type SystemId = (typeof SYSTEM_IDS)[number];
 export type Seed = {
 	id: SystemId;
 	source: string;
+	/** Extra names. A one-word name matches only with this casing. A phrase matches in any case. */
+	aliases?: readonly string[];
+	/** The one-word source matches only with its written capitalization. */
+	matchCase?: boolean;
 	startUrl: string;
 	fallbackStartUrl?: string;
 	includePatterns?: string[];
