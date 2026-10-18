@@ -70,6 +70,12 @@ CREATE TABLE IF NOT EXISTS cap_defer (
   system_id TEXT PRIMARY KEY,
   deferred_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS discover_frontier (
+  system_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  PRIMARY KEY (system_id, url)
+);
 `;
 
 export type PageKind = "seed" | "reindex";
@@ -620,7 +626,50 @@ export class D1PageQueue implements PageQueue {
 	async clearRun(systemId: SystemId): Promise<void> {
 		await run(this.db, "DELETE FROM discover_indexable WHERE system_id = ?", systemId);
 		await run(this.db, "DELETE FROM discover_url WHERE system_id = ?", systemId);
+		await run(this.db, "DELETE FROM discover_frontier WHERE system_id = ?", systemId);
 		await run(this.db, "DELETE FROM discover_run WHERE system_id = ?", systemId);
+	}
+
+	async replaceJob(systemId: SystemId, jobId: string, startUrl: string, now: string): Promise<void> {
+		await run(
+			this.db,
+			`UPDATE discover_run
+			 SET job_id = ?, start_url = ?, cursor = NULL, poll_failures = 0, updated_at = ?
+			 WHERE system_id = ?`,
+			jobId,
+			startUrl,
+			now,
+			systemId,
+		);
+	}
+
+	async addFrontier(systemId: SystemId, urls: readonly string[]): Promise<void> {
+		for (const url of urls) {
+			await run(
+				this.db,
+				"INSERT INTO discover_frontier (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
+				systemId,
+				url,
+			);
+		}
+	}
+
+	async nextFrontier(systemId: SystemId, seen: ReadonlySet<string>): Promise<string | null> {
+		const rows = await all<{ url: string }>(
+			this.db,
+			"SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC",
+			systemId,
+		);
+		return rows.find((row) => !seen.has(row.url))?.url ?? null;
+	}
+
+	async indexableCount(systemId: SystemId): Promise<number> {
+		const row = await first<{ n: number }>(
+			this.db,
+			"SELECT COUNT(*) AS n FROM discover_indexable WHERE system_id = ?",
+			systemId,
+		);
+		return Number(row?.n ?? 0);
 	}
 
 	async clearWork(systemId: SystemId): Promise<void> {

@@ -30,9 +30,13 @@ export function parseSearchScore(value: unknown): number | undefined {
 	return value;
 }
 
+export function rerankScore(chunk: SearchChunk): number | undefined {
+	return parseSearchScore(chunk.scoring_details?.reranking_score);
+}
+
 export function keepScoredChunks(chunks: SearchChunk[]): SearchChunk[] {
 	return chunks.filter((chunk) => {
-		const score = parseSearchScore(chunk.score);
+		const score = rerankScore(chunk);
 		return score !== undefined && score >= MIN_SEARCH_SCORE;
 	});
 }
@@ -44,8 +48,8 @@ export function mapChunks(chunks: SearchChunk[]): Citation[] {
 		const metadata = chunk.item?.metadata ?? {};
 		const source = asString(metadata.source) || asString(chunk.item?.key);
 		const url = httpsUrl(asString(metadata.source_url));
-		const score = parseSearchScore(chunk.score);
-		if (!passage || !source || !url || score === undefined || score < MIN_SEARCH_SCORE) {
+		const score = rerankScore(chunk);
+		if (!passage || !source || !url || score === undefined) {
 			continue;
 		}
 		results.push({

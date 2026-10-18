@@ -208,6 +208,7 @@ async function noteFill(
 						seedById(discover.systemId).startUrl,
 						discover.urls,
 						discover.hitLimit,
+						discover.incomplete,
 					),
 				]
 			: current.systems;
@@ -263,7 +264,7 @@ async function mailFill(
 			await sendFinishIndexMail(
 				env,
 				{ trigger: discover.trigger, workflowId: `discover-${discover.trigger}-${discover.systemId}` },
-				[resultFor(discover.systemId, seed.startUrl, discover.urls, discover.hitLimit)],
+				[resultFor(discover.systemId, seed.startUrl, discover.urls, discover.hitLimit, discover.incomplete)],
 			);
 		}
 		if (discover.action === "parked") {
@@ -306,6 +307,7 @@ function resultFor(
 	startUrl: string,
 	usable: number,
 	hitLimit = false,
+	incomplete = false,
 ): SystemReindexResult {
 	return {
 		system,
@@ -315,6 +317,7 @@ function resultFor(
 		hitLimit,
 		keptPrevious: true,
 		usable,
+		...(incomplete ? { incomplete: true } : {}),
 	};
 }
 

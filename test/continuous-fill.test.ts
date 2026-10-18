@@ -3,8 +3,8 @@ import { SYSTEM_IDS } from "../src/config/types.ts";
 import { seedById } from "../src/config/seed.ts";
 import worker from "../src/worker.ts";
 import {
-	CAP_RECORD_LIMIT,
 	CAP_RETRY_MS,
+	DISCOVER_RECORD_LIMIT,
 	DISCOVER_URLS_PER_TICK,
 	discoverTick,
 	commitDiscoveredUrls,
@@ -1667,7 +1667,14 @@ describe("page cap recovery", () => {
 			},
 			cancel: async () => undefined,
 		});
-		expect(result).toMatchObject({ action: "enqueued", systemId: "paste", urls: 2, pruned: [] });
+		expect(result).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			urls: 2,
+			pruned: [],
+			hitLimit: false,
+			incomplete: true,
+		});
 		expect(await pageQueue.running()).toBeNull();
 		expect(await urls(pageQueue)).toEqual([
 			"https://paste-dsys.com/a",
@@ -1679,7 +1686,8 @@ describe("page cap recovery", () => {
 		if (parks.kind === "ok") {
 			expect(parks.parks.paste).toBeUndefined();
 		}
-		expect((await pageQueue.seedRefreshes()).paste?.seedHash).toBe(systemSeedHash(seedById("paste")));
+		expect(await pageQueue.seedRefreshes()).toEqual({});
+		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
 	});
 
 	it("defers a capped seed with no usable pages so the next tick discovers another drifted seed", async () => {
@@ -1818,14 +1826,14 @@ describe("page cap recovery", () => {
 			cancel: async () => undefined,
 		});
 		expect(interrupted).toMatchObject({ action: "continued", systemId: "paste" });
-		expect(limits).toEqual([CAP_RECORD_LIMIT, CAP_RECORD_LIMIT]);
+		expect(limits).toEqual([DISCOVER_RECORD_LIMIT, DISCOVER_RECORD_LIMIT]);
 		expect((await pageQueue.running())?.cursor).toBe("2");
 
 		const resumed = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
 			poll: async () => ({ status: "cancelled_due_to_limits", finished: 533, total: 533 }),
 			page: async (_auth, _job, _status, cursor, limit) => {
 				expect(cursor).toBe("2");
-				expect(limit).toBe(CAP_RECORD_LIMIT);
+				expect(limit).toBe(DISCOVER_RECORD_LIMIT);
 				return {
 					records: [{ url: "https://paste-dsys.com/b", status: "completed", markdown: "# b" }],
 					cursor: null,
@@ -1841,7 +1849,8 @@ describe("page cap recovery", () => {
 			systemId: "paste",
 			urls: 2,
 			pruned: [],
-			hitLimit: true,
+			hitLimit: false,
+			incomplete: true,
 		});
 		expect(await pageQueue.running()).toBeNull();
 		expect((await urls(pageQueue)).filter((url) => url.includes("paste-dsys.com"))).toEqual([
@@ -2005,7 +2014,7 @@ describe("page cap recovery", () => {
 		expect(filled.queue.pending + filled.queue.done).toBeGreaterThan(0);
 		const paste = filled.systems.find((entry) => entry.system === "paste");
 		expect(paste?.error).toBeUndefined();
-		expect(paste).toMatchObject({ hitLimit: true, usable: 2, indexed: 0 });
+		expect(paste).toMatchObject({ hitLimit: false, incomplete: true, usable: 2, indexed: 0 });
 		await fillTick(env, DRIFT_CRON, new Date("2026-09-30T00:10:00.000Z"), deps);
 		expect(started).toEqual(["paste", "primer"]);
 		const moved = await readStatus(env);

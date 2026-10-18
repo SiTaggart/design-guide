@@ -1,14 +1,17 @@
-import { CRAWL_LIMIT, INSTANCE_ID } from "../config/instance.ts";
+import { INSTANCE_ID } from "../config/instance.ts";
 import { seedById } from "../config/seed.ts";
 import type { SystemId } from "../config/types.ts";
 import {
 	CRAWL_POLL_DEADLINE_MS,
 	cancelCrawl,
+	crawlStoppedEarly,
 	fetchCrawlPage,
 	pollJob,
+	reachedRunawayCeiling,
 	startSeedCrawl,
 	type CrawlAuth,
 } from "../crawl/browser-run.ts";
+import { frontierLinks } from "../crawl/links.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
 import { deleteItem, deleteItemByKey, listItems, type ItemsAuth } from "./items-rest.ts";
@@ -26,8 +29,8 @@ import {
 
 export const DISCOVER_URLS_PER_TICK = 25;
 export const CAP_RETRY_MS = 60 * 60 * 1000;
-/** Records per capped results response. Full markdown makes a large page easy to OOM. */
-export const CAP_RECORD_LIMIT = 5;
+/** One record per results request. Markdown stays on the response, then is discarded. */
+export const DISCOVER_RECORD_LIMIT = 1;
 const MAX_POLL_FAILURES = 5;
 
 export type DiscoverPick = {
@@ -48,6 +51,7 @@ export type DiscoverTickResult =
 			urls: number;
 			pruned: string[];
 			hitLimit: boolean;
+			incomplete: boolean;
 	  }
 	| { action: "parked"; systemId: SystemId; trigger: DiscoverPick["trigger"]; usable: number }
 	| { action: "failed"; systemId?: SystemId; trigger?: DiscoverPick["trigger"]; error: string };
@@ -238,7 +242,7 @@ export type DiscoverDeps = {
 };
 
 function cappedCrawl(status: string, finished: number): boolean {
-	return status === "cancelled_due_to_limits" || (status === "completed" && finished >= CRAWL_LIMIT);
+	return crawlStoppedEarly(status, finished);
 }
 
 export async function discoverTick(
@@ -358,25 +362,41 @@ async function continueDiscover(
 	const seed = seedById(run.systemId);
 	let cursor = run.cursor;
 	let accepted = 0;
-	if (cursor !== "done") {
+	let runaway = reachedRunawayCeiling(await queue.indexableCount(run.systemId));
+	if (cursor !== "done" && !runaway) {
 		try {
 			for (let i = 0; i < DISCOVER_URLS_PER_TICK && cursor !== "done"; i += 1) {
-				const page = await deps.page(
-					auth,
-					run.jobId,
-					"completed",
-					cursor ?? undefined,
-					capped ? CAP_RECORD_LIMIT : 1,
-				);
+				if (reachedRunawayCeiling(await queue.indexableCount(run.systemId))) {
+					runaway = true;
+					cursor = "done";
+					await queue.saveCursor(run.systemId, cursor, iso);
+					break;
+				}
+				const page = await deps.page(auth, run.jobId, "completed", cursor ?? undefined, DISCOVER_RECORD_LIMIT);
 				for (const record of page.records) {
 					if (!record.url.startsWith("https://")) {
 						continue;
 					}
 					await queue.stageUrl(run.systemId, record.url);
+					if (record.markdown) {
+						await queue.addFrontier(run.systemId, frontierLinks(record.markdown, record.url, seed));
+					}
 					if (record.status === "completed" && fitsItem(record, seed)) {
+						if (reachedRunawayCeiling(await queue.indexableCount(run.systemId))) {
+							runaway = true;
+							break;
+						}
 						await queue.stageIndexable(run.systemId, record.url);
 						accepted += 1;
+						if (reachedRunawayCeiling(await queue.indexableCount(run.systemId))) {
+							runaway = true;
+						}
 					}
+				}
+				if (runaway) {
+					cursor = "done";
+					await queue.saveCursor(run.systemId, cursor, iso);
+					break;
 				}
 				cursor = page.cursor === null ? "done" : String(page.cursor);
 				await queue.saveCursor(run.systemId, cursor, iso);
@@ -392,9 +412,23 @@ async function continueDiscover(
 	if (cursor !== "done") {
 		return { action: "continued", systemId: run.systemId, accepted };
 	}
+	if (capped && !runaway) {
+		const seen = new Set(await queue.stagedUrls(run.systemId));
+		const next = await queue.nextFrontier(run.systemId, seen);
+		if (next) {
+			try {
+				const started = await deps.start(auth, seed, next);
+				await queue.replaceJob(run.systemId, started.jobId, started.startUrl, iso);
+				return { action: "continued", systemId: run.systemId, accepted };
+			} catch (error) {
+				return failDiscover(queue, auth, run, deps, error instanceof Error ? error.message : String(error));
+			}
+		}
+	}
+	const incomplete = runaway || capped;
 	const live = await queue.stagedUrls(run.systemId);
 	const indexable = await queue.indexableUrls(run.systemId);
-	if (!capped && isStubGeneration(indexable.length)) {
+	if (!incomplete && isStubGeneration(indexable.length)) {
 		await writePark(env, run.systemId, indexable.length, iso);
 		await writeIndexedHash(env, run.systemId, systemSeedHash(seed));
 		await writeLastIndexedHashIfComplete(env);
@@ -403,7 +437,6 @@ async function continueDiscover(
 		await queue.clearRun(run.systemId);
 		return { action: "parked", systemId: run.systemId, trigger: run.trigger, usable: indexable.length };
 	}
-	const thin = capped && isStubGeneration(indexable.length);
 	const itemsAuth = itemsAuthFrom(env, auth);
 	const committed =
 		indexable.length === 0
@@ -415,11 +448,11 @@ async function continueDiscover(
 					urls: indexable,
 					liveUrls: live,
 					ok: true,
-					prune: !capped,
+					prune: !incomplete,
 					now: iso,
 					deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
 				});
-	if (thin) {
+	if (incomplete && !(runaway && indexable.length >= 2)) {
 		await queue.noteCapDefer(run.systemId, iso);
 	} else {
 		await queue.recordSeedRefresh(run.systemId, systemSeedHash(seed), iso);
@@ -433,7 +466,8 @@ async function continueDiscover(
 		trigger: run.trigger,
 		urls: indexable.length,
 		pruned: committed.pruned.map((row) => row.url),
-		hitLimit: capped,
+		hitLimit: false,
+		incomplete,
 	};
 }
 

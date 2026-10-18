@@ -15,8 +15,9 @@ function result(system: SystemId, indexed: number, hitLimit = false): SystemRein
 }
 
 describe("reindexExitCode", () => {
-	it("fails when any system hit the crawl limit", () => {
+	it("fails when any system hit the crawl limit or is incomplete", () => {
 		expect(reindexExitCode([result("primer", 900), result("govuk", 0, true)])).toBe(1);
+		expect(reindexExitCode([result("primer", 900), { ...result("govuk", 4), incomplete: true }])).toBe(1);
 	});
 
 	it("fails when every system kept its previous generation", () => {

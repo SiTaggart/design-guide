@@ -1,7 +1,7 @@
 import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
-import { seedFailure } from "../index/crawl-cap.ts";
+import { isCrawlCapError, seedFailure } from "../index/crawl-cap.ts";
 import { capCooling } from "../index/discover.ts";
 import { D1PageQueue } from "../index/page-queue.ts";
 import { seedHashKey, systemSeedHash } from "../index/seed-hash.ts";
@@ -159,7 +159,11 @@ function seedViews(document: IndexStatusDocument): SeedView[] {
 		const lastCrawled = row?.lastCrawled ?? null;
 		const lastIndexed = row?.lastIndexed ?? null;
 		const lastDiscovered = row?.lastDiscovered ?? null;
-		const error = seedFailure(errors.get(system));
+		const rawError = errors.get(system);
+		const error = seedFailure(rawError);
+		const result = document.systems.find((entry) => entry.system === system);
+		const incomplete =
+			result?.incomplete === true || result?.hitLimit === true || isCrawlCapError(rawError);
 		return {
 			system,
 			parked,
@@ -173,6 +177,7 @@ function seedViews(document: IndexStatusDocument): SeedView[] {
 				lastIndexed,
 				lastDiscovered,
 				error,
+				incomplete,
 			}),
 			pending,
 			claimed,

@@ -7,19 +7,22 @@ describe("parseSearchFields", () => {
 		expect(parseSearchFields({ query: "   " })).toEqual({ kind: "query_required" });
 	});
 
-	it("defaults and clamps k", () => {
+	it("omits k unless the caller sets it, and clamps a set k to 1..50", () => {
 		expect(parseSearchFields({ query: "focus" })).toMatchObject({
 			kind: "ok",
-			params: { query: "focus", k: 8 },
+			params: { query: "focus", k: undefined },
 		});
 		expect(parseSearchFields({ query: "focus", k: 0 })).toMatchObject({
 			params: { k: 1 },
 		});
 		expect(parseSearchFields({ query: "focus", k: 99 })).toMatchObject({
-			params: { k: 20 },
+			params: { k: 50 },
 		});
 		expect(parseSearchFields({ query: "focus", k: "nope" })).toMatchObject({
-			params: { k: 8 },
+			params: { k: undefined },
+		});
+		expect(parseSearchFields({ query: "focus", k: 4 })).toMatchObject({
+			params: { k: 4 },
 		});
 	});
 

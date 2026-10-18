@@ -1,4 +1,4 @@
-import { CRAWL_DEPTH, CRAWL_LIMIT } from "../config/instance.ts";
+import { BROWSER_CRAWL_DEPTH, BROWSER_CRAWL_LIMIT, CRAWL_RUNAWAY_PAGES } from "../config/instance.ts";
 import type { CrawlCounts, Seed } from "../config/types.ts";
 
 export type CrawlRecord = {
@@ -85,8 +85,8 @@ export function crawlRequestBody(seed: Seed, startUrl: string): CrawlRequestBody
 	return {
 		url: startUrl,
 		source: "all",
-		limit: CRAWL_LIMIT,
-		depth: CRAWL_DEPTH,
+		limit: BROWSER_CRAWL_LIMIT,
+		depth: BROWSER_CRAWL_DEPTH,
 		formats: ["markdown"],
 		render: seed.render ?? true,
 		crawlPurposes: ["search"],
@@ -100,15 +100,17 @@ export function crawlRequestBody(seed: Seed, startUrl: string): CrawlRequestBody
 	};
 }
 
-export function hitCrawlLimit(
-	outcome: Pick<CrawlOutcome, "status" | "counts">,
-	indexed: number,
-): boolean {
-	return (
-		outcome.status === "cancelled_due_to_limits" ||
-		outcome.counts.finished >= CRAWL_LIMIT ||
-		indexed >= CRAWL_LIMIT
-	);
+/** The crawl job stopped before the site's page list was finished. */
+export function crawlStoppedEarly(status: string, finished: number): boolean {
+	if (status === "cancelled_due_to_limits") {
+		return true;
+	}
+	return status === "completed" && finished >= BROWSER_CRAWL_LIMIT;
+}
+
+/** The safety ceiling. This is incomplete, not a full index. */
+export function reachedRunawayCeiling(pages: number): boolean {
+	return pages >= CRAWL_RUNAWAY_PAGES;
 }
 
 export function snapshotJob(
@@ -240,7 +242,17 @@ async function completedRecords(auth: CrawlAuth, jobId: string): Promise<CrawlRe
 export async function startSeedCrawl(
 	auth: CrawlAuth,
 	seed: Seed,
+	startUrlOverride?: string,
 ): Promise<{ startUrl: string; jobId: string }> {
+	if (startUrlOverride) {
+		const started = await startCrawl(auth, seed, startUrlOverride);
+		if ("httpStatus" in started) {
+			throw new Error(
+				`crawl start for ${startUrlOverride} failed ${started.httpStatus}: ${started.detail}`,
+			);
+		}
+		return { startUrl: startUrlOverride, jobId: started.jobId };
+	}
 	let startUrl = seed.startUrl;
 	let started = await startCrawl(auth, seed, startUrl);
 	if (

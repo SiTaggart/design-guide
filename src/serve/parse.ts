@@ -1,4 +1,4 @@
-import { DEFAULT_K, MAX_K, MIN_K } from "../config/instance.ts";
+import { MAX_K, MIN_K } from "../config/instance.ts";
 import { isSystemId, type SearchParams, type SystemId } from "../config/types.ts";
 
 export type ParseOk = { kind: "ok"; params: SearchParams };
@@ -12,10 +12,13 @@ type BodyFields = {
 	system?: unknown;
 };
 
-function clampK(value: unknown): number {
+function clampK(value: unknown): number | undefined {
+	if (value === undefined || value === null || value === "") {
+		return undefined;
+	}
 	const n = typeof value === "number" ? value : Number(value);
 	if (!Number.isFinite(n)) {
-		return DEFAULT_K;
+		return undefined;
 	}
 	return Math.min(MAX_K, Math.max(MIN_K, Math.trunc(n)));
 }

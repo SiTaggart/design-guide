@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Seed } from "../src/config/types.ts";
-import { crawlSeed, hitCrawlLimit, type CrawlRecord } from "../src/crawl/browser-run.ts";
+import { crawlSeed, crawlStoppedEarly, type CrawlRecord } from "../src/crawl/browser-run.ts";
 
 type JobPage = { records: CrawlRecord[]; cursor?: string | number };
 
@@ -111,7 +111,7 @@ describe("crawlSeed", () => {
 		expect(requests.some((request) => request.includes("status=skipped"))).toBe(false);
 		expect(requests.some((request) => request.includes("status=disallowed"))).toBe(false);
 		expect(requests.some((request) => request.includes("status=errored"))).toBe(false);
-		expect(hitCrawlLimit(outcome, outcome.records.length)).toBe(false);
+		expect(crawlStoppedEarly(outcome.status, outcome.counts.finished)).toBe(false);
 	});
 
 	it("retries once with the fallback start url when the primary start is rejected", async () => {
@@ -159,6 +159,6 @@ describe("crawlSeed", () => {
 		const outcome = await crawlSeed(auth, seed);
 		expect(outcome.status).toBe("cancelled_due_to_limits");
 		expect(outcome.counts).toEqual({ total: 5000, finished: 4200, skipped: 0, disallowed: 0, errored: 1 });
-		expect(hitCrawlLimit(outcome, 0)).toBe(true);
+		expect(crawlStoppedEarly(outcome.status, outcome.counts.finished)).toBe(true);
 	});
 });

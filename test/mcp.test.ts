@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SearchCall, WorkerEnv } from "../src/index/ai-search.ts";
 import { SYSTEM_IDS, type SearchChunk } from "../src/config/types.ts";
 import worker from "../src/worker.ts";
-import { fixtureChunks } from "./fixtures/chunks.ts";
+import { fixtureChunks, withRerank } from "./fixtures/chunks.ts";
 
 const GOLDEN_QUERY = "accessible combobox or listbox keyboard and focus guidance";
 
@@ -147,7 +147,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 		expect(listedResult.tools).toHaveLength(1);
 		expect(listedResult.tools[0].name).toBe("search_design_guidance");
 		expect(listedResult.tools[0].description).toBe(
-			"Search indexed design-system docs and return cited passages. Never invent passages or scores.",
+			"Search indexed design-system docs and return cited passages. The score is a ranking signal only. The calling agent decides relevance. Never invent passages or scores.",
 		);
 		expect(listedResult.tools[0].inputSchema.required).toEqual(["query"]);
 		expect(listedResult.tools[0].inputSchema.properties?.query?.type).toBe("string");
@@ -155,7 +155,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 		expect(listedResult.tools[0].inputSchema.properties?.k).toMatchObject({
 			type: "integer",
 			minimum: 1,
-			maximum: 20,
+			maximum: 50,
 		});
 	});
 
@@ -248,28 +248,34 @@ describe("streamable HTTP MCP on the search worker", () => {
 
 	it("drops a 0.59 hit from the tool text and keeps a 0.6 hit", async () => {
 		const extra: SearchChunk[] = [
-			{
-				text: "just below",
-				score: 0.59,
-				item: {
-					metadata: {
-						system: "govuk",
-						source: "GOV.UK",
-						source_url: "https://design-system.service.gov.uk/",
+			withRerank(
+				{
+					text: "just below",
+					score: 1,
+					item: {
+						metadata: {
+							system: "govuk",
+							source: "GOV.UK",
+							source_url: "https://design-system.service.gov.uk/",
+						},
 					},
 				},
-			},
-			{
-				text: "boundary keep",
-				score: 0.6,
-				item: {
-					metadata: {
-						system: "nhs",
-						source: "NHS",
-						source_url: "https://service-manual.nhs.uk/",
+				0.59,
+			),
+			withRerank(
+				{
+					text: "boundary keep",
+					score: 1,
+					item: {
+						metadata: {
+							system: "nhs",
+							source: "NHS",
+							source_url: "https://service-manual.nhs.uk/",
+						},
 					},
 				},
-			},
+				0.6,
+			),
 		];
 		const { env } = envWithIndex([...fixtureChunks, ...extra]);
 		const response = await mcpRpc(env, {

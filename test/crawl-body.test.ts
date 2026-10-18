@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { CRAWL_DEPTH, CRAWL_LIMIT } from "../src/config/instance.ts";
+import { BROWSER_CRAWL_DEPTH, BROWSER_CRAWL_LIMIT, CRAWL_RUNAWAY_PAGES } from "../src/config/instance.ts";
 import { seedById } from "../src/config/seed.ts";
 import type { Seed } from "../src/config/types.ts";
-import { crawlRequestBody, hitCrawlLimit } from "../src/crawl/browser-run.ts";
+import { crawlRequestBody, crawlStoppedEarly, reachedRunawayCeiling } from "../src/crawl/browser-run.ts";
 
 describe("crawlRequestBody", () => {
-	it("asks for one crawl whose depth does not exceed the page cap", () => {
+	it("asks Browser Run for its maximum page limit and depth", () => {
 		const body = crawlRequestBody(seedById("primer"), "https://primer.style/");
-		expect(CRAWL_LIMIT).toBeLessThanOrEqual(500);
-		expect(body.depth).toBeLessThanOrEqual(body.limit);
+		expect(BROWSER_CRAWL_LIMIT).toBe(100_000);
+		expect(BROWSER_CRAWL_DEPTH).toBe(100_000);
 		expect(body).toEqual({
 			url: "https://primer.style/",
 			source: "all",
-			limit: CRAWL_LIMIT,
-			depth: CRAWL_DEPTH,
+			limit: BROWSER_CRAWL_LIMIT,
+			depth: BROWSER_CRAWL_DEPTH,
 			formats: ["markdown"],
 			render: true,
 			crawlPurposes: ["search"],
@@ -69,24 +69,17 @@ describe("crawlRequestBody", () => {
 	});
 });
 
-describe("hitCrawlLimit", () => {
-	const counts = (finished: number) => ({ total: finished, finished, skipped: 0, disallowed: 0, errored: 0 });
-
-	it("is true when the crawl finished the page cap or more", () => {
-		expect(hitCrawlLimit({ status: "completed", counts: counts(500) }, 4)).toBe(true);
-		expect(hitCrawlLimit({ status: "completed", counts: counts(501) }, 4)).toBe(true);
+describe("crawl bounds", () => {
+	it("treats a limit cancellation or a full Browser Run result as an early stop", () => {
+		expect(crawlStoppedEarly("cancelled_due_to_limits", 300)).toBe(true);
+		expect(crawlStoppedEarly("completed", BROWSER_CRAWL_LIMIT)).toBe(true);
+		expect(crawlStoppedEarly("completed", 12)).toBe(false);
+		expect(crawlStoppedEarly("errored", BROWSER_CRAWL_LIMIT)).toBe(false);
 	});
 
-	it("is false when the crawl finished below the limit", () => {
-		expect(hitCrawlLimit({ status: "completed", counts: counts(499) }, 4)).toBe(false);
-		expect(hitCrawlLimit({ status: "completed", counts: counts(12) }, 12)).toBe(false);
-	});
-
-	it("is true when Cloudflare cancelled the job for limits", () => {
-		expect(hitCrawlLimit({ status: "cancelled_due_to_limits", counts: counts(300) }, 0)).toBe(true);
-	});
-
-	it("is true when the usable page count would fill the index to the limit", () => {
-		expect(hitCrawlLimit({ status: "completed", counts: counts(12) }, 500)).toBe(true);
+	it("treats the safety ceiling as incomplete", () => {
+		expect(CRAWL_RUNAWAY_PAGES).toBe(10_000);
+		expect(reachedRunawayCeiling(CRAWL_RUNAWAY_PAGES)).toBe(true);
+		expect(reachedRunawayCeiling(CRAWL_RUNAWAY_PAGES - 1)).toBe(false);
 	});
 });

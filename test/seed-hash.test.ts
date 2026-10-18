@@ -4,6 +4,7 @@ import { seedById } from "../src/config/seed.ts";
 import {
 	SEED_HASH,
 	catalogHash,
+	crawlBounds,
 	driftedSystems,
 	systemSeedHash,
 } from "../src/index/seed-hash.ts";
@@ -15,6 +16,14 @@ describe("seed hashes", () => {
 		expect(systemSeedHash(seedById("primer"))).toMatch(/^[a-f0-9]{64}$/);
 		expect(systemSeedHash(seedById("primer"))).toBe(systemSeedHash(seedById("primer")));
 		expect(systemSeedHash(seedById("primer"))).not.toBe(systemSeedHash(seedById("govuk")));
+	});
+
+	it("changes the per-seed hash when the crawl bounds change", () => {
+		const primer = seedById("primer");
+		const bounds = crawlBounds();
+		expect(systemSeedHash(primer, { ...bounds, runawayPages: bounds.runawayPages - 1 })).not.toBe(
+			systemSeedHash(primer, bounds),
+		);
 	});
 
 	it("changes the per-seed hash when source is renamed", () => {
