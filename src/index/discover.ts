@@ -361,7 +361,7 @@ async function continueDiscover(
 		const indexable = await queue.indexableCount(run.systemId);
 		const staged = await queue.stagedUrls(run.systemId);
 		if (indexable === 0 && staged.length === 0) {
-			return failDiscover(queue, auth, run, deps, "discover timed out");
+			return failDiscover(queue, auth, run, deps, iso, "discover timed out");
 		}
 		await cancelJob(auth, run, deps);
 		return finishDiscover(env, queue, auth, run, deps, iso, true);
@@ -376,7 +376,7 @@ async function continueDiscover(
 	} catch (error) {
 		const failures = await queue.notePollFailure(run.systemId, iso);
 		if (failures >= MAX_POLL_FAILURES) {
-			return failDiscover(queue, auth, run, deps, error instanceof Error ? error.message : String(error));
+			return failOrFinish(env, queue, auth, run, deps, iso, startFailureMessage(error));
 		}
 		return { action: "continued", systemId: run.systemId, accepted: 0 };
 	}
@@ -388,7 +388,7 @@ async function continueDiscover(
 		await queue.noteCapped(run.systemId, iso);
 	}
 	if (!capped && snapshot.status !== "completed") {
-		return failDiscover(queue, auth, run, deps, `crawl ended ${snapshot.status}`);
+		return failOrFinish(env, queue, auth, run, deps, iso, `crawl ended ${snapshot.status}`);
 	}
 	const seed = seedById(run.systemId);
 	let cursor = run.cursor;
@@ -435,7 +435,7 @@ async function continueDiscover(
 		} catch (error) {
 			const failures = await queue.notePollFailure(run.systemId, iso);
 			if (failures >= MAX_POLL_FAILURES) {
-				return failDiscover(queue, auth, run, deps, error instanceof Error ? error.message : String(error));
+				return failOrFinish(env, queue, auth, run, deps, iso, startFailureMessage(error));
 			}
 			return { action: "continued", systemId: run.systemId, accepted };
 		}
@@ -541,14 +541,40 @@ async function finishDiscover(
 	};
 }
 
+async function failOrFinish(
+	env: WorkerEnv,
+	queue: D1PageQueue,
+	auth: CrawlAuth,
+	run: DiscoverRun,
+	deps: DiscoverDeps,
+	iso: string,
+	error: string,
+): Promise<DiscoverTickResult> {
+	if (await hasStagedPages(queue, run.systemId)) {
+		await queue.noteAttempt(run.systemId, run.startUrl);
+		await cancelJob(auth, run, deps);
+		return finishDiscover(env, queue, auth, run, deps, iso, true);
+	}
+	return failDiscover(queue, auth, run, deps, iso, error);
+}
+
+async function hasStagedPages(queue: D1PageQueue, systemId: DiscoverRun["systemId"]): Promise<boolean> {
+	if ((await queue.indexableCount(systemId)) > 0) {
+		return true;
+	}
+	return (await queue.stagedUrls(systemId)).length > 0;
+}
+
 async function failDiscover(
 	queue: D1PageQueue,
 	auth: CrawlAuth,
 	run: DiscoverRun,
 	deps: DiscoverDeps,
+	iso: string,
 	error: string,
 ): Promise<DiscoverTickResult> {
 	await cancelJob(auth, run, deps);
+	await queue.noteCapDefer(run.systemId, iso);
 	await queue.clearRun(run.systemId);
 	return { action: "failed", systemId: run.systemId, trigger: run.trigger, error };
 }
