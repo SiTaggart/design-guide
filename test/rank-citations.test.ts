@@ -69,7 +69,57 @@ describe("rankCitations", () => {
 		expect(ranked.map((item) => item.score)).toEqual([0.7, 0.95, 0.93]);
 	});
 
-	it("prefers the named system's subject page over a higher rerank on another path", () => {
+	it("puts the named system's pages ahead of a higher score from any other system", () => {
+		const cloudscape = hit({
+			url: "https://cloudscape.design/components/table",
+			score: 0.7,
+			system: "cloudscape",
+			source: "Cloudscape",
+			passage: "Use a table to scan rows of data.",
+		});
+		const patternfly = hit({
+			url: "https://www.patternfly.org/components/table",
+			score: 0.95,
+			system: "patternfly",
+			source: "PatternFly",
+			passage: "Tables show large data sets.",
+		});
+		expect(rankCitations([patternfly, cloudscape], "cloudscape table guidance")[0]?.system).toBe("cloudscape");
+
+		const primer = hit({
+			url: "https://primer.style/product/components/dialog",
+			score: 0.66,
+			system: "primer",
+			source: "Primer",
+			passage: "Dialogs keep focus inside the modal.",
+		});
+		const other = hit({
+			url: "https://cloudscape.design/components/modal",
+			score: 0.97,
+			system: "cloudscape",
+			source: "Cloudscape",
+			passage: "A modal dialog traps focus.",
+		});
+		expect(rankCitations([other, primer], "primer dialog guidance")[0]?.system).toBe("primer");
+
+		const paste = hit({
+			url: "https://paste-dsys.com/components/button",
+			score: 0.7,
+			system: "paste",
+			source: "Paste",
+			passage: "Buttons show the actions available on a page.",
+		});
+		const foreign = hit({
+			url: "https://www.patternfly.org/components/button",
+			score: 0.99,
+			system: "patternfly",
+			source: "PatternFly",
+			passage: "A button starts an action.",
+		});
+		expect(rankCitations([foreign, paste], "how does Paste say to use buttons")[0]?.system).toBe("paste");
+	});
+
+	it("orders one system's pages by reranker score when the query names that system", () => {
 		const wizard = hit({
 			url: "https://paste-dsys.com/page-templates/wizard",
 			score: 0.98,
