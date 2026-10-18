@@ -728,6 +728,93 @@ describe("held index clock", () => {
 		expect(rows.results.every((row) => row.last_indexed === old)).toBe(true);
 		expect(selects).toBe(1);
 	});
+
+	it("uploads changed markdown under a new key while a cap defer holds lastIndexed", async () => {
+		const pageQueue = await queue();
+		const url = "https://paste-dsys.com/components/button";
+		const old = "2026-01-02T00:00:00.000Z";
+		const oldKey = pageItemKey("paste", url, 1, old);
+		await pageQueue.enqueueUpsert([{ systemId: "paste", url, kind: "seed" }], old);
+		await pageQueue.complete({ systemId: "paste", url }, { lastCrawled: old, lastIndexed: old }, oldKey);
+		await pageQueue.enqueueUpsert([{ systemId: "paste", url, kind: "reindex" }], NOW);
+		await pageQueue.noteCapDefer("paste", old);
+		type Stored = { id: string; key: string; body: string; metadata: Record<string, string> };
+		const items: Stored[] = [
+			{
+				id: "old-id",
+				key: oldKey,
+				body: "# old button",
+				metadata: {
+					system: "paste",
+					source: "Paste",
+					source_url: url,
+					lastCrawled: old,
+					lastIndexed: old,
+				},
+			},
+		];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL, init?: RequestInit) => {
+				const target = new URL(typeof input === "string" ? input : input.toString());
+				const method = init?.method ?? "GET";
+				if (method === "GET" && target.pathname.endsWith("/instances/design-guide")) {
+					return json(200, { result: { id: "design-guide" } });
+				}
+				if (method === "POST" && target.pathname.endsWith("/items")) {
+					const form = init?.body as FormData;
+					const file = form.get("file") as File;
+					const key = file.name;
+					const body = await file.text();
+					const metadata = JSON.parse(String(form.get("metadata"))) as Record<string, string>;
+					const existing = items.find((item) => item.key === key);
+					if (existing) {
+						return json(409, { errors: [{ code: 7042, message: "item_key_already_exist" }] });
+					}
+					items.push({ id: "new-id", key, body, metadata });
+					return json(200, { result: { id: "new-id", key } });
+				}
+				if (method === "GET" && target.pathname.endsWith("/items")) {
+					const lookup = target.searchParams.get("key");
+					const result = lookup ? items.filter((item) => item.key === lookup) : items;
+					return json(200, {
+						result,
+						result_info: { count: result.length, total_count: result.length },
+					});
+				}
+				if (method === "DELETE" && target.pathname.includes("/items/")) {
+					const id = decodeURIComponent(target.pathname.slice(target.pathname.lastIndexOf("/") + 1));
+					const index = items.findIndex((item) => item.id === id);
+					if (index >= 0) {
+						items.splice(index, 1);
+					}
+					return json(200, { success: true });
+				}
+				return json(500, { errors: [{ message: `unexpected ${method} ${target}` }] });
+			}),
+		);
+		const counts = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => "# new button",
+		});
+		expect(counts).toEqual({ claimed: 1, indexed: 1, failed: 0 });
+		expect(items.map((item) => item.body)).toEqual(["# new button"]);
+		expect(items[0]?.key).not.toBe(oldKey);
+		expect(items[0]?.metadata.lastIndexed).toBe(old);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, last_indexed, item_key FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; last_indexed: string; item_key: string }>();
+		expect(row).toEqual({ status: "done", last_indexed: old, item_key: items[0]?.key });
+		await deleteOrphanDocs(
+			{ accountId: "acct", apiToken: "token", instanceId: "design-guide" },
+			"paste",
+			[{ url, itemKey: "paste/page/previous-run.md" }],
+		);
+		expect(items).toEqual([]);
+	});
 });
 
 describe("continuous fill", () => {
