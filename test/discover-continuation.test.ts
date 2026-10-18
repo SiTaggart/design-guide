@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { CRAWL_POLL_DEADLINE_MS } from "../src/crawl/browser-run.ts";
 import { discoverTick } from "../src/index/discover.ts";
 import { D1PageQueue } from "../src/index/page-queue.ts";
 import { memoryD1 } from "./helpers/d1.ts";
@@ -409,5 +410,202 @@ describe("discover continuation", () => {
 		expect(await pageQueue.seedRefreshes()).toEqual({});
 		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
 		expect(await kv.get("seedHash/paste")).toBeNull();
+	});
+
+	it("keeps staged pages when the crawl deadline passes and does not record a refresh", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const startedAt = new Date(Date.parse(NOW) - CRAWL_POLL_DEADLINE_MS - 60_000).toISOString();
+		const kept = "https://paste-dsys.com/components/form";
+		const also = "https://paste-dsys.com/components/input";
+		const removed = "https://paste-dsys.com/components/removed";
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-deadline",
+			startUrl: "https://paste-dsys.com/",
+			cursor: "done",
+			pollFailures: 0,
+			startedAt,
+			now: startedAt,
+		});
+		await pageQueue.stageUrl("paste", kept);
+		await pageQueue.stageUrl("paste", also);
+		await pageQueue.stageIndexable("paste", kept);
+		await pageQueue.stageIndexable("paste", also);
+		await pageQueue.enqueueUpsert([{ systemId: "paste", url: removed, kind: "seed" }], startedAt);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => {
+				throw new Error("a deadline must not poll");
+			},
+			page: async () => {
+				throw new Error("a deadline must not page");
+			},
+			start: async () => {
+				throw new Error("a deadline must not start another crawl");
+			},
+			deleteDocs: async () => {
+				throw new Error("a deadline must not prune");
+			},
+			cancel: async () => undefined,
+		});
+		expect(result).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			incomplete: true,
+			pruned: [],
+		});
+		expect(await pageQueue.seedRefreshes()).toEqual({});
+		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
+		expect(await pageQueue.running()).toBeNull();
+		const queued = await db
+			.prepare("SELECT url FROM page_work WHERE system_id = ? ORDER BY url ASC")
+			.bind("paste")
+			.all<{ url: string }>();
+		expect(queued.results?.map((row) => row.url)).toEqual([also, kept, removed]);
+	});
+
+	it("ends a run that cannot start any frontier url within a bounded number of ticks", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const kept = "https://paste-dsys.com/components/form";
+		const also = "https://paste-dsys.com/components/input";
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-storm",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await pageQueue.saveCursor("paste", "done", NOW);
+		await pageQueue.stageUrl("paste", kept);
+		await pageQueue.stageUrl("paste", also);
+		await pageQueue.stageIndexable("paste", kept);
+		await pageQueue.stageIndexable("paste", also);
+		await pageQueue.addFrontier(
+			"paste",
+			Array.from({ length: 10 }, (_, index) => `https://paste-dsys.com/components/fail-${index}`),
+		);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const deps = {
+			poll: async () => ({ status: "completed" as const, finished: 4, total: 4 }),
+			page: async () => ({ records: [], cursor: null }),
+			start: async (_auth: unknown, _seed: unknown, startUrl?: string) => {
+				throw new Error(`crawl start for ${startUrl} failed 429: slow down`);
+			},
+			deleteDocs: async () => {
+				throw new Error("a skipped chain must not prune");
+			},
+			cancel: async () => undefined,
+		};
+		let result: Awaited<ReturnType<typeof discoverTick>> = { action: "continued", systemId: "paste", accepted: 0 };
+		for (let tick = 0; tick < 20; tick += 1) {
+			result = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+			if (result.action === "enqueued" || result.action === "failed") {
+				break;
+			}
+		}
+		expect(result).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			incomplete: true,
+			pruned: [],
+		});
+		expect(await pageQueue.seedRefreshes()).toEqual({});
+		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
+		const queued = await db
+			.prepare("SELECT url FROM page_work WHERE system_id = ? ORDER BY url ASC")
+			.bind("paste")
+			.all<{ url: string }>();
+		expect(queued.results?.map((row) => row.url)).toEqual([also, kept]);
+	});
+
+	it("ends a 401 follow-up start in that tick and keeps the staged pages", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const kept = "https://paste-dsys.com/components/form";
+		const also = "https://paste-dsys.com/components/input";
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-auth",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await pageQueue.saveCursor("paste", "done", NOW);
+		await pageQueue.stageUrl("paste", kept);
+		await pageQueue.stageUrl("paste", also);
+		await pageQueue.stageIndexable("paste", kept);
+		await pageQueue.stageIndexable("paste", also);
+		await pageQueue.addFrontier("paste", [
+			"https://paste-dsys.com/components/fail-auth",
+			"https://paste-dsys.com/components/later",
+		]);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const logs: string[] = [];
+		const spy = vi.spyOn(console, "log").mockImplementation((line?: unknown) => {
+			logs.push(String(line));
+		});
+		const starts: string[] = [];
+		try {
+			const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+				poll: async () => ({ status: "completed", finished: 2, total: 2 }),
+				page: async () => ({ records: [], cursor: null }),
+				start: async (_auth, _seed, startUrl) => {
+					const url = startUrl ?? "";
+					starts.push(url);
+					throw new Error(`crawl start for ${url} failed 401: unauthorized`);
+				},
+				deleteDocs: async () => {
+					throw new Error("an unauthorized start must not prune");
+				},
+				cancel: async () => undefined,
+			});
+			expect(starts).toEqual(["https://paste-dsys.com/components/fail-auth"]);
+			expect(result).toMatchObject({
+				action: "enqueued",
+				systemId: "paste",
+				incomplete: true,
+				pruned: [],
+			});
+			expect(logs.join("\n")).toContain("401");
+			expect(await pageQueue.seedRefreshes()).toEqual({});
+			expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
+			const queued = await db
+				.prepare("SELECT url FROM page_work WHERE system_id = ? ORDER BY url ASC")
+				.bind("paste")
+				.all<{ url: string }>();
+			expect(queued.results?.map((row) => row.url)).toEqual([also, kept]);
+		} finally {
+			spy.mockRestore();
+		}
 	});
 });
