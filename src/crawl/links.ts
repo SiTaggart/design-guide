@@ -13,6 +13,19 @@ function matchesPattern(url: string, pattern: string): boolean {
 	return globToRegExp(pattern).test(url);
 }
 
+export function isLlmsIndexFile(url: string): boolean {
+	try {
+		const segment = new URL(url).pathname.split("/").filter(Boolean).pop() ?? "";
+		return /^llms.*\.txt$/i.test(segment);
+	} catch {
+		return false;
+	}
+}
+
+export function pageKey(url: string): string {
+	return canonicalLink(url, url) ?? url;
+}
+
 export function canonicalLink(value: string, base: string): string | null {
 	try {
 		const url = new URL(value, base);
@@ -62,13 +75,13 @@ export function frontierLinks(markdown: string, pageUrl: string, seed: Seed): st
 	for (const match of raw) {
 		const cleaned = match.replace(/[),.;]+$/g, "");
 		const link = canonicalLink(cleaned, pageUrl);
-		if (link && linkAllowed(link, seed)) {
+		if (link && linkAllowed(link, seed) && !isLlmsIndexFile(link)) {
 			found.add(link);
 		}
 	}
 	for (const match of markdown.matchAll(/\[[^\]]*]\(([^)\s]+)\)/g)) {
 		const link = canonicalLink(match[1] ?? "", pageUrl);
-		if (link && linkAllowed(link, seed)) {
+		if (link && linkAllowed(link, seed) && !isLlmsIndexFile(link)) {
 			found.add(link);
 		}
 	}

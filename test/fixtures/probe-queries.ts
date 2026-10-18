@@ -37,7 +37,8 @@ export const PROBE_QUERIES: readonly ProbeQuery[] = [
 		id: "h-cloudscape-table",
 		query: "cloudscape table guidance",
 		firstSystem: "cloudscape",
-		firstUrl: "https://cloudscape.design/llms.txt",
+		firstUrl: "https://cloudscape.design/get-started/for-developers/ai-tools-support/",
+		absentUrl: "https://cloudscape.design/llms.txt",
 	},
 	{
 		id: "h-primer-dialog",

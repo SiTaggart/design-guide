@@ -1,4 +1,5 @@
 import { SYSTEM_IDS, isSystemId, type SystemId } from "../config/types.ts";
+import { pageKey } from "../crawl/links.ts";
 
 export const DRAIN_LIMIT = 100;
 export const MAX_ATTEMPTS = 5;
@@ -72,6 +73,12 @@ CREATE TABLE IF NOT EXISTS cap_defer (
 );
 
 CREATE TABLE IF NOT EXISTS discover_frontier (
+  system_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  PRIMARY KEY (system_id, url)
+);
+
+CREATE TABLE IF NOT EXISTS discover_attempt (
   system_id TEXT NOT NULL,
   url TEXT NOT NULL,
   PRIMARY KEY (system_id, url)
@@ -596,6 +603,7 @@ export class D1PageQueue implements PageQueue {
 			run.now,
 			run.now,
 		);
+		await this.noteAttempt(run.systemId, run.startUrl);
 	}
 
 	async saveCursor(systemId: SystemId, cursor: string | null, now: string): Promise<void> {
@@ -627,6 +635,7 @@ export class D1PageQueue implements PageQueue {
 		await run(this.db, "DELETE FROM discover_indexable WHERE system_id = ?", systemId);
 		await run(this.db, "DELETE FROM discover_url WHERE system_id = ?", systemId);
 		await run(this.db, "DELETE FROM discover_frontier WHERE system_id = ?", systemId);
+		await run(this.db, "DELETE FROM discover_attempt WHERE system_id = ?", systemId);
 		await run(this.db, "DELETE FROM discover_run WHERE system_id = ?", systemId);
 	}
 
@@ -641,26 +650,71 @@ export class D1PageQueue implements PageQueue {
 			now,
 			systemId,
 		);
+		await this.noteAttempt(systemId, startUrl);
+	}
+
+	async noteAttempt(systemId: SystemId, url: string): Promise<void> {
+		await run(
+			this.db,
+			"INSERT INTO discover_attempt (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
+			systemId,
+			url,
+		);
 	}
 
 	async addFrontier(systemId: SystemId, urls: readonly string[]): Promise<void> {
-		for (const url of urls) {
+		const unique = [...new Set(urls)];
+		if (unique.length === 0) {
+			return;
+		}
+		const fresh: string[] = [];
+		for (const group of chunks(unique, 80)) {
+			const existing = await all<{ url: string }>(
+				this.db,
+				`SELECT url FROM discover_frontier WHERE system_id = ? AND url IN (${group.map(() => "?").join(",")})`,
+				systemId,
+				...group,
+			);
+			const have = new Set(existing.map((row) => row.url));
+			for (const url of group) {
+				if (!have.has(url)) {
+					fresh.push(url);
+				}
+			}
+		}
+		for (const group of chunks(fresh, 40)) {
+			const values = group.map(() => "(?, ?)").join(", ");
+			const params: unknown[] = [];
+			for (const url of group) {
+				params.push(systemId, url);
+			}
 			await run(
 				this.db,
-				"INSERT INTO discover_frontier (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
-				systemId,
-				url,
+				`INSERT INTO discover_frontier (system_id, url) VALUES ${values} ON CONFLICT DO NOTHING`,
+				...params,
 			);
 		}
 	}
 
 	async nextFrontier(systemId: SystemId, seen: ReadonlySet<string>): Promise<string | null> {
+		const blocked = new Set<string>();
+		for (const url of seen) {
+			blocked.add(pageKey(url));
+		}
+		const attempted = await all<{ url: string }>(
+			this.db,
+			"SELECT url FROM discover_attempt WHERE system_id = ?",
+			systemId,
+		);
+		for (const row of attempted) {
+			blocked.add(pageKey(row.url));
+		}
 		const rows = await all<{ url: string }>(
 			this.db,
 			"SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC",
 			systemId,
 		);
-		return rows.find((row) => !seen.has(row.url))?.url ?? null;
+		return rows.find((row) => !blocked.has(pageKey(row.url)))?.url ?? null;
 	}
 
 	async indexableCount(systemId: SystemId): Promise<number> {
@@ -830,6 +884,14 @@ export class D1PageQueue implements PageQueue {
 			now,
 		);
 	}
+}
+
+function chunks<T>(values: readonly T[], size: number): T[][] {
+	const groups: T[][] = [];
+	for (let index = 0; index < values.length; index += size) {
+		groups.push(values.slice(index, index + size));
+	}
+	return groups;
 }
 
 async function runSql(db: D1Database, sql: string, ...params: unknown[]): Promise<void> {

@@ -10,6 +10,7 @@ import {
 	type CrawlOutcome,
 	type CrawlRecord,
 } from "../crawl/browser-run.ts";
+import { isLlmsIndexFile } from "../crawl/links.ts";
 import {
 	deleteItem,
 	ensureInstance,
@@ -60,6 +61,9 @@ function isSystemGenerationKey(key: string, system: SystemId, generation: string
 }
 
 export function fitsItem(record: CrawlRecord, seed: Seed): boolean {
+	if (isLlmsIndexFile(record.url)) {
+		return false;
+	}
 	const markdown = record.markdown ?? "";
 	if (!markdown.trim() || new TextEncoder().encode(markdown).byteLength > MAX_ITEM_BYTES) {
 		return false;

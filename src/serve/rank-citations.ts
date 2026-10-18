@@ -1,6 +1,7 @@
 import { MAX_K, MIN_SEARCH_SCORE } from "../config/instance.ts";
 import { SEEDS } from "../config/seed.ts";
 import type { Citation } from "../config/types.ts";
+import { isLlmsIndexFile } from "../crawl/links.ts";
 
 const REFERENCE_SEGMENT = /^(api|props|properties|tokens|design-tokens|changelog)$/;
 
@@ -80,7 +81,7 @@ export function rankCitations(citations: readonly Citation[], query: string, k?:
 	const limit = k === undefined ? MAX_K : Math.min(MAX_K, Math.max(1, k));
 	const best = new Map<string, Citation>();
 	for (const hit of citations) {
-		if (hit.score < MIN_SEARCH_SCORE) {
+		if (hit.score < MIN_SEARCH_SCORE || isLlmsIndexFile(hit.url)) {
 			continue;
 		}
 		const key = normalizePageUrl(hit.url);

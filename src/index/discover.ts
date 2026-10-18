@@ -412,7 +412,7 @@ async function continueDiscover(
 	if (cursor !== "done") {
 		return { action: "continued", systemId: run.systemId, accepted };
 	}
-	if (capped && !runaway) {
+	if (!runaway) {
 		const seen = new Set(await queue.stagedUrls(run.systemId));
 		const next = await queue.nextFrontier(run.systemId, seen);
 		if (next) {
