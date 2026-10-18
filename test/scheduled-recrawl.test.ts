@@ -185,6 +185,74 @@ describe("scheduled recrawl", () => {
 	it("does not drop pages or move the 30-day clock when a recrawl follow-up start fails", async () => {
 		await failedFollowUpRecrawl();
 	});
+
+	it("starts a permanently capped system at most four times in seven days and still discovers another drifted system", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		await queue.ensure();
+		const kv = memoryKV();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		for (const id of SYSTEM_IDS) {
+			if (id === "paste" || id === "primer") {
+				continue;
+			}
+			await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
+			await indexed(queue, id, `${seedById(id).startUrl}page`, ago(1));
+			await indexed(queue, id, `${seedById(id).startUrl}other`, ago(1));
+		}
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([]);
+		vi.spyOn(itemsRest, "deleteItem").mockResolvedValue();
+		vi.spyOn(itemsRest, "deleteItemByKey").mockResolvedValue();
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({ id: "fresh", key: "page.md" });
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string) => {
+				if (String(input).includes("/browser-rendering/markdown")) {
+					return json(200, { result: "# page" });
+				}
+				return json(200, { result: {} });
+			}),
+		);
+		const starts: string[] = [];
+		const deps = {
+			start: async (_auth: unknown, seed: { id: string; startUrl: string }) => {
+				starts.push(seed.id);
+				return { startUrl: seed.startUrl, jobId: `job-${seed.id}-${starts.length}` };
+			},
+			poll: async (_auth: unknown, jobId: string) => {
+				if (jobId.startsWith("job-paste-")) {
+					return { status: "cancelled_due_to_limits" as const, finished: 100_000, total: 100_000 };
+				}
+				return { status: "completed" as const, finished: 2, total: 2 };
+			},
+			page: async (_auth: unknown, jobId: string) => {
+				const system = jobId.startsWith("job-paste-") ? "paste" : "primer";
+				const origin = seedById(system).startUrl.replace(/\/$/, "");
+				return {
+					records: [
+						{ url: `${origin}/components/one`, status: "completed", markdown: "# one" },
+						{ url: `${origin}/components/two`, status: "completed", markdown: "# two" },
+					],
+					cursor: null,
+				};
+			},
+			cancel: async () => undefined,
+		};
+		const week = 7 * 24 * HOUR_MS;
+		for (let elapsed = 0; elapsed <= week; elapsed += HOUR_MS) {
+			await fillTick(env, DRIFT_CRON, new Date(Date.parse(NOW) + elapsed), deps);
+		}
+		const pasteStarts = starts.filter((id) => id === "paste");
+		expect(pasteStarts.length).toBeGreaterThan(1);
+		expect(pasteStarts.length).toBeLessThanOrEqual(4);
+		expect(starts).toContain("primer");
+	});
 });
 
 async function catalog(input: { pasteDays: number }): Promise<{ env: ReturnType<typeof envWithIndex>["env"]; queue: D1PageQueue }> {
