@@ -366,6 +366,57 @@ describe("discover continuation", () => {
 		expect((await pageQueue.running())?.jobId).toBe("job-good");
 	});
 
+	it("keeps staged pages when a poll error follows repeated follow-up start failures", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-shared-counter",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await pageQueue.saveCursor("paste", "done", NOW);
+		await pageQueue.stageIndexable("paste", "https://paste-dsys.com/components/form");
+		await pageQueue.stageIndexable("paste", "https://paste-dsys.com/components/input");
+		await pageQueue.addFrontier("paste", ["https://paste-dsys.com/components/fail"]);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		let polls = 0;
+		const deps = {
+			poll: async () => {
+				polls += 1;
+				if (polls > 4) {
+					throw new Error("crawl poll failed 500: temporary");
+				}
+				return { status: "completed" as const, finished: 4, total: 4 };
+			},
+			page: async () => ({ records: [], cursor: null }),
+			start: async (_auth: unknown, _seed: unknown, startUrl?: string) => {
+				throw new Error(`crawl start for ${startUrl} failed 429: slow down`);
+			},
+			cancel: async () => undefined,
+		};
+		for (let attempt = 0; attempt < 4; attempt += 1) {
+			const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+			expect(result).toMatchObject({ action: "continued", systemId: "paste" });
+		}
+		const polled = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		expect(polled).toMatchObject({ action: "continued", systemId: "paste" });
+		expect(polled).not.toMatchObject({ action: "failed" });
+		expect(await pageQueue.indexableCount("paste")).toBe(2);
+		expect(await pageQueue.running()).not.toBeNull();
+	});
+
 	it("does not record a seed refresh when the run hits the page ceiling", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
