@@ -172,6 +172,59 @@ describe("rankCitations", () => {
 		)[0]?.system).toBe("primer");
 	});
 
+	it("lets a higher-scoring Primer button page lose to the Paste button page", () => {
+		const primer = hit({
+			url: "https://primer.style/product/components/button",
+			score: 0.99,
+			system: "primer",
+			source: "Primer",
+			passage: "Use a button to start an action.",
+		});
+		const paste = hit({
+			url: "https://paste-dsys.com/components/button",
+			score: 0.7,
+			system: "paste",
+			source: "Paste",
+			passage: "Buttons show the actions available on a page.",
+		});
+		const ranked = rankCitations([primer, paste], "Paste button guidance");
+		expect(ranked[0]?.system).toBe("paste");
+		expect(ranked[0]?.url).toBe(paste.url);
+	});
+
+	it("does not cite an llms.txt index file", () => {
+		const index = hit({
+			url: "https://cloudscape.design/llms.txt",
+			score: 0.99,
+			system: "cloudscape",
+			source: "Cloudscape",
+			passage: "Cloudscape component index",
+		});
+		const full = hit({
+			url: "https://cloudscape.design/llms-full.txt",
+			score: 0.98,
+			system: "cloudscape",
+			source: "Cloudscape",
+			passage: "Cloudscape full index",
+		});
+		const about = hit({
+			url: "https://cloudscape.design/gen-ai/ai-tools/llms-txt-files/",
+			score: 0.85,
+			system: "cloudscape",
+			source: "Cloudscape",
+			passage: "How to use the llms.txt index.",
+		});
+		const table = hit({
+			url: "https://cloudscape.design/components/table/",
+			score: 0.7,
+			system: "cloudscape",
+			source: "Cloudscape",
+			passage: "A table displays rows of data.",
+		});
+		const ranked = rankCitations([index, full, about, table], "cloudscape table guidance");
+		expect(ranked.map((item) => item.url)).toEqual([about.url, table.url]);
+	});
+
 	it("drops a fused score of 1 when the reranker score is below the floor", () => {
 		const ranked = rankCitations(
 			[hit({ url: "https://paste-dsys.com/components/form", score: 0.01, passage: "junk" })],

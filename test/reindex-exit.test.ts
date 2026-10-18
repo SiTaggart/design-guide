@@ -53,6 +53,12 @@ describe("fitsItem", () => {
 	it("does not apply suffix filters to other seeds", () => {
 		expect(fitsItem(page("https://primer.style/components/button"), primer)).toBe(true);
 	});
+
+	it("does not index an llms.txt file", () => {
+		expect(fitsItem(page("https://cloudscape.design/llms.txt"), primer)).toBe(false);
+		expect(fitsItem(page("https://cloudscape.design/llms-full.txt"), primer)).toBe(false);
+		expect(fitsItem(page("https://cloudscape.design/gen-ai/ai-tools/llms-txt-files/"), primer)).toBe(true);
+	});
 });
 
 describe("isDroppedSystemKey", () => {
