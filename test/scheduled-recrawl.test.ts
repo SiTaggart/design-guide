@@ -325,6 +325,81 @@ describe("scheduled recrawl", () => {
 		expect(roots.filter((id) => id === "paste").length).toBeGreaterThan(1);
 		expect(roots.filter((id) => id === "paste").length).toBeLessThanOrEqual(4);
 	});
+
+	it("clears the backoff streak on a complete run so the next incomplete waits one hour", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		await queue.ensure();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		for (const id of SYSTEM_IDS) {
+			if (id === "paste") {
+				continue;
+			}
+			await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
+			await indexed(queue, id, `${seedById(id).startUrl}page`, ago(1));
+			await indexed(queue, id, `${seedById(id).startUrl}other`, ago(1));
+		}
+		let capped = true;
+		const starts: string[] = [];
+		const deps = {
+			start: async (_auth: unknown, seed: { id: string; startUrl: string }) => {
+				starts.push(seed.id);
+				return { startUrl: seed.startUrl, jobId: `job-${starts.length}` };
+			},
+			poll: async () =>
+				capped
+					? { status: "cancelled_due_to_limits" as const, finished: 100_000, total: 100_000 }
+					: { status: "completed" as const, finished: 2, total: 2 },
+			page: async () => ({
+				records: [
+					{ url: "https://paste-dsys.com/components/one", status: "completed", markdown: "# one" },
+					{ url: "https://paste-dsys.com/components/two", status: "completed", markdown: "# two" },
+				],
+				cursor: null,
+			}),
+			cancel: async () => undefined,
+		};
+		const tick = async (elapsed: number) => {
+			await discoverTick(env, DRIFT_CRON, new Date(Date.parse(NOW) + elapsed), deps);
+			await db.prepare("UPDATE page_work SET status = 'done', claimed_at = NULL WHERE system_id = 'paste'").run();
+		};
+		const streak = async () => {
+			const row = await db
+				.prepare("SELECT streak FROM cap_defer WHERE system_id = ?")
+				.bind("paste")
+				.first<{ streak: number }>();
+			return row?.streak ?? null;
+		};
+		await tick(0);
+		await tick(HOUR_MS);
+		expect(starts).toEqual(["paste"]);
+		expect(await streak()).toBe(1);
+		await tick(2 * HOUR_MS);
+		await tick(3 * HOUR_MS);
+		expect(starts).toEqual(["paste", "paste"]);
+		expect(await streak()).toBe(2);
+		await tick(4 * HOUR_MS);
+		expect(starts).toEqual(["paste", "paste"]);
+		capped = false;
+		await tick(9 * HOUR_MS);
+		await tick(10 * HOUR_MS);
+		expect(starts).toEqual(["paste", "paste", "paste"]);
+		expect(await streak()).toBeNull();
+		capped = true;
+		await tick(11 * HOUR_MS);
+		await tick(12 * HOUR_MS);
+		expect(starts).toEqual(["paste", "paste", "paste", "paste"]);
+		expect(await streak()).toBe(1);
+		await tick(12 * HOUR_MS + 30 * 60 * 1000);
+		expect(starts).toEqual(["paste", "paste", "paste", "paste"]);
+		await tick(13 * HOUR_MS);
+		expect(starts).toEqual(["paste", "paste", "paste", "paste", "paste"]);
+	});
 });
 
 async function catalog(input: { pasteDays: number }): Promise<{ env: ReturnType<typeof envWithIndex>["env"]; queue: D1PageQueue }> {
