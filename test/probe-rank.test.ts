@@ -24,11 +24,8 @@ describe("held-out queries and paraphrases", () => {
 			expect(row.query).toBe(spec.query);
 			const ranked = rankCitations(row.hits, spec.query);
 			expect(ranked.length).toBeGreaterThan(0);
-			const underFloor = ranked.filter((hit) => hit.score < MIN_SEARCH_SCORE);
-			expect(underFloor.length).toBeLessThanOrEqual(spec.firstUrl === undefined ? 0 : 1);
-			if (underFloor.length === 1) {
-				expect(underFloor[0]).toBe(ranked[0]);
-			}
+			expect(ranked.filter((hit) => hit.score < MIN_SEARCH_SCORE).map((hit) => hit.url)).toEqual([]);
+			expect(ranked.every((hit) => hit.score >= MIN_SEARCH_SCORE)).toBe(true);
 			if (spec.minSystems !== undefined) {
 				expect(new Set(ranked.map((hit) => hit.system)).size).toBeGreaterThanOrEqual(spec.minSystems);
 			}
@@ -48,6 +45,24 @@ describe("held-out queries and paraphrases", () => {
 			}
 		});
 	}
+
+	it("records the Paste button page at 0.458 and does not return it", () => {
+		const row = measured.get("p-paste-buttons");
+		if (!row) {
+			throw new Error("missing measured candidates for p-paste-buttons");
+		}
+		const ranked = rankCitations(row.hits, row.query);
+		expect(ranked.filter((hit) => hit.score < MIN_SEARCH_SCORE).map((hit) => hit.url)).toEqual([]);
+		expect(ranked.every((hit) => hit.score >= MIN_SEARCH_SCORE)).toBe(true);
+		const button = Math.max(
+			...row.hits
+				.filter((hit) => hit.url.replace(/\/$/, "") === "https://paste-dsys.com/components/button")
+				.map((hit) => hit.score),
+		);
+		expect(button).toBeCloseTo(0.458, 3);
+		expect(button).toBeLessThan(MIN_SEARCH_SCORE);
+		expect(ranked.some((hit) => hit.url.replace(/\/$/, "") === "https://paste-dsys.com/components/button")).toBe(false);
+	});
 
 	it("does not keep a hand-written query word list", () => {
 		const source = readFileSync("src/serve/rank-citations.ts", "utf8");

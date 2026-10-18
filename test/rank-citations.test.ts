@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Citation } from "../src/config/types.ts";
+import { MIN_SEARCH_SCORE } from "../src/config/instance.ts";
 import { isReferencePage, normalizePageUrl, rankCitations } from "../src/serve/rank-citations.ts";
 
 function hit(partial: Partial<Citation> & Pick<Citation, "url" | "score">): Citation {
@@ -284,6 +285,27 @@ describe("rankCitations", () => {
 		});
 		expect(rankCitations([wizard, button], "Paste buttons guidance")[0]?.url).toBe(button.url);
 		expect(rankCitations([wizard, button], "Paste guidance for buttons")[0]?.url).toBe(button.url);
+	});
+
+	it("never returns a hit below the floor, even when the path and the system name match", () => {
+		const button = hit({
+			url: "https://paste-dsys.com/components/button",
+			score: 0.458,
+			passage: "Buttons show the actions available on a page.",
+		});
+		const wizard = hit({
+			url: "https://paste-dsys.com/page-templates/wizard",
+			score: 0.833,
+			passage: "The wizard includes a Button.",
+		});
+		for (const query of ["how does Paste say to use buttons", "Paste buttons guidance"]) {
+			const ranked = rankCitations([button, wizard], query);
+			expect(ranked.map((item) => ({ url: item.url, score: item.score }))).toEqual([
+				{ url: wizard.url, score: wizard.score },
+			]);
+			expect(ranked.every((item) => item.score >= MIN_SEARCH_SCORE)).toBe(true);
+		}
+		expect(rankCitations([button], "Paste buttons guidance")).toEqual([]);
 	});
 
 	it("drops a fused score of 1 when the reranker score is below the floor", () => {

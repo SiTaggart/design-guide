@@ -194,6 +194,54 @@ describe("HTTP search against a fixture index", () => {
 		expect(await response.json()).toEqual({ results: fixtureCitations });
 	});
 
+	it("omits a named path match that scores below the floor", async () => {
+		const chunks: SearchChunk[] = [
+			withRerank(
+				{
+					text: "Buttons show the actions available on a page.",
+					score: 1,
+					item: {
+						metadata: {
+							system: "paste",
+							source: "Paste",
+							source_url: "https://paste-dsys.com/components/button",
+						},
+					},
+				},
+				0.458,
+			),
+			withRerank(
+				{
+					text: "The wizard includes a Button.",
+					score: 1,
+					item: {
+						metadata: {
+							system: "paste",
+							source: "Paste",
+							source_url: "https://paste-dsys.com/page-templates/wizard",
+						},
+					},
+				},
+				0.833,
+			),
+		];
+		const { env } = envWithIndex(chunks);
+		const response = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: "Paste buttons guidance" }),
+			}),
+			env,
+		);
+		expect(response.status).toBe(200);
+		const body = (await response.json()) as { results: { url: string; score: number }[] };
+		expect(body.results.map((hit) => ({ url: hit.url, score: hit.score }))).toEqual([
+			{ url: "https://paste-dsys.com/page-templates/wizard", score: 0.833 },
+		]);
+		expect(body.results.every((hit) => hit.score >= MIN_SEARCH_SCORE)).toBe(true);
+	});
+
 	it("returns an empty results list when every hit scores below 0.6", async () => {
 		const low = fixtureChunks.map((chunk) => withRerank({ ...chunk, score: 1 }, 0.59));
 		const { env } = envWithIndex(low);
