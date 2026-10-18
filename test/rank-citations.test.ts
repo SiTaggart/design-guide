@@ -225,6 +225,52 @@ describe("rankCitations", () => {
 		expect(ranked.map((item) => item.url)).toEqual([about.url, table.url]);
 	});
 
+	it("puts the named component's own page ahead of a higher score from the same system", () => {
+		const wizard = hit({
+			url: "https://paste-dsys.com/page-templates/wizard",
+			score: 0.984,
+			passage: "The wizard includes a Button.",
+		});
+		const button = hit({
+			url: "https://paste-dsys.com/components/button",
+			score: 0.771,
+			passage: "Buttons show the actions available on a page.",
+		});
+		expect(rankCitations([wizard, button], "Paste button guidance")[0]?.url).toBe(button.url);
+
+		const tools = hit({
+			url: "https://cloudscape.design/get-started/for-developers/ai-tools-support/",
+			score: 0.88,
+			system: "cloudscape",
+			source: "Cloudscape",
+			passage: "Use the docs with an AI tool.",
+		});
+		const table = hit({
+			url: "https://cloudscape.design/components/table/",
+			score: 0.62,
+			system: "cloudscape",
+			source: "Cloudscape",
+			passage: "A table displays rows of data.",
+		});
+		expect(rankCitations([tools, table], "cloudscape table guidance")[0]?.url).toBe(table.url);
+
+		const create = hit({
+			url: "https://primer.style/product/scenario-patterns/create",
+			score: 0.93,
+			system: "primer",
+			source: "Primer",
+			passage: "Create a resource.",
+		});
+		const dialog = hit({
+			url: "https://primer.style/product/components/dialog/guidelines/",
+			score: 0.86,
+			system: "primer",
+			source: "Primer",
+			passage: "Dialogs keep focus inside the modal.",
+		});
+		expect(rankCitations([create, dialog], "primer dialog guidance")[0]?.url).toBe(dialog.url);
+	});
+
 	it("drops a fused score of 1 when the reranker score is below the floor", () => {
 		const ranked = rankCitations(
 			[hit({ url: "https://paste-dsys.com/components/form", score: 0.01, passage: "junk" })],

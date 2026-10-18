@@ -24,6 +24,33 @@ describe("frontierLinks", () => {
 		expect(links).toEqual(["https://cloudscape.design/components/table"]);
 	});
 
+	it("does not start a crawl per query-string variant of the same path", () => {
+		const links = frontierLinks(
+			"See https://cloudscape.design/components/table?tabId=1 and https://cloudscape.design/components/table?tabId=2 and [alert](https://cloudscape.design/components/alert).",
+			"https://cloudscape.design/components/table",
+			seedById("cloudscape"),
+		);
+		expect(links).toEqual([
+			"https://cloudscape.design/components/table",
+			"https://cloudscape.design/components/alert",
+		]);
+	});
+
+	it("does not pick a query-string variant when the path was already staged", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		await pageQueue.stageUrl("cloudscape", "https://cloudscape.design/components/alert");
+		await pageQueue.addFrontier("cloudscape", [
+			"https://cloudscape.design/components/alert?tabId=1",
+			"https://cloudscape.design/components/alert?tabId=2",
+			"https://cloudscape.design/components/table",
+		]);
+		expect(await pageQueue.nextFrontier("cloudscape", new Set(await pageQueue.stagedUrls("cloudscape")))).toBe(
+			"https://cloudscape.design/components/table",
+		);
+	});
+
 	it("does not store static assets or pick them as a follow-up start", async () => {
 		const markdown = [
 			`See [logo](${ASSETS[0]})`,

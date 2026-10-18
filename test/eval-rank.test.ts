@@ -40,6 +40,9 @@ describe("eval queries with k omitted", () => {
 			if (spec.firstSystem !== undefined) {
 				expect(ranked[0]?.system).toBe(spec.firstSystem);
 			}
+			if (spec.firstUrl !== undefined) {
+				expect(ranked[0]?.url).toBe(spec.firstUrl);
+			}
 		});
 	}
 

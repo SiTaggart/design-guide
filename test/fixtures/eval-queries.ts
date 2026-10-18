@@ -6,6 +6,7 @@ export type EvalQuery = {
 	minSystems?: number;
 	noReferenceInTop?: number;
 	firstSystem?: string;
+	firstUrl?: string;
 };
 
 export const EVAL_QUERIES: readonly EvalQuery[] = [
@@ -59,6 +60,7 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
 		id: "q10-paste-button",
 		query: "Paste button guidance",
 		firstSystem: "paste",
+		firstUrl: "https://paste-dsys.com/components/button",
 	},
 ];
 
