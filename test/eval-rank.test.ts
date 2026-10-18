@@ -279,6 +279,63 @@ describe("held-out common-word paraphrases", () => {
 		).toBe("cloudscape");
 	});
 
+	it("keeps a name across a clause break and ignores an ordinary noun", () => {
+		const other = paraphrase({
+			url: "https://www.patternfly.org/components/button",
+			score: 0.99,
+			system: "patternfly",
+			source: "PatternFly",
+		});
+		const primer = paraphrase({
+			url: "https://primer.style/product/components/dialog/guidelines/",
+			score: 0.7,
+			system: "primer",
+			source: "Primer",
+		});
+		const paste = paraphrase({
+			url: "https://paste-dsys.com/components/button",
+			score: 0.7,
+			system: "paste",
+			source: "Paste",
+		});
+		for (const query of [
+			"In Primer, the dialog should trap focus",
+			"In Primer: the dialog should trap focus",
+			"In Primer; the dialog should trap focus",
+		]) {
+			expect(rankCitations([other, primer], query)[0]?.system, query).toBe("primer");
+		}
+		expect(rankCitations([other, paste], "In Paste, the button")[0]?.system).toBe("paste");
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://www.skyscanner.design/latest/components/button",
+						score: 0.7,
+						system: "backpack",
+						source: "Backpack",
+					}),
+					other,
+				],
+				"backpack straps",
+			)[0]?.system,
+		).toBe("patternfly");
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://web.unified-design-system.orange.com/orange/docs/components/button",
+						score: 0.7,
+						system: "ouds-web",
+						source: "OUDS Web",
+					}),
+					other,
+				],
+				"Orange juice",
+			)[0]?.system,
+		).toBe("patternfly");
+	});
+
 	it("does not name a system from a determiner phrase", () => {
 		const primer = paraphrase({
 			url: "https://primer.style/product/components/text-input",
