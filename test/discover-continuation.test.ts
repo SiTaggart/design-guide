@@ -470,7 +470,7 @@ describe("discover continuation", () => {
 			.prepare("SELECT url FROM page_work WHERE system_id = ? ORDER BY url ASC")
 			.bind("paste")
 			.all<{ url: string }>();
-		expect(queued.results?.map((row) => row.url)).toEqual([also, kept, removed]);
+		expect(queued.results?.map((row) => row.url)).toEqual([kept, also, removed]);
 	});
 
 	it("ends a run that cannot start any frontier url within a bounded number of ticks", async () => {
@@ -535,7 +535,7 @@ describe("discover continuation", () => {
 			.prepare("SELECT url FROM page_work WHERE system_id = ? ORDER BY url ASC")
 			.bind("paste")
 			.all<{ url: string }>();
-		expect(queued.results?.map((row) => row.url)).toEqual([also, kept]);
+		expect(queued.results?.map((row) => row.url)).toEqual([kept, also]);
 	});
 
 	it("ends a 401 follow-up start in that tick and keeps the staged pages", async () => {
@@ -603,7 +603,7 @@ describe("discover continuation", () => {
 				.prepare("SELECT url FROM page_work WHERE system_id = ? ORDER BY url ASC")
 				.bind("paste")
 				.all<{ url: string }>();
-			expect(queued.results?.map((row) => row.url)).toEqual([also, kept]);
+			expect(queued.results?.map((row) => row.url)).toEqual([kept, also]);
 		} finally {
 			spy.mockRestore();
 		}

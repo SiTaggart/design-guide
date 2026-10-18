@@ -655,13 +655,19 @@ export class D1PageQueue implements PageQueue {
 		return row?.capped_any === 1;
 	}
 
-	async noteSkipped(systemId: SystemId, now: string): Promise<void> {
+	async noteSkipped(systemId: SystemId, now: string): Promise<number> {
 		await run(
 			this.db,
-			"UPDATE discover_run SET skipped_any = 1, updated_at = ? WHERE system_id = ?",
+			"UPDATE discover_run SET skipped_any = skipped_any + 1, updated_at = ? WHERE system_id = ?",
 			now,
 			systemId,
 		);
+		const row = await first<{ skipped_any: number }>(
+			this.db,
+			"SELECT skipped_any FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		return row?.skipped_any ?? 0;
 	}
 
 	async skippedAny(systemId: SystemId): Promise<boolean> {
@@ -670,7 +676,7 @@ export class D1PageQueue implements PageQueue {
 			"SELECT skipped_any FROM discover_run WHERE system_id = ?",
 			systemId,
 		);
-		return row?.skipped_any === 1;
+		return (row?.skipped_any ?? 0) >= 1;
 	}
 
 	async clearPollFailures(systemId: SystemId, now: string): Promise<void> {

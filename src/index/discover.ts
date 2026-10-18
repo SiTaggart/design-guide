@@ -32,6 +32,7 @@ export const CAP_RETRY_MS = 60 * 60 * 1000;
 /** One record per results request. Markdown stays on the response, then is discarded. */
 export const DISCOVER_RECORD_LIMIT = 1;
 const MAX_POLL_FAILURES = 5;
+const MAX_SKIPPED_STARTS = 3;
 
 export type DiscoverPick = {
 	systemId: SystemId;
@@ -336,7 +337,13 @@ async function continueDiscover(
 ): Promise<DiscoverTickResult> {
 	const iso = now.toISOString();
 	if (Date.parse(run.startedAt) + CRAWL_POLL_DEADLINE_MS < now.getTime()) {
-		return failDiscover(queue, auth, run, deps, "discover timed out");
+		const indexable = await queue.indexableCount(run.systemId);
+		const staged = await queue.stagedUrls(run.systemId);
+		if (indexable === 0 && staged.length === 0) {
+			return failDiscover(queue, auth, run, deps, "discover timed out");
+		}
+		await cancelJob(auth, run, deps);
+		return finishDiscover(env, queue, auth, run, deps, iso, true);
 	}
 	let snapshot: { status: string; finished: number };
 	try {
@@ -419,23 +426,54 @@ async function continueDiscover(
 		const seen = new Set(await queue.stagedUrls(run.systemId));
 		let next = await queue.nextFrontier(run.systemId, seen);
 		while (next) {
+			const frontierUrl = next;
 			try {
-				const started = await deps.start(auth, seed, next);
+				const started = await deps.start(auth, seed, frontierUrl);
 				await queue.replaceJob(run.systemId, started.jobId, started.startUrl, iso);
 				return { action: "continued", systemId: run.systemId, accepted };
-			} catch {
+			} catch (error) {
+				const message = startFailureMessage(error);
+				console.log(
+					JSON.stringify({
+						event: "crawl_start_failed",
+						system: run.systemId,
+						url: frontierUrl,
+						error: message,
+					}),
+				);
+				if (accountAuthFailure(message)) {
+					await queue.noteSkipped(run.systemId, iso);
+					await queue.noteAttempt(run.systemId, frontierUrl);
+					break;
+				}
 				const failures = await queue.notePollFailure(run.systemId, iso);
 				if (failures < MAX_POLL_FAILURES) {
 					return { action: "continued", systemId: run.systemId, accepted };
 				}
-				await queue.noteSkipped(run.systemId, iso);
-				await queue.noteAttempt(run.systemId, next);
+				const skipped = await queue.noteSkipped(run.systemId, iso);
+				await queue.noteAttempt(run.systemId, frontierUrl);
 				await queue.clearPollFailures(run.systemId, iso);
+				if (skipped >= MAX_SKIPPED_STARTS) {
+					break;
+				}
 				next = await queue.nextFrontier(run.systemId, seen);
 			}
 		}
 	}
 	const incomplete = runaway || (await queue.cappedAny(run.systemId)) || (await queue.skippedAny(run.systemId));
+	return finishDiscover(env, queue, auth, run, deps, iso, incomplete);
+}
+
+async function finishDiscover(
+	env: WorkerEnv,
+	queue: D1PageQueue,
+	auth: CrawlAuth,
+	run: DiscoverRun,
+	deps: DiscoverDeps,
+	iso: string,
+	incomplete: boolean,
+): Promise<DiscoverTickResult> {
+	const seed = seedById(run.systemId);
 	const live = await queue.stagedUrls(run.systemId);
 	const indexable = await queue.indexableUrls(run.systemId);
 	if (!incomplete && isStubGeneration(indexable.length)) {
@@ -488,6 +526,12 @@ async function failDiscover(
 	deps: DiscoverDeps,
 	error: string,
 ): Promise<DiscoverTickResult> {
+	await cancelJob(auth, run, deps);
+	await queue.clearRun(run.systemId);
+	return { action: "failed", systemId: run.systemId, trigger: run.trigger, error };
+}
+
+async function cancelJob(auth: CrawlAuth, run: DiscoverRun, deps: DiscoverDeps): Promise<void> {
 	try {
 		await deps.cancel(auth, run.jobId);
 	} catch (cancelError) {
@@ -495,12 +539,18 @@ async function failDiscover(
 			JSON.stringify({
 				event: "crawl_cancel_failed",
 				system: run.systemId,
-				error: cancelError instanceof Error ? cancelError.message : String(cancelError),
+				error: startFailureMessage(cancelError),
 			}),
 		);
 	}
-	await queue.clearRun(run.systemId);
-	return { action: "failed", systemId: run.systemId, trigger: run.trigger, error };
+}
+
+function startFailureMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function accountAuthFailure(message: string): boolean {
+	return /\b(?:401|403)\b/.test(message);
 }
 
 function crawlAuth(env: WorkerEnv): CrawlAuth | null {
