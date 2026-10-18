@@ -13,7 +13,7 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
 	{
 		id: "q01-form-errors",
 		query: "what are the best practices for displaying error messages to the user after a form submission",
-		minSystems: 3,
+		minSystems: 5,
 		noReferenceInTop: 5,
 	},
 	{

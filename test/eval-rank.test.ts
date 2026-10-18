@@ -71,5 +71,193 @@ describe("nonsense queries", () => {
 		});
 		expect(report.map((row) => row.id)).toEqual(["q11-gibberish", "q12-banana"]);
 		expect(report.every((row) => Number.isFinite(row.max))).toBe(true);
+		expect(report.every((row) => row.returned === 0)).toBe(true);
+	});
+});
+
+function paraphrase(partial: Partial<Citation> & Pick<Citation, "url" | "score" | "system" | "source">): Citation {
+	return {
+		passage: partial.passage ?? "guidance",
+		source: partial.source,
+		url: partial.url,
+		system: partial.system,
+		score: partial.score,
+	};
+}
+
+describe("held-out common-word paraphrases", () => {
+	it("does not boost Paste, Garden, Vanilla, or Ant Design for an ordinary use of the word", () => {
+		const primer = paraphrase({
+			url: "https://primer.style/product/components/text-input",
+			score: 0.85,
+			system: "primer",
+			source: "Primer",
+			passage: "A text input accepts typed text.",
+		});
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://paste-dsys.com/components/input",
+						score: 0.7,
+						system: "paste",
+						source: "Paste",
+					}),
+					primer,
+				],
+				"how do I paste text into an input",
+			)[0]?.system,
+		).toBe("primer");
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://garden.zendesk.com/components/grid",
+						score: 0.7,
+						system: "garden",
+						source: "Zendesk Garden",
+					}),
+					paraphrase({
+						url: "https://cloudscape.design/components/grid",
+						score: 0.85,
+						system: "cloudscape",
+						source: "Cloudscape",
+					}),
+				],
+				"garden layout patterns",
+			)[0]?.system,
+		).toBe("cloudscape");
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://vanillaframework.io/docs/patterns/forms",
+						score: 0.7,
+						system: "vanilla",
+						source: "Vanilla Framework",
+					}),
+					primer,
+				],
+				"vanilla javascript form validation",
+			)[0]?.system,
+		).toBe("primer");
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://ant.design/components/table",
+						score: 0.7,
+						system: "antd",
+						source: "Ant Design",
+					}),
+					primer,
+				],
+				"ant colony",
+			)[0]?.system,
+		).toBe("primer");
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://web.unified-design-system.orange.com/orange/docs/components/button",
+						score: 0.7,
+						system: "ouds-web",
+						source: "OUDS Web",
+					}),
+					primer,
+				],
+				"orange juice",
+			)[0]?.system,
+		).toBe("primer");
+	});
+
+	it("boosts an unambiguous system name and keeps the button page first", () => {
+		const wizard = paraphrase({
+			url: "https://paste-dsys.com/page-templates/wizard",
+			score: 0.98,
+			system: "paste",
+			source: "Paste",
+			passage: "The wizard includes a Button.",
+		});
+		const button = paraphrase({
+			url: "https://paste-dsys.com/components/button",
+			score: 0.77,
+			system: "paste",
+			source: "Paste",
+			passage: "Buttons show the actions available on a page.",
+		});
+		const foreign = paraphrase({
+			url: "https://www.patternfly.org/components/button",
+			score: 0.99,
+			system: "patternfly",
+			source: "PatternFly",
+		});
+		expect(rankCitations([foreign, wizard, button], "Paste buttons guidance").map((item) => item.url)).toEqual([
+			button.url,
+			wizard.url,
+			foreign.url,
+		]);
+		expect(
+			rankCitations(
+				[
+					paraphrase({
+						url: "https://www.patternfly.org/components/table",
+						score: 0.95,
+						system: "patternfly",
+						source: "PatternFly",
+					}),
+					paraphrase({
+						url: "https://ant.design/components/table",
+						score: 0.7,
+						system: "antd",
+						source: "Ant Design",
+						passage: "A table displays rows of data.",
+					}),
+				],
+				"ant design table",
+			)[0]?.system,
+		).toBe("antd");
+		expect(
+			rankCitations(
+				[
+					foreign,
+					paraphrase({
+						url: "https://paste-dsys.com/components/button",
+						score: 0.7,
+						system: "paste",
+						source: "Paste",
+					}),
+				],
+				"twilio paste button guidance",
+			)[0]?.system,
+		).toBe("paste");
+		expect(
+			rankCitations(
+				[
+					foreign,
+					paraphrase({
+						url: "https://ix.siemens.io/docs/components/button/guide",
+						score: 0.7,
+						system: "siemens-ix",
+						source: "Siemens iX",
+					}),
+				],
+				"ix button guidance",
+			)[0]?.system,
+		).toBe("siemens-ix");
+		expect(
+			rankCitations(
+				[
+					foreign,
+					paraphrase({
+						url: "https://web.unified-design-system.orange.com/orange/docs/components/button",
+						score: 0.7,
+						system: "ouds-web",
+						source: "OUDS Web",
+					}),
+				],
+				"Orange component guidance",
+			)[0]?.system,
+		).toBe("ouds-web");
 	});
 });
