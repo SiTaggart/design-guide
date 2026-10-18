@@ -5,7 +5,7 @@ export type EvalQuery = {
 	/** Distinct systems required after the 0.6 reranker floor. Absent when this index misses that bar. */
 	minSystems?: number;
 	noReferenceInTop?: number;
-	firstUrl?: string;
+	firstSystem?: string;
 };
 
 export const EVAL_QUERIES: readonly EvalQuery[] = [
@@ -58,7 +58,7 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
 	{
 		id: "q10-paste-button",
 		query: "Paste button guidance",
-		firstUrl: "https://paste-dsys.com/components/button",
+		firstSystem: "paste",
 	},
 ];
 

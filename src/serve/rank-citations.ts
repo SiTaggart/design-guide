@@ -2,41 +2,6 @@ import { MAX_K, MIN_SEARCH_SCORE } from "../config/instance.ts";
 import { SEEDS } from "../config/seed.ts";
 import type { Citation } from "../config/types.ts";
 
-const STOP_WORDS = new Set([
-	"what",
-	"are",
-	"the",
-	"best",
-	"practices",
-	"for",
-	"to",
-	"a",
-	"an",
-	"of",
-	"and",
-	"or",
-	"vs",
-	"how",
-	"do",
-	"should",
-	"when",
-	"with",
-	"in",
-	"on",
-	"after",
-	"user",
-	"like",
-	"look",
-	"work",
-	"patterns",
-	"displaying",
-	"display",
-	"manage",
-	"confirm",
-	"handle",
-	"use",
-]);
-
 const REFERENCE_SEGMENT = /^(api|props|properties|tokens|design-tokens|changelog)$/;
 
 export function normalizePageUrl(value: string): string {
@@ -72,43 +37,46 @@ export function isReferencePage(url: string, passage: string): boolean {
 	return pipes >= 8 && /\b(props?|properties|tokens?)\b/i.test(passage);
 }
 
-function queryNamesSystem(query: string): boolean {
-	const hay = ` ${query.toLowerCase()} `;
-	return SEEDS.some((seed) => {
-		const source = seed.source.toLowerCase();
+function hasPhrase(query: string, phrase: string): boolean {
+	const needle = phrase.toLowerCase().trim();
+	if (!needle) {
+		return false;
+	}
+	const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`(?:^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, "i").test(query);
+}
+
+export function namedSystemIds(query: string): Set<string> {
+	const named = new Set<string>();
+	for (const seed of SEEDS) {
 		const id = seed.id.toLowerCase();
-		return hay.includes(source) || hay.includes(` ${id} `) || hay.includes(` ${id.replace(/-/g, " ")} `);
-	});
-}
-
-function subjectTokens(query: string): string[] {
-	return query
-		.toLowerCase()
-		.split(/[^a-z0-9]+/)
-		.filter((word) => word.length >= 4 && !STOP_WORDS.has(word));
-}
-
-function segmentMatches(segment: string, token: string): boolean {
-	const bare = segment.replace(/\.html$|\.md$/i, "");
-	return bare === token || bare === `${token}s` || bare.startsWith(`${token}-`) || bare.endsWith(`-${token}`);
-}
-
-function subjectMatch(url: string, tokens: readonly string[]): boolean {
-	const parts = segments(url);
-	return tokens.some((token) => parts.some((segment) => segmentMatches(segment, token)));
-}
-
-function tier(hit: Citation, query: string): number {
-	if (isReferencePage(hit.url, hit.passage)) {
-		return 2;
+		const phrases = [seed.source, id, id.replace(/-/g, " ")];
+		const head = seed.source.split(/\s+/)[0] ?? "";
+		if (head.length >= 3) {
+			phrases.push(head);
+		}
+		for (const part of id.split("-")) {
+			if (part.length >= 4) {
+				phrases.push(part);
+			}
+		}
+		if (phrases.some((phrase) => hasPhrase(query, phrase))) {
+			named.add(seed.id);
+		}
 	}
-	if (queryNamesSystem(query) && subjectMatch(hit.url, subjectTokens(query))) {
-		return 0;
+	return named;
+}
+
+function band(hit: Citation, named: ReadonlySet<string>): number {
+	const reference = isReferencePage(hit.url, hit.passage);
+	if (named.has(hit.system)) {
+		return reference ? 1 : 0;
 	}
-	return 1;
+	return reference ? 3 : 2;
 }
 
 export function rankCitations(citations: readonly Citation[], query: string, k?: number): Citation[] {
+	const named = namedSystemIds(query);
 	const limit = k === undefined ? MAX_K : Math.min(MAX_K, Math.max(1, k));
 	const best = new Map<string, Citation>();
 	for (const hit of citations) {
@@ -123,9 +91,9 @@ export function rankCitations(citations: readonly Citation[], query: string, k?:
 	}
 	return [...best.values()]
 		.sort((left, right) => {
-			const band = tier(left, query) - tier(right, query);
-			if (band !== 0) {
-				return band;
+			const group = band(left, named) - band(right, named);
+			if (group !== 0) {
+				return group;
 			}
 			return right.score - left.score;
 		})

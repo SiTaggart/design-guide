@@ -45,7 +45,7 @@ flowchart LR
 { "results": [{ "passage": "…", "source": "Primer", "url": "https://…", "system": "primer", "score": 0.72 }] }
 ```
 
-`passage` is the chunk text, verbatim. `url` is the page https URL. `source` is the label. `system` is the seed id. `score` is the AI Search reranker score (`scoring_details.reranking_score` from `@cf/baai/bge-reranker-base`), not the fused reciprocal-rank score. The 0.6 floor, the result order, and the returned score all use that reranker score. The worker asks AI Search for 50 candidates with reranking enabled. It then keeps one passage per normalized URL, sorts guidance above API, props, and token tables, and when the query names a system prefers that subject's page. The score is a ranking signal only. The calling agent decides relevance.
+`passage` is the chunk text, verbatim. `url` is the page https URL. `source` is the label. `system` is the seed id. `score` is the AI Search reranker score (`scoring_details.reranking_score` from `@cf/baai/bge-reranker-base`), not the fused reciprocal-rank score. The 0.6 floor, the result order, and the returned score all use that reranker score. The worker asks AI Search for 50 candidates with reranking enabled. It then keeps one passage per normalized URL and sorts guidance above API, props, and token tables. When the query names a system from the seed catalog, that system's pages come before every other system, still ordered by the reranker score. The score is a ranking signal only. The calling agent decides relevance.
 
 No matches after the filter: `{ "results": [] }`. Missing query: `400` `{ "error": "query_required" }`.
 

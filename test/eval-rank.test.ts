@@ -37,9 +37,8 @@ describe("eval queries with k omitted", () => {
 					ranked.slice(0, spec.noReferenceInTop).every((hit) => !isReferencePage(hit.url, hit.passage)),
 				).toBe(true);
 			}
-			if (spec.firstUrl !== undefined) {
-				expect(ranked[0]?.url).toBe(spec.firstUrl);
-				expect(ranked[0]?.system).toBe("paste");
+			if (spec.firstSystem !== undefined) {
+				expect(ranked[0]?.system).toBe(spec.firstSystem);
 			}
 		});
 	}

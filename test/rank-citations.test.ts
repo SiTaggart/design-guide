@@ -119,7 +119,7 @@ describe("rankCitations", () => {
 		expect(rankCitations([foreign, paste], "how does Paste say to use buttons")[0]?.system).toBe("paste");
 	});
 
-	it("orders one system's pages by reranker score when the query names that system", () => {
+	it("orders a named system's pages by reranker score, with guidance above its API page", () => {
 		const wizard = hit({
 			url: "https://paste-dsys.com/page-templates/wizard",
 			score: 0.98,
@@ -130,10 +130,46 @@ describe("rankCitations", () => {
 			score: 0.77,
 			passage: "Buttons show the actions available on a page.",
 		});
-		expect(rankCitations([wizard, button], "Paste button guidance")[0]?.url).toBe(button.url);
+		const api = hit({
+			url: "https://paste-dsys.com/components/button/api",
+			score: 0.99,
+			passage: "Button props",
+		});
+		const foreign = hit({
+			url: "https://www.patternfly.org/components/button",
+			score: 0.97,
+			system: "patternfly",
+			source: "PatternFly",
+		});
+		const ranked = rankCitations([api, foreign, button, wizard], "Paste button guidance");
+		expect(ranked.map((item) => item.url)).toEqual([wizard.url, button.url, api.url, foreign.url]);
 		expect(rankCitations([wizard, button], "what are the best practices for displaying error messages")[0]?.url).toBe(
 			wizard.url,
 		);
+	});
+
+	it("names every indexed system from the seed catalog and does not treat Carbon as one", () => {
+		expect(rankCitations(
+			[
+				hit({ url: "https://ix.siemens.io/docs/components/button/guide", score: 0.7, system: "siemens-ix", source: "Siemens iX" }),
+				hit({ url: "https://www.patternfly.org/components/button", score: 0.95, system: "patternfly", source: "PatternFly" }),
+			],
+			"siemens button guide",
+		)[0]?.system).toBe("siemens-ix");
+		expect(rankCitations(
+			[
+				hit({ url: "https://design-system.service.gov.uk/components/button/", score: 0.7, system: "govuk", source: "GOV.UK Design System" }),
+				hit({ url: "https://paste-dsys.com/components/button", score: 0.95, system: "paste", source: "Paste" }),
+			],
+			"gov.uk button guidance",
+		)[0]?.system).toBe("govuk");
+		expect(rankCitations(
+			[
+				hit({ url: "https://carbondesignsystem.com/components/modal", score: 0.7, system: "carbon", source: "Carbon" }),
+				hit({ url: "https://primer.style/product/components/dialog", score: 0.8, system: "primer", source: "Primer" }),
+			],
+			"carbon modal guidance",
+		)[0]?.system).toBe("primer");
 	});
 
 	it("drops a fused score of 1 when the reranker score is below the floor", () => {
