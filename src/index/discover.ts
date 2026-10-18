@@ -29,6 +29,21 @@ import {
 
 export const DISCOVER_URLS_PER_TICK = 25;
 export const CAP_RETRY_MS = 60 * 60 * 1000;
+
+export type CapDeferMark = string | { at: string; streak: number };
+
+export function capRetryDelayMs(streak: number): number {
+	if (streak <= 1) {
+		return CAP_RETRY_MS;
+	}
+	if (streak === 2) {
+		return 6 * CAP_RETRY_MS;
+	}
+	if (streak === 3) {
+		return 24 * CAP_RETRY_MS;
+	}
+	return 7 * 24 * CAP_RETRY_MS;
+}
 /** One record per results request. Markdown stays on the response, then is discarded. */
 export const DISCOVER_RECORD_LIMIT = 1;
 const MAX_POLL_FAILURES = 5;
@@ -67,7 +82,7 @@ export function pickDiscoverSystem(input: {
 	parks: Parks;
 	busy?: ReadonlySet<SystemId>;
 	recoveryAttempts?: Readonly<Record<string, string>>;
-	deferred?: Readonly<Record<string, string>>;
+	deferred?: Readonly<Record<string, CapDeferMark>>;
 	now?: number;
 }): DiscoverPick | null {
 	const busy = input.busy ?? new Set<SystemId>();
@@ -95,15 +110,21 @@ export function pickDiscoverSystem(input: {
 	return null;
 }
 
-export function capCooling(id: SystemId, deferred: Readonly<Record<string, string>>, now: number | undefined): boolean {
-	const at = deferred[id];
-	if (!at) {
+export function capCooling(
+	id: SystemId,
+	deferred: Readonly<Record<string, CapDeferMark>>,
+	now: number | undefined,
+): boolean {
+	const mark = deferred[id];
+	if (!mark) {
 		return false;
 	}
+	const at = typeof mark === "string" ? mark : mark.at;
+	const streak = typeof mark === "string" ? 1 : mark.streak;
 	if (now === undefined) {
 		return true;
 	}
-	return now - Date.parse(at) < CAP_RETRY_MS;
+	return now - Date.parse(at) < capRetryDelayMs(streak);
 }
 
 export function nextParkedSystem(
@@ -291,7 +312,7 @@ async function runDiscover(
 		parks: parksRead.parks,
 		busy: new Set(freshness.filter((row) => row.pending + row.claimed > 0).map((row) => row.system)),
 		recoveryAttempts: await queue.recoveryAttempts(),
-		deferred: await queue.capDefers(),
+		deferred: await queue.capDeferMarks(),
 		now: now.getTime(),
 	});
 	if (!pick) {

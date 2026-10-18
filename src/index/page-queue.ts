@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS seed_refresh (
 
 CREATE TABLE IF NOT EXISTS cap_defer (
   system_id TEXT PRIMARY KEY,
-  deferred_at TEXT NOT NULL
+  deferred_at TEXT NOT NULL,
+  streak INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS discover_frontier (
@@ -954,8 +955,10 @@ export class D1PageQueue implements PageQueue {
 	async noteCapDefer(systemId: SystemId, now: string): Promise<void> {
 		await run(
 			this.db,
-			`INSERT INTO cap_defer (system_id, deferred_at) VALUES (?, ?)
-			 ON CONFLICT(system_id) DO UPDATE SET deferred_at = excluded.deferred_at`,
+			`INSERT INTO cap_defer (system_id, deferred_at, streak) VALUES (?, ?, 1)
+			 ON CONFLICT(system_id) DO UPDATE SET
+			   deferred_at = excluded.deferred_at,
+			   streak = cap_defer.streak + 1`,
 			systemId,
 			now,
 		);
@@ -966,11 +969,18 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async capDefers(): Promise<Record<string, string>> {
-		const rows = await all<{ system_id: string; deferred_at: string }>(
+		const marks = await this.capDeferMarks();
+		return Object.fromEntries(Object.entries(marks).map(([systemId, mark]) => [systemId, mark.at]));
+	}
+
+	async capDeferMarks(): Promise<Record<string, { at: string; streak: number }>> {
+		const rows = await all<{ system_id: string; deferred_at: string; streak: number }>(
 			this.db,
-			"SELECT system_id, deferred_at FROM cap_defer",
+			"SELECT system_id, deferred_at, streak FROM cap_defer",
 		);
-		return Object.fromEntries(rows.map((row) => [row.system_id, row.deferred_at]));
+		return Object.fromEntries(
+			rows.map((row) => [row.system_id, { at: row.deferred_at, streak: row.streak }]),
+		);
 	}
 
 	async markDiscovered(systemId: SystemId, now: string): Promise<void> {

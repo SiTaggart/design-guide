@@ -2,7 +2,7 @@ import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
 import { isCrawlCapError, seedFailure } from "../index/crawl-cap.ts";
-import { capCooling } from "../index/discover.ts";
+import { capCooling, type CapDeferMark } from "../index/discover.ts";
 import { D1PageQueue } from "../index/page-queue.ts";
 import { seedHashKey, systemSeedHash } from "../index/seed-hash.ts";
 import type { IndexStatusDocument } from "../index/status.ts";
@@ -21,7 +21,7 @@ export type FillHealthBody = {
 };
 
 export type FillSchedule = {
-	deferred?: Readonly<Record<string, string>>;
+	deferred?: Readonly<Record<string, CapDeferMark>>;
 	drifted?: ReadonlySet<SystemId>;
 };
 
@@ -91,14 +91,14 @@ async function readDriftedSeeds(env: WorkerEnv): Promise<Set<SystemId>> {
 	return drifted;
 }
 
-async function readCapDefers(env: WorkerEnv): Promise<Record<string, string>> {
+async function readCapDefers(env: WorkerEnv): Promise<Record<string, CapDeferMark>> {
 	if (!env.PAGE_QUEUE) {
 		return {};
 	}
 	try {
 		const queue = new D1PageQueue(env.PAGE_QUEUE);
 		await queue.ensure();
-		return await queue.capDefers();
+		return await queue.capDeferMarks();
 	} catch (error) {
 		console.log(
 			JSON.stringify({
