@@ -38,7 +38,7 @@ export function isReferencePage(url: string, passage: string): boolean {
 	return pipes >= 8 && /\b(props?|properties|tokens?)\b/i.test(passage);
 }
 
-const DETERMINER = /^(a|an|the)$/i;
+const DESIGN_WORD = /\b(components?|guidance|docs|buttons?|systems?)\b/i;
 
 function hasPhrase(query: string, phrase: string, fold: boolean): boolean {
 	const needle = phrase.trim();
@@ -51,35 +51,33 @@ function hasPhrase(query: string, phrase: string, fold: boolean): boolean {
 	return new RegExp(`(?:^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`).test(haystack);
 }
 
-function queryWords(query: string): string[] {
-	return query
-		.split(/\s+/)
-		.map((word) => word.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, ""))
-		.filter(Boolean);
+function bareWord(word: string): string {
+	return word.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "");
 }
 
-function ordinaryCommonWord(word: string, previous: string | undefined, next: string | undefined, fold: boolean): boolean {
-	const before = previous !== undefined && DETERMINER.test(previous);
-	const after = next !== undefined && DETERMINER.test(next);
-	if (after) {
-		return true;
+function namesCommonWord(query: string, phrase: string): boolean {
+	const design = DESIGN_WORD.test(query);
+	for (const clause of query.split(/[.,:;!?]+/)) {
+		const words = clause.trim().split(/\s+/).map(bareWord).filter(Boolean);
+		for (let index = 0; index < words.length; index += 1) {
+			const word = words[index] ?? "";
+			if (word.toLowerCase() !== phrase.toLowerCase()) {
+				continue;
+			}
+			const clauseStart = index === 0;
+			if (design || (word === phrase && !clauseStart)) {
+				return true;
+			}
+		}
 	}
-	return before && fold && word === word.toLowerCase();
+	return false;
 }
 
 function namesInContext(query: string, phrase: string, fold: boolean, commonWord: boolean): boolean {
 	if (/\s/.test(phrase) || !commonWord) {
 		return hasPhrase(query, phrase, fold);
 	}
-	const words = queryWords(query);
-	const needle = fold ? phrase.toLowerCase() : phrase;
-	return words.some((word, index) => {
-		const current = fold ? word.toLowerCase() : word;
-		if (current !== needle) {
-			return false;
-		}
-		return !ordinaryCommonWord(word, words[index - 1], words[index + 1], fold);
-	});
+	return namesCommonWord(query, phrase);
 }
 
 type NamePhrase = { phrase: string; fold: boolean; commonWord: boolean };

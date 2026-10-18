@@ -24,7 +24,7 @@ export type Seed = {
 	aliases?: readonly string[];
 	/** The one-word source matches only with its written capitalization. */
 	matchCase?: boolean;
-	/** The short name is also an ordinary English word, so a determiner can mean it is not the system. */
+	/** The short name is also an ordinary English word. It counts as the system only as a proper name, or alongside a design word. */
 	commonWord?: boolean;
 	startUrl: string;
 	fallbackStartUrl?: string;
