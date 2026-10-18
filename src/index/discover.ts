@@ -462,7 +462,7 @@ async function continueDiscover(
 						error: message,
 					}),
 				);
-				if (accountAuthFailure(message)) {
+				if (accountAuthFailure(error)) {
 					await queue.noteSkipped(run.systemId, iso);
 					await queue.noteAttempt(run.systemId, frontierUrl);
 					break;
@@ -597,8 +597,17 @@ function startFailureMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function accountAuthFailure(message: string): boolean {
-	return /\b(?:401|403)\b/.test(message);
+function accountAuthFailure(error: unknown): boolean {
+	const status = httpStatusOf(error);
+	return status === 401 || status === 403;
+}
+
+function httpStatusOf(error: unknown): number | undefined {
+	if (!error || typeof error !== "object" || !("httpStatus" in error)) {
+		return undefined;
+	}
+	const status = error.httpStatus;
+	return typeof status === "number" ? status : undefined;
 }
 
 function crawlAuth(env: WorkerEnv): CrawlAuth | null {

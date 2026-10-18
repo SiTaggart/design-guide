@@ -51,6 +51,16 @@ export type CrawlJobSnapshot = { status: string } & CrawlCounts;
 
 export type StartResult = { jobId: string } | { httpStatus: number; detail: string };
 
+export class CrawlStartError extends Error {
+	readonly httpStatus: number;
+
+	constructor(httpStatus: number, message: string) {
+		super(message);
+		this.name = "CrawlStartError";
+		this.httpStatus = httpStatus;
+	}
+}
+
 export const CLI_POLL_INTERVAL_MS = 15_000;
 export const CRAWL_POLL_DEADLINE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CONSECUTIVE_POLL_FAILURES = 5;
@@ -247,7 +257,8 @@ export async function startSeedCrawl(
 	if (startUrlOverride) {
 		const started = await startCrawl(auth, seed, startUrlOverride);
 		if ("httpStatus" in started) {
-			throw new Error(
+			throw new CrawlStartError(
+				started.httpStatus,
 				`crawl start for ${startUrlOverride} failed ${started.httpStatus}: ${started.detail}`,
 			);
 		}
@@ -265,7 +276,10 @@ export async function startSeedCrawl(
 		started = await startCrawl(auth, seed, startUrl);
 	}
 	if ("httpStatus" in started) {
-		throw new Error(`crawl start for ${startUrl} failed ${started.httpStatus}: ${started.detail}`);
+		throw new CrawlStartError(
+			started.httpStatus,
+			`crawl start for ${startUrl} failed ${started.httpStatus}: ${started.detail}`,
+		);
 	}
 	return { startUrl, jobId: started.jobId };
 }

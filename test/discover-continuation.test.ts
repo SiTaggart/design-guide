@@ -633,7 +633,7 @@ describe("discover continuation", () => {
 				start: async (_auth, _seed, startUrl) => {
 					const url = startUrl ?? "";
 					starts.push(url);
-					throw new Error(`crawl start for ${url} failed 401: unauthorized`);
+					throw Object.assign(new Error(`crawl start for ${url} failed 401: unauthorized`), { httpStatus: 401 });
 				},
 				deleteDocs: async () => {
 					throw new Error("an unauthorized start must not prune");
