@@ -37,13 +37,13 @@ export const PROBE_QUERIES: readonly ProbeQuery[] = [
 		id: "h-cloudscape-table",
 		query: "cloudscape table guidance",
 		firstSystem: "cloudscape",
-		firstUrl: "https://cloudscape.design/get-started/for-developers/ai-tools-support/",
+		firstUrl: "https://cloudscape.design/components/table/",
 		absentUrl: "https://cloudscape.design/llms.txt",
 	},
 	{
 		id: "h-primer-dialog",
 		query: "primer dialog guidance",
 		firstSystem: "primer",
-		firstUrl: "https://primer.style/product/scenario-patterns/create",
+		firstUrl: "https://primer.style/product/components/dialog/guidelines/",
 	},
 ];

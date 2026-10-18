@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS discover_run (
   state TEXT NOT NULL,
   cursor TEXT,
   poll_failures INTEGER NOT NULL DEFAULT 0,
+  capped_any INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   started_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -616,6 +617,33 @@ export class D1PageQueue implements PageQueue {
 		);
 	}
 
+	async noteCapped(systemId: SystemId, now: string): Promise<void> {
+		await run(
+			this.db,
+			"UPDATE discover_run SET capped_any = 1, updated_at = ? WHERE system_id = ?",
+			now,
+			systemId,
+		);
+	}
+
+	async cappedAny(systemId: SystemId): Promise<boolean> {
+		const row = await first<{ capped_any: number }>(
+			this.db,
+			"SELECT capped_any FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		return row?.capped_any === 1;
+	}
+
+	async clearPollFailures(systemId: SystemId, now: string): Promise<void> {
+		await run(
+			this.db,
+			"UPDATE discover_run SET poll_failures = 0, updated_at = ? WHERE system_id = ?",
+			now,
+			systemId,
+		);
+	}
+
 	async notePollFailure(systemId: SystemId, now: string): Promise<number> {
 		await run(
 			this.db,
@@ -714,7 +742,8 @@ export class D1PageQueue implements PageQueue {
 			"SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC",
 			systemId,
 		);
-		return rows.find((row) => !blocked.has(pageKey(row.url)) && !isStaticAsset(row.url))?.url ?? null;
+		const row = rows.find((row) => !blocked.has(pageKey(row.url)) && !isStaticAsset(row.url));
+		return row ? pageKey(row.url) : null;
 	}
 
 	async indexableCount(systemId: SystemId): Promise<number> {

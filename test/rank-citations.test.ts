@@ -119,7 +119,7 @@ describe("rankCitations", () => {
 		expect(rankCitations([foreign, paste], "how does Paste say to use buttons")[0]?.system).toBe("paste");
 	});
 
-	it("orders a named system's pages by reranker score, with guidance above its API page", () => {
+	it("puts the named component page ahead of a higher score, with the API page still below", () => {
 		const wizard = hit({
 			url: "https://paste-dsys.com/page-templates/wizard",
 			score: 0.98,
@@ -142,7 +142,7 @@ describe("rankCitations", () => {
 			source: "PatternFly",
 		});
 		const ranked = rankCitations([api, foreign, button, wizard], "Paste button guidance");
-		expect(ranked.map((item) => item.url)).toEqual([wizard.url, button.url, api.url, foreign.url]);
+		expect(ranked.map((item) => item.url)).toEqual([button.url, wizard.url, api.url, foreign.url]);
 		expect(rankCitations([wizard, button], "what are the best practices for displaying error messages")[0]?.url).toBe(
 			wizard.url,
 		);
@@ -222,7 +222,7 @@ describe("rankCitations", () => {
 			passage: "A table displays rows of data.",
 		});
 		const ranked = rankCitations([index, full, about, table], "cloudscape table guidance");
-		expect(ranked.map((item) => item.url)).toEqual([about.url, table.url]);
+		expect(ranked.map((item) => item.url)).toEqual([table.url, about.url]);
 	});
 
 	it("puts the named component's own page ahead of a higher score from the same system", () => {

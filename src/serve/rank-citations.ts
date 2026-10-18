@@ -76,8 +76,55 @@ function band(hit: Citation, named: ReadonlySet<string>): number {
 	return reference ? 3 : 2;
 }
 
+function identifyingWords(named: ReadonlySet<string>): Set<string> {
+	const words = new Set<string>();
+	for (const seed of SEEDS) {
+		if (!named.has(seed.id)) {
+			continue;
+		}
+		const id = seed.id.toLowerCase();
+		words.add(id);
+		for (const word of `${seed.source} ${id.replace(/-/g, " ")}`.toLowerCase().split(/[^a-z0-9]+/)) {
+			if (word) {
+				words.add(word);
+			}
+		}
+	}
+	return words;
+}
+
+function contentTokens(query: string, named: ReadonlySet<string>): string[] {
+	const skip = identifyingWords(named);
+	const tokens: string[] = [];
+	const seen = new Set<string>();
+	for (const word of query.toLowerCase().split(/[^a-z0-9]+/)) {
+		if (word.length < 4 || skip.has(word) || seen.has(word)) {
+			continue;
+		}
+		seen.add(word);
+		tokens.push(word);
+	}
+	return tokens;
+}
+
+function pathAffinity(url: string, tokens: readonly string[]): number {
+	if (tokens.length === 0) {
+		return 0;
+	}
+	const parts = segments(url).map((segment) => segment.replace(/\.html$|\.md$/i, ""));
+	const last = parts[parts.length - 1] ?? "";
+	if (tokens.includes(last)) {
+		return 2;
+	}
+	if (parts.some((part) => tokens.includes(part))) {
+		return 1;
+	}
+	return 0;
+}
+
 export function rankCitations(citations: readonly Citation[], query: string, k?: number): Citation[] {
 	const named = namedSystemIds(query);
+	const tokens = contentTokens(query, named);
 	const limit = k === undefined ? MAX_K : Math.min(MAX_K, Math.max(1, k));
 	const best = new Map<string, Citation>();
 	for (const hit of citations) {
@@ -92,9 +139,16 @@ export function rankCitations(citations: readonly Citation[], query: string, k?:
 	}
 	return [...best.values()]
 		.sort((left, right) => {
-			const group = band(left, named) - band(right, named);
+			const leftBand = band(left, named);
+			const group = leftBand - band(right, named);
 			if (group !== 0) {
 				return group;
+			}
+			if (leftBand === 0) {
+				const affinity = pathAffinity(right.url, tokens) - pathAffinity(left.url, tokens);
+				if (affinity !== 0) {
+					return affinity;
+				}
 			}
 			return right.score - left.score;
 		})

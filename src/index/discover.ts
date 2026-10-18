@@ -356,6 +356,9 @@ async function continueDiscover(
 		return { action: "continued", systemId: run.systemId, accepted: 0 };
 	}
 	const capped = cappedCrawl(snapshot.status, snapshot.finished);
+	if (capped) {
+		await queue.noteCapped(run.systemId, iso);
+	}
 	if (!capped && snapshot.status !== "completed") {
 		return failDiscover(queue, auth, run, deps, `crawl ended ${snapshot.status}`);
 	}
@@ -414,18 +417,24 @@ async function continueDiscover(
 	}
 	if (!runaway) {
 		const seen = new Set(await queue.stagedUrls(run.systemId));
-		const next = await queue.nextFrontier(run.systemId, seen);
-		if (next) {
+		let next = await queue.nextFrontier(run.systemId, seen);
+		while (next) {
 			try {
 				const started = await deps.start(auth, seed, next);
 				await queue.replaceJob(run.systemId, started.jobId, started.startUrl, iso);
 				return { action: "continued", systemId: run.systemId, accepted };
-			} catch (error) {
-				return failDiscover(queue, auth, run, deps, error instanceof Error ? error.message : String(error));
+			} catch {
+				const failures = await queue.notePollFailure(run.systemId, iso);
+				if (failures < MAX_POLL_FAILURES) {
+					return { action: "continued", systemId: run.systemId, accepted };
+				}
+				await queue.noteAttempt(run.systemId, next);
+				await queue.clearPollFailures(run.systemId, iso);
+				next = await queue.nextFrontier(run.systemId, seen);
 			}
 		}
 	}
-	const incomplete = runaway || capped;
+	const incomplete = runaway || (await queue.cappedAny(run.systemId));
 	const live = await queue.stagedUrls(run.systemId);
 	const indexable = await queue.indexableUrls(run.systemId);
 	if (!incomplete && isStubGeneration(indexable.length)) {
@@ -452,7 +461,7 @@ async function continueDiscover(
 					now: iso,
 					deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
 				});
-	if (incomplete && !(runaway && indexable.length >= 2)) {
+	if (incomplete) {
 		await queue.noteCapDefer(run.systemId, iso);
 	} else {
 		await queue.recordSeedRefresh(run.systemId, systemSeedHash(seed), iso);
