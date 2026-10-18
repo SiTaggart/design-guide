@@ -271,6 +271,21 @@ describe("rankCitations", () => {
 		expect(rankCitations([create, dialog], "primer dialog guidance")[0]?.url).toBe(dialog.url);
 	});
 
+	it("matches a plural query word to the singular component path", () => {
+		const wizard = hit({
+			url: "https://paste-dsys.com/page-templates/wizard",
+			score: 0.984,
+			passage: "The wizard includes a Button.",
+		});
+		const button = hit({
+			url: "https://paste-dsys.com/components/button",
+			score: 0.771,
+			passage: "Buttons show the actions available on a page.",
+		});
+		expect(rankCitations([wizard, button], "Paste buttons guidance")[0]?.url).toBe(button.url);
+		expect(rankCitations([wizard, button], "Paste guidance for buttons")[0]?.url).toBe(button.url);
+	});
+
 	it("drops a fused score of 1 when the reranker score is below the floor", () => {
 		const ranked = rankCitations(
 			[hit({ url: "https://paste-dsys.com/components/form", score: 0.01, passage: "junk" })],
