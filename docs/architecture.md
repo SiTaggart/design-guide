@@ -45,7 +45,7 @@ flowchart LR
 { "results": [{ "passage": "…", "source": "Primer", "url": "https://…", "system": "primer", "score": 0.72 }] }
 ```
 
-`passage` is the chunk text, verbatim. `url` is the page https URL. `source` is the label. `system` is the seed id. `score` is the AI Search vector similarity score (`scoring_details.vector_score`). The 0.6 floor uses that same score. The worker asks AI Search for 50 candidates and does not rerank them. It drops `llms.txt` index files, keeps the highest-scoring chunk of each page, and sorts by similarity, highest first. A page under 0.6 is never returned. The calling agent decides relevance.
+`passage` is the chunk text, verbatim. `url` is the page https URL. `source` is the label. `system` is the seed id. `score` is the AI Search vector similarity score (`scoring_details.vector_score`). The 0.6 floor uses that same score. The worker asks AI Search for the top 50 chunks by vector similarity (`retrieval_type: "vector"`) and sends `reranking: { enabled: false }`. It drops `llms.txt` index files, keeps the highest-scoring chunk of each page, and sorts by similarity, highest first. A page under 0.6 is never returned. The calling agent decides relevance.
 
 No matches after the filter: `{ "results": [] }`. Missing query: `400` `{ "error": "query_required" }`.
 

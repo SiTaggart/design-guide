@@ -9,10 +9,10 @@ export type SearchCall = {
 	query: string;
 	ai_search_options: {
 		query_rewrite: { enabled: false };
+		reranking: { enabled: false };
 		retrieval: {
 			max_num_results: number;
-			retrieval_type: "hybrid";
-			keyword_match_mode: "or";
+			retrieval_type: "vector";
 			filters?: { system: SystemFilter };
 		};
 	};
@@ -69,10 +69,10 @@ export async function searchCitations(
 		query: params.query,
 		ai_search_options: {
 			query_rewrite: { enabled: false },
+			reranking: { enabled: false },
 			retrieval: {
 				max_num_results: RETRIEVAL_CANDIDATES,
-				retrieval_type: "hybrid",
-				keyword_match_mode: "or",
+				retrieval_type: "vector",
 				...(filters ? { filters } : {}),
 			},
 		},

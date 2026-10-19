@@ -102,8 +102,11 @@ describe("HTTP search against a fixture index", () => {
 		expect(await response.json()).toEqual({ results: fixtureCitations });
 		expect(calls[0]).not.toHaveProperty("messages");
 		expect(calls[0].ai_search_options.query_rewrite).toEqual({ enabled: false });
-		expect(calls[0].ai_search_options.retrieval.max_num_results).toBe(RETRIEVAL_CANDIDATES);
-		expect(calls[0].ai_search_options).not.toHaveProperty("reranking");
+		expect(calls[0].ai_search_options.reranking).toEqual({ enabled: false });
+		expect(calls[0].ai_search_options.retrieval).toEqual({
+			max_num_results: RETRIEVAL_CANDIDATES,
+			retrieval_type: "vector",
+		});
 	});
 
 	it("omits a 0.59 hit from citation JSON and keeps a 0.6 hit", async () => {
