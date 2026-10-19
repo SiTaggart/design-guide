@@ -1,6 +1,7 @@
-import { INSTANCE_ID } from "../config/instance.ts";
+import { INSTANCE_ID, RETRIEVAL_CANDIDATES } from "../config/instance.ts";
 import type { SearchChunk, SearchParams, SearchResponse } from "../config/types.ts";
-import { keepScoredChunks, mapChunks } from "../serve/map-chunks.ts";
+import { mapChunks } from "../serve/map-chunks.ts";
+import { selectCitations } from "../serve/select-citations.ts";
 
 export type SystemFilter = string | { $nin: readonly string[] } | { $in: readonly string[] };
 
@@ -8,10 +9,10 @@ export type SearchCall = {
 	query: string;
 	ai_search_options: {
 		query_rewrite: { enabled: false };
+		reranking: { enabled: false };
 		retrieval: {
 			max_num_results: number;
-			retrieval_type: "hybrid";
-			keyword_match_mode: "or";
+			retrieval_type: "vector";
 			filters?: { system: SystemFilter };
 		};
 	};
@@ -68,15 +69,15 @@ export async function searchCitations(
 		query: params.query,
 		ai_search_options: {
 			query_rewrite: { enabled: false },
+			reranking: { enabled: false },
 			retrieval: {
-				max_num_results: params.k,
-				retrieval_type: "hybrid",
-				keyword_match_mode: "or",
+				max_num_results: RETRIEVAL_CANDIDATES,
+				retrieval_type: "vector",
 				...(filters ? { filters } : {}),
 			},
 		},
 	});
-	return { results: mapChunks(keepScoredChunks(result.chunks ?? [])) };
+	return { results: selectCitations(mapChunks(result.chunks ?? []), params.k) };
 }
 
 export async function indexHasCompletedItems(env: WorkerEnv): Promise<boolean> {

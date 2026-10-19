@@ -33,11 +33,12 @@ export async function uploadQueuedPage(
 	item: PageWorkItem,
 	markdown: string,
 	timestamps: { lastCrawled: string; lastIndexed: string },
+	now: string,
 ): Promise<string> {
 	if (!fitsItem({ url: item.url, status: "completed", markdown }, seed)) {
 		throw new Error("page is not indexable");
 	}
-	const key = pageItemKey(item.systemId, item.url, item.attempts, timestamps.lastIndexed);
+	const key = pageItemKey(item.systemId, item.url, item.attempts, item.claimedAt ?? now);
 	await uploadItem(auth, key, markdown, {
 		system: seed.id,
 		source: seed.source,
@@ -54,9 +55,10 @@ export async function indexQueuedPage(
 	item: PageWorkItem,
 	markdown: string,
 	timestamps: { lastCrawled: string; lastIndexed: string },
+	now: string,
 	catalog?: { items: ItemRecord[] | null },
 ): Promise<string> {
-	const key = await uploadQueuedPage(auth, seed, item, markdown, timestamps);
+	const key = await uploadQueuedPage(auth, seed, item, markdown, timestamps, now);
 	const cleaned = await cleanupReplacedItems(auth, item.systemId, item.url, key, item.itemKey, catalog);
 	if (cleaned !== "clean") {
 		throw new Error("legacy cleanup failed");
@@ -180,10 +182,24 @@ export async function drainTick(input: {
 	await ensureInstance(itemsAuth);
 	const fetchMarkdown = input.fetchMarkdown ?? ((url: string) => fetchPageMarkdown(input.auth, url));
 	const catalog: { items: ItemRecord[] | null } = { items: null };
+	const heldClock = new Map<SystemId, boolean>();
+	const keepsClock = async (systemId: SystemId): Promise<boolean> => {
+		const cached = heldClock.get(systemId);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const held = await input.queue.holdsFreshness(systemId);
+		heldClock.set(systemId, held);
+		return held;
+	};
 	let indexed = 0;
 	let failed = 0;
 	for (const item of claimed) {
-		const timestamps = { lastCrawled: input.now, lastIndexed: input.now };
+		const keepIndexedAt = await keepsClock(item.systemId);
+		const timestamps = {
+			lastCrawled: input.now,
+			lastIndexed: keepIndexedAt && item.lastIndexed ? item.lastIndexed : input.now,
+		};
 		if (!(await input.queue.owns(item))) {
 			continue;
 		}
@@ -192,9 +208,10 @@ export async function drainTick(input: {
 			if (!(await input.queue.owns(item))) {
 				continue;
 			}
+			const stamp = item.claimedAt ?? input.now;
 			const itemKey = input.indexPage
-				? await input.indexPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps)
-				: await uploadQueuedPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps);
+				? await input.indexPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps, stamp)
+				: await uploadQueuedPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps, stamp);
 			if (!input.indexPage) {
 				const cleaned = await cleanupReplacedItems(
 					itemsAuth,
@@ -222,7 +239,7 @@ export async function drainTick(input: {
 					continue;
 				}
 			}
-			if (await input.queue.complete(item, timestamps, itemKey)) {
+			if (await input.queue.complete(item, timestamps, itemKey, { keepIndexedAt })) {
 				indexed += 1;
 			}
 		} catch (error) {

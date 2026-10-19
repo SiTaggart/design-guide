@@ -238,7 +238,7 @@ describe("swapFromOutcome", () => {
 		});
 		expect(failed).toMatchObject({ indexed: 0, keptPrevious: true, error: "crawl ended failed" });
 		expect(failed.parked).toBeUndefined();
-		expect(limited).toMatchObject({ indexed: 0, keptPrevious: true, hitLimit: true });
+		expect(limited).toMatchObject({ indexed: 0, keptPrevious: true, hitLimit: false, incomplete: true });
 		expect(limited.error).toBeUndefined();
 		expect(stub).toMatchObject({ indexed: 0, keptPrevious: true, parked: true, usable: 1 });
 		expect(items).toEqual([prior]);
@@ -747,13 +747,13 @@ describe("streamSwap", () => {
 		});
 		const limited = await streamSwap({ accountId: "acct", apiToken: "token" }, seed, {
 			startUrl: seed.startUrl,
-			snapshot: { status: "completed", total: 500, finished: 500 },
+			snapshot: { status: "cancelled_due_to_limits", total: 100_000, finished: 100_000 },
 			generation: "gen-limit",
 			fetchPage,
-			countStatuses: async () => ({ ...counts, total: 500, finished: 500 }),
+			countStatuses: async () => ({ ...counts, total: 100_000, finished: 100_000 }),
 		});
 		expect(failed).toMatchObject({ indexed: 0, keptPrevious: true, error: "crawl ended failed" });
-		expect(limited).toMatchObject({ indexed: 0, keptPrevious: true, hitLimit: true });
+		expect(limited).toMatchObject({ indexed: 0, keptPrevious: true, hitLimit: false, incomplete: true });
 		expect(limited.error).toBeUndefined();
 		expect(items).toEqual([{ id: "old-1", key: "primer/oldgen/aaaa.md" }]);
 		expect(uploadItem).not.toHaveBeenCalled();

@@ -47,7 +47,8 @@ export type Citation = {
 
 export type SearchParams = {
 	query: string;
-	k: number;
+	/** Upper bound on returned pages. Omitted means every passage at or above the floor, up to MAX_K. */
+	k?: number;
 	system?: SystemId;
 };
 
@@ -58,6 +59,9 @@ export type SearchResponse = {
 export type SearchChunk = {
 	text?: string;
 	score?: unknown;
+	scoring_details?: {
+		vector_score?: unknown;
+	};
 	item?: {
 		key?: string;
 		metadata?: Record<string, unknown>;

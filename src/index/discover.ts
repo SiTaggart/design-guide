@@ -1,14 +1,17 @@
-import { CRAWL_LIMIT, INSTANCE_ID } from "../config/instance.ts";
+import { INSTANCE_ID } from "../config/instance.ts";
 import { seedById } from "../config/seed.ts";
 import type { SystemId } from "../config/types.ts";
 import {
 	CRAWL_POLL_DEADLINE_MS,
 	cancelCrawl,
+	crawlStoppedEarly,
 	fetchCrawlPage,
 	pollJob,
+	reachedRunawayCeiling,
 	startSeedCrawl,
 	type CrawlAuth,
 } from "../crawl/browser-run.ts";
+import { frontierLinks } from "../crawl/links.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
 import { deleteItem, deleteItemByKey, listItems, type ItemsAuth } from "./items-rest.ts";
@@ -26,9 +29,25 @@ import {
 
 export const DISCOVER_URLS_PER_TICK = 25;
 export const CAP_RETRY_MS = 60 * 60 * 1000;
-/** Records per capped results response. Full markdown makes a large page easy to OOM. */
-export const CAP_RECORD_LIMIT = 5;
+
+export type CapDeferMark = string | { at: string; streak: number };
+
+export function capRetryDelayMs(streak: number): number {
+	if (streak <= 1) {
+		return CAP_RETRY_MS;
+	}
+	if (streak === 2) {
+		return 6 * CAP_RETRY_MS;
+	}
+	if (streak === 3) {
+		return 24 * CAP_RETRY_MS;
+	}
+	return 7 * 24 * CAP_RETRY_MS;
+}
+/** One record per results request. Markdown stays on the response, then is discarded. */
+export const DISCOVER_RECORD_LIMIT = 1;
 const MAX_POLL_FAILURES = 5;
+const MAX_SKIPPED_STARTS = 3;
 
 export type DiscoverPick = {
 	systemId: SystemId;
@@ -48,6 +67,7 @@ export type DiscoverTickResult =
 			urls: number;
 			pruned: string[];
 			hitLimit: boolean;
+			incomplete: boolean;
 	  }
 	| { action: "parked"; systemId: SystemId; trigger: DiscoverPick["trigger"]; usable: number }
 	| { action: "failed"; systemId?: SystemId; trigger?: DiscoverPick["trigger"]; error: string };
@@ -62,7 +82,7 @@ export function pickDiscoverSystem(input: {
 	parks: Parks;
 	busy?: ReadonlySet<SystemId>;
 	recoveryAttempts?: Readonly<Record<string, string>>;
-	deferred?: Readonly<Record<string, string>>;
+	deferred?: Readonly<Record<string, CapDeferMark>>;
 	now?: number;
 }): DiscoverPick | null {
 	const busy = input.busy ?? new Set<SystemId>();
@@ -90,15 +110,21 @@ export function pickDiscoverSystem(input: {
 	return null;
 }
 
-export function capCooling(id: SystemId, deferred: Readonly<Record<string, string>>, now: number | undefined): boolean {
-	const at = deferred[id];
-	if (!at) {
+export function capCooling(
+	id: SystemId,
+	deferred: Readonly<Record<string, CapDeferMark>>,
+	now: number | undefined,
+): boolean {
+	const mark = deferred[id];
+	if (!mark) {
 		return false;
 	}
+	const at = typeof mark === "string" ? mark : mark.at;
+	const streak = typeof mark === "string" ? 1 : mark.streak;
 	if (now === undefined) {
 		return true;
 	}
-	return now - Date.parse(at) < CAP_RETRY_MS;
+	return now - Date.parse(at) < capRetryDelayMs(streak);
 }
 
 export function nextParkedSystem(
@@ -238,7 +264,7 @@ export type DiscoverDeps = {
 };
 
 function cappedCrawl(status: string, finished: number): boolean {
-	return status === "cancelled_due_to_limits" || (status === "completed" && finished >= CRAWL_LIMIT);
+	return crawlStoppedEarly(status, finished);
 }
 
 export async function discoverTick(
@@ -286,7 +312,7 @@ async function runDiscover(
 		parks: parksRead.parks,
 		busy: new Set(freshness.filter((row) => row.pending + row.claimed > 0).map((row) => row.system)),
 		recoveryAttempts: await queue.recoveryAttempts(),
-		deferred: await queue.capDefers(),
+		deferred: await queue.capDeferMarks(),
 		now: now.getTime(),
 	});
 	if (!pick) {
@@ -332,7 +358,13 @@ async function continueDiscover(
 ): Promise<DiscoverTickResult> {
 	const iso = now.toISOString();
 	if (Date.parse(run.startedAt) + CRAWL_POLL_DEADLINE_MS < now.getTime()) {
-		return failDiscover(queue, auth, run, deps, "discover timed out");
+		const indexable = await queue.indexableCount(run.systemId);
+		const staged = await queue.stagedUrls(run.systemId);
+		if (indexable === 0 && staged.length === 0) {
+			return failDiscover(queue, auth, run, deps, iso, "discover timed out");
+		}
+		await cancelJob(auth, run, deps);
+		return finishDiscover(env, queue, auth, run, deps, iso, true);
 	}
 	let snapshot: { status: string; finished: number };
 	try {
@@ -344,7 +376,7 @@ async function continueDiscover(
 	} catch (error) {
 		const failures = await queue.notePollFailure(run.systemId, iso);
 		if (failures >= MAX_POLL_FAILURES) {
-			return failDiscover(queue, auth, run, deps, error instanceof Error ? error.message : String(error));
+			return failOrFinish(env, queue, auth, run, deps, iso, startFailureMessage(error));
 		}
 		return { action: "continued", systemId: run.systemId, accepted: 0 };
 	}
@@ -352,31 +384,50 @@ async function continueDiscover(
 		return { action: "continued", systemId: run.systemId, accepted: 0 };
 	}
 	const capped = cappedCrawl(snapshot.status, snapshot.finished);
+	if (capped) {
+		await queue.noteCapped(run.systemId, iso);
+	}
 	if (!capped && snapshot.status !== "completed") {
-		return failDiscover(queue, auth, run, deps, `crawl ended ${snapshot.status}`);
+		return failOrFinish(env, queue, auth, run, deps, iso, `crawl ended ${snapshot.status}`);
 	}
 	const seed = seedById(run.systemId);
 	let cursor = run.cursor;
 	let accepted = 0;
-	if (cursor !== "done") {
+	let runaway = reachedRunawayCeiling(await queue.indexableCount(run.systemId));
+	if (cursor !== "done" && !runaway) {
 		try {
 			for (let i = 0; i < DISCOVER_URLS_PER_TICK && cursor !== "done"; i += 1) {
-				const page = await deps.page(
-					auth,
-					run.jobId,
-					"completed",
-					cursor ?? undefined,
-					capped ? CAP_RECORD_LIMIT : 1,
-				);
+				if (reachedRunawayCeiling(await queue.indexableCount(run.systemId))) {
+					runaway = true;
+					cursor = "done";
+					await queue.saveCursor(run.systemId, cursor, iso);
+					break;
+				}
+				const page = await deps.page(auth, run.jobId, "completed", cursor ?? undefined, DISCOVER_RECORD_LIMIT);
 				for (const record of page.records) {
 					if (!record.url.startsWith("https://")) {
 						continue;
 					}
 					await queue.stageUrl(run.systemId, record.url);
+					if (record.markdown) {
+						await queue.addFrontier(run.systemId, frontierLinks(record.markdown, record.url, seed));
+					}
 					if (record.status === "completed" && fitsItem(record, seed)) {
+						if (reachedRunawayCeiling(await queue.indexableCount(run.systemId))) {
+							runaway = true;
+							break;
+						}
 						await queue.stageIndexable(run.systemId, record.url);
 						accepted += 1;
+						if (reachedRunawayCeiling(await queue.indexableCount(run.systemId))) {
+							runaway = true;
+						}
 					}
+				}
+				if (runaway) {
+					cursor = "done";
+					await queue.saveCursor(run.systemId, cursor, iso);
+					break;
 				}
 				cursor = page.cursor === null ? "done" : String(page.cursor);
 				await queue.saveCursor(run.systemId, cursor, iso);
@@ -384,7 +435,7 @@ async function continueDiscover(
 		} catch (error) {
 			const failures = await queue.notePollFailure(run.systemId, iso);
 			if (failures >= MAX_POLL_FAILURES) {
-				return failDiscover(queue, auth, run, deps, error instanceof Error ? error.message : String(error));
+				return failOrFinish(env, queue, auth, run, deps, iso, startFailureMessage(error));
 			}
 			return { action: "continued", systemId: run.systemId, accepted };
 		}
@@ -392,9 +443,62 @@ async function continueDiscover(
 	if (cursor !== "done") {
 		return { action: "continued", systemId: run.systemId, accepted };
 	}
+	if (!runaway) {
+		const seen = new Set(await queue.stagedUrls(run.systemId));
+		let next = await queue.nextFrontier(run.systemId, seen);
+		while (next) {
+			const frontierUrl = next;
+			try {
+				const started = await deps.start(auth, seed, frontierUrl);
+				await queue.replaceJob(run.systemId, started.jobId, started.startUrl, iso);
+				return { action: "continued", systemId: run.systemId, accepted };
+			} catch (error) {
+				const message = startFailureMessage(error);
+				console.log(
+					JSON.stringify({
+						event: "crawl_start_failed",
+						system: run.systemId,
+						url: frontierUrl,
+						error: message,
+					}),
+				);
+				if (accountAuthFailure(error)) {
+					await queue.noteSkipped(run.systemId, iso);
+					await queue.noteAttempt(run.systemId, frontierUrl);
+					break;
+				}
+				const failures = await queue.noteStartFailure(run.systemId, iso);
+				if (failures < MAX_POLL_FAILURES) {
+					return { action: "continued", systemId: run.systemId, accepted };
+				}
+				const skipped = await queue.noteSkipped(run.systemId, iso);
+				await queue.noteAttempt(run.systemId, frontierUrl);
+				await queue.clearStartFailures(run.systemId, iso);
+				await queue.clearPollFailures(run.systemId, iso);
+				if (skipped >= MAX_SKIPPED_STARTS) {
+					break;
+				}
+				next = await queue.nextFrontier(run.systemId, seen);
+			}
+		}
+	}
+	const incomplete = runaway || (await queue.cappedAny(run.systemId)) || (await queue.skippedAny(run.systemId));
+	return finishDiscover(env, queue, auth, run, deps, iso, incomplete);
+}
+
+async function finishDiscover(
+	env: WorkerEnv,
+	queue: D1PageQueue,
+	auth: CrawlAuth,
+	run: DiscoverRun,
+	deps: DiscoverDeps,
+	iso: string,
+	incomplete: boolean,
+): Promise<DiscoverTickResult> {
+	const seed = seedById(run.systemId);
 	const live = await queue.stagedUrls(run.systemId);
 	const indexable = await queue.indexableUrls(run.systemId);
-	if (!capped && isStubGeneration(indexable.length)) {
+	if (!incomplete && isStubGeneration(indexable.length)) {
 		await writePark(env, run.systemId, indexable.length, iso);
 		await writeIndexedHash(env, run.systemId, systemSeedHash(seed));
 		await writeLastIndexedHashIfComplete(env);
@@ -403,7 +507,6 @@ async function continueDiscover(
 		await queue.clearRun(run.systemId);
 		return { action: "parked", systemId: run.systemId, trigger: run.trigger, usable: indexable.length };
 	}
-	const thin = capped && isStubGeneration(indexable.length);
 	const itemsAuth = itemsAuthFrom(env, auth);
 	const committed =
 		indexable.length === 0
@@ -415,11 +518,11 @@ async function continueDiscover(
 					urls: indexable,
 					liveUrls: live,
 					ok: true,
-					prune: !capped,
+					prune: !incomplete,
 					now: iso,
 					deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
 				});
-	if (thin) {
+	if (incomplete) {
 		await queue.noteCapDefer(run.systemId, iso);
 	} else {
 		await queue.recordSeedRefresh(run.systemId, systemSeedHash(seed), iso);
@@ -433,8 +536,33 @@ async function continueDiscover(
 		trigger: run.trigger,
 		urls: indexable.length,
 		pruned: committed.pruned.map((row) => row.url),
-		hitLimit: capped,
+		hitLimit: false,
+		incomplete,
 	};
+}
+
+async function failOrFinish(
+	env: WorkerEnv,
+	queue: D1PageQueue,
+	auth: CrawlAuth,
+	run: DiscoverRun,
+	deps: DiscoverDeps,
+	iso: string,
+	error: string,
+): Promise<DiscoverTickResult> {
+	if (await hasStagedPages(queue, run.systemId)) {
+		await queue.noteAttempt(run.systemId, run.startUrl);
+		await cancelJob(auth, run, deps);
+		return finishDiscover(env, queue, auth, run, deps, iso, true);
+	}
+	return failDiscover(queue, auth, run, deps, iso, error);
+}
+
+async function hasStagedPages(queue: D1PageQueue, systemId: DiscoverRun["systemId"]): Promise<boolean> {
+	if ((await queue.indexableCount(systemId)) > 0) {
+		return true;
+	}
+	return (await queue.stagedUrls(systemId)).length > 0;
 }
 
 async function failDiscover(
@@ -442,8 +570,16 @@ async function failDiscover(
 	auth: CrawlAuth,
 	run: DiscoverRun,
 	deps: DiscoverDeps,
+	iso: string,
 	error: string,
 ): Promise<DiscoverTickResult> {
+	await cancelJob(auth, run, deps);
+	await queue.noteCapDefer(run.systemId, iso);
+	await queue.clearRun(run.systemId);
+	return { action: "failed", systemId: run.systemId, trigger: run.trigger, error };
+}
+
+async function cancelJob(auth: CrawlAuth, run: DiscoverRun, deps: DiscoverDeps): Promise<void> {
 	try {
 		await deps.cancel(auth, run.jobId);
 	} catch (cancelError) {
@@ -451,12 +587,27 @@ async function failDiscover(
 			JSON.stringify({
 				event: "crawl_cancel_failed",
 				system: run.systemId,
-				error: cancelError instanceof Error ? cancelError.message : String(cancelError),
+				error: startFailureMessage(cancelError),
 			}),
 		);
 	}
-	await queue.clearRun(run.systemId);
-	return { action: "failed", systemId: run.systemId, trigger: run.trigger, error };
+}
+
+function startFailureMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function accountAuthFailure(error: unknown): boolean {
+	const status = httpStatusOf(error);
+	return status === 401 || status === 403;
+}
+
+function httpStatusOf(error: unknown): number | undefined {
+	if (!error || typeof error !== "object" || !("httpStatus" in error)) {
+		return undefined;
+	}
+	const status = error.httpStatus;
+	return typeof status === "number" ? status : undefined;
 }
 
 function crawlAuth(env: WorkerEnv): CrawlAuth | null {

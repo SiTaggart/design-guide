@@ -3,8 +3,8 @@ import { SYSTEM_IDS } from "../src/config/types.ts";
 import { seedById } from "../src/config/seed.ts";
 import worker from "../src/worker.ts";
 import {
-	CAP_RECORD_LIMIT,
 	CAP_RETRY_MS,
+	DISCOVER_RECORD_LIMIT,
 	DISCOVER_URLS_PER_TICK,
 	discoverTick,
 	commitDiscoveredUrls,
@@ -12,7 +12,7 @@ import {
 	pickDiscoverSystem,
 } from "../src/index/discover.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
-import { drainTick, indexQueuedPage, pageItemKey } from "../src/index/drain.ts";
+import { drainTick, indexQueuedPage, pageItemKey, uploadQueuedPage } from "../src/index/drain.ts";
 import { fillTick, noteIndexedSeeds } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import { D1PageQueue, EXHAUSTED_RETRY_MS, FRESHNESS_MS, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
@@ -664,6 +664,180 @@ describe("drain wipe bar", () => {
 		expect(row?.last_indexed).toBe("2026-01-02T00:00:00.000Z");
 		expect(row?.item_key).toBe("primer/page/previous.md");
 		expect(row?.error).toContain("oom");
+	});
+});
+
+describe("held index clock", () => {
+	it("writes the stored index time to AI Search and reads the cap defer once for the system", async () => {
+		const raw = memoryD1();
+		let selects = 0;
+		const prepare = raw.prepare.bind(raw);
+		const db = {
+			prepare(sql: string) {
+				if (sql.includes("FROM cap_defer") && sql.includes("SELECT")) {
+					selects += 1;
+				}
+				return prepare(sql);
+			},
+			exec: raw.exec.bind(raw),
+			batch: raw.batch.bind(raw),
+		} as D1Database;
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const old = "2026-01-02T00:00:00.000Z";
+		const urls = [
+			"https://paste-dsys.com/components/button",
+			"https://paste-dsys.com/components/alert",
+			"https://paste-dsys.com/components/input",
+		];
+		await pageQueue.enqueueUpsert(
+			urls.map((url) => ({ systemId: "paste" as const, url, kind: "seed" as const })),
+			old,
+		);
+		for (const url of urls) {
+			await pageQueue.complete(
+				{ systemId: "paste", url },
+				{ lastCrawled: old, lastIndexed: old },
+				"paste/page/old.md",
+			);
+		}
+		await pageQueue.enqueueUpsert(
+			urls.map((url) => ({ systemId: "paste" as const, url, kind: "reindex" as const })),
+			NOW,
+		);
+		await pageQueue.noteCapDefer("paste", old);
+		selects = 0;
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		const written: string[] = [];
+		const counts = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => "# guidance",
+			indexPage: async (_auth, _seed, _item, _markdown, timestamps) => {
+				written.push(timestamps.lastIndexed);
+				return "paste/page/new.md";
+			},
+		});
+		expect(counts.indexed).toBe(3);
+		expect(written).toEqual([old, old, old]);
+		const rows = await db
+			.prepare("SELECT last_indexed FROM page_work WHERE system_id = ?")
+			.bind("paste")
+			.all<{ last_indexed: string }>();
+		expect(rows.results.every((row) => row.last_indexed === old)).toBe(true);
+		expect(selects).toBe(1);
+	});
+
+	it("uploads changed markdown under a new key while a cap defer holds lastIndexed", async () => {
+		const pageQueue = await queue();
+		const url = "https://paste-dsys.com/components/button";
+		const old = "2026-01-02T00:00:00.000Z";
+		const oldKey = pageItemKey("paste", url, 1, old);
+		await pageQueue.enqueueUpsert([{ systemId: "paste", url, kind: "seed" }], old);
+		await pageQueue.complete({ systemId: "paste", url }, { lastCrawled: old, lastIndexed: old }, oldKey);
+		await pageQueue.enqueueUpsert([{ systemId: "paste", url, kind: "reindex" }], NOW);
+		await pageQueue.noteCapDefer("paste", old);
+		type Stored = { id: string; key: string; body: string; metadata: Record<string, string> };
+		const items: Stored[] = [
+			{
+				id: "old-id",
+				key: oldKey,
+				body: "# old button",
+				metadata: {
+					system: "paste",
+					source: "Paste",
+					source_url: url,
+					lastCrawled: old,
+					lastIndexed: old,
+				},
+			},
+		];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL, init?: RequestInit) => {
+				const target = new URL(typeof input === "string" ? input : input.toString());
+				const method = init?.method ?? "GET";
+				if (method === "GET" && target.pathname.endsWith("/instances/design-guide")) {
+					return json(200, { result: { id: "design-guide" } });
+				}
+				if (method === "POST" && target.pathname.endsWith("/items")) {
+					const form = init?.body as FormData;
+					const file = form.get("file") as File;
+					const key = file.name;
+					const body = await file.text();
+					const metadata = JSON.parse(String(form.get("metadata"))) as Record<string, string>;
+					const existing = items.find((item) => item.key === key);
+					if (existing) {
+						return json(409, { errors: [{ code: 7042, message: "item_key_already_exist" }] });
+					}
+					items.push({ id: "new-id", key, body, metadata });
+					return json(200, { result: { id: "new-id", key } });
+				}
+				if (method === "GET" && target.pathname.endsWith("/items")) {
+					const lookup = target.searchParams.get("key");
+					const result = lookup ? items.filter((item) => item.key === lookup) : items;
+					return json(200, {
+						result,
+						result_info: { count: result.length, total_count: result.length },
+					});
+				}
+				if (method === "DELETE" && target.pathname.includes("/items/")) {
+					const id = decodeURIComponent(target.pathname.slice(target.pathname.lastIndexOf("/") + 1));
+					const index = items.findIndex((item) => item.id === id);
+					if (index >= 0) {
+						items.splice(index, 1);
+					}
+					return json(200, { success: true });
+				}
+				return json(500, { errors: [{ message: `unexpected ${method} ${target}` }] });
+			}),
+		);
+		const counts = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async () => "# new button",
+		});
+		expect(counts).toEqual({ claimed: 1, indexed: 1, failed: 0 });
+		expect(items.map((item) => item.body)).toEqual(["# new button"]);
+		expect(items[0]?.key).not.toBe(oldKey);
+		expect(items[0]?.metadata.lastIndexed).toBe(old);
+		const row = await pageQueueDb(pageQueue)
+			.prepare("SELECT status, last_indexed, item_key FROM page_work WHERE url = ?")
+			.bind(url)
+			.first<{ status: string; last_indexed: string; item_key: string }>();
+		expect(row).toEqual({ status: "done", last_indexed: old, item_key: items[0]?.key });
+		await deleteOrphanDocs(
+			{ accountId: "acct", apiToken: "token", instanceId: "design-guide" },
+			"paste",
+			[{ url, itemKey: "paste/page/previous-run.md" }],
+		);
+		expect(items).toEqual([]);
+	});
+
+	it("uses the run time for the item key when a claim time is missing", async () => {
+		const url = "https://paste-dsys.com/components/button";
+		const held = "2026-01-02T00:00:00.000Z";
+		vi.spyOn(itemsRest, "uploadItem").mockResolvedValue({ id: "fresh", key: "paste/page/fresh.md" });
+		const key = await uploadQueuedPage(
+			{ accountId: "acct", apiToken: "token", instanceId: "design-guide" },
+			seedById("paste"),
+			{
+				systemId: "paste",
+				url,
+				kind: "reindex",
+				enqueuedAt: NOW,
+				attempts: 1,
+				status: "claimed",
+				itemKey: null,
+			},
+			"# new button",
+			{ lastCrawled: NOW, lastIndexed: held },
+			NOW,
+		);
+		expect(key).toBe(pageItemKey("paste", url, 1, NOW));
+		expect(key).not.toBe(pageItemKey("paste", url, 1, held));
 	});
 });
 
@@ -1329,6 +1503,7 @@ describe("legacy page copies", () => {
 			},
 			"# select",
 			{ lastCrawled: NOW, lastIndexed: NOW },
+			NOW,
 		);
 		expect(key.startsWith("primer/page/")).toBe(true);
 		expect(deleted).toEqual(["legacy"]);
@@ -1667,7 +1842,14 @@ describe("page cap recovery", () => {
 			},
 			cancel: async () => undefined,
 		});
-		expect(result).toMatchObject({ action: "enqueued", systemId: "paste", urls: 2, pruned: [] });
+		expect(result).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			urls: 2,
+			pruned: [],
+			hitLimit: false,
+			incomplete: true,
+		});
 		expect(await pageQueue.running()).toBeNull();
 		expect(await urls(pageQueue)).toEqual([
 			"https://paste-dsys.com/a",
@@ -1679,7 +1861,8 @@ describe("page cap recovery", () => {
 		if (parks.kind === "ok") {
 			expect(parks.parks.paste).toBeUndefined();
 		}
-		expect((await pageQueue.seedRefreshes()).paste?.seedHash).toBe(systemSeedHash(seedById("paste")));
+		expect(await pageQueue.seedRefreshes()).toEqual({});
+		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
 	});
 
 	it("defers a capped seed with no usable pages so the next tick discovers another drifted seed", async () => {
@@ -1818,14 +2001,14 @@ describe("page cap recovery", () => {
 			cancel: async () => undefined,
 		});
 		expect(interrupted).toMatchObject({ action: "continued", systemId: "paste" });
-		expect(limits).toEqual([CAP_RECORD_LIMIT, CAP_RECORD_LIMIT]);
+		expect(limits).toEqual([DISCOVER_RECORD_LIMIT, DISCOVER_RECORD_LIMIT]);
 		expect((await pageQueue.running())?.cursor).toBe("2");
 
 		const resumed = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
 			poll: async () => ({ status: "cancelled_due_to_limits", finished: 533, total: 533 }),
 			page: async (_auth, _job, _status, cursor, limit) => {
 				expect(cursor).toBe("2");
-				expect(limit).toBe(CAP_RECORD_LIMIT);
+				expect(limit).toBe(DISCOVER_RECORD_LIMIT);
 				return {
 					records: [{ url: "https://paste-dsys.com/b", status: "completed", markdown: "# b" }],
 					cursor: null,
@@ -1841,7 +2024,8 @@ describe("page cap recovery", () => {
 			systemId: "paste",
 			urls: 2,
 			pruned: [],
-			hitLimit: true,
+			hitLimit: false,
+			incomplete: true,
 		});
 		expect(await pageQueue.running()).toBeNull();
 		expect((await urls(pageQueue)).filter((url) => url.includes("paste-dsys.com"))).toEqual([
@@ -2005,7 +2189,7 @@ describe("page cap recovery", () => {
 		expect(filled.queue.pending + filled.queue.done).toBeGreaterThan(0);
 		const paste = filled.systems.find((entry) => entry.system === "paste");
 		expect(paste?.error).toBeUndefined();
-		expect(paste).toMatchObject({ hitLimit: true, usable: 2, indexed: 0 });
+		expect(paste).toMatchObject({ hitLimit: false, incomplete: true, usable: 2, indexed: 0 });
 		await fillTick(env, DRIFT_CRON, new Date("2026-09-30T00:10:00.000Z"), deps);
 		expect(started).toEqual(["paste", "primer"]);
 		const moved = await readStatus(env);

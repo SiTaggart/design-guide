@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { mapChunks } from "../src/serve/map-chunks.ts";
-import { fixtureChunks, invalidChunks } from "./fixtures/chunks.ts";
+import { fixtureChunks, invalidChunks, withVectorScore } from "./fixtures/chunks.ts";
 
 const fixtureCitations = [
 	{
@@ -30,7 +30,7 @@ const fixtureCitations = [
 ];
 
 describe("mapChunks", () => {
-	it("copies passage text, https metadata, and the AI Search score without rewriting", () => {
+	it("copies passage text, https metadata, and the vector similarity score", () => {
 		expect(mapChunks(fixtureChunks)).toEqual(fixtureCitations);
 	});
 
@@ -46,7 +46,8 @@ describe("mapChunks", () => {
 		const mapped = mapChunks([
 			{
 				text: "keyboard focus remains on the combobox input",
-				score: 0.7,
+				score: 1,
+				scoring_details: { vector_score: 0.7 },
 				item: {
 					key: "govuk/gen/dddd.md",
 					metadata: {
@@ -66,38 +67,38 @@ describe("mapChunks", () => {
 		]);
 	});
 
-	it("keeps a score of 0.6 and drops a score of 0.59", () => {
-		const kept = {
-			text: "boundary keep",
-			score: 0.6,
-			item: {
-				metadata: {
-					system: "primer",
-					source: "Primer",
-					source_url: "https://primer.style/",
+	it("publishes the vector similarity score and ignores a fused chunk score of 1", () => {
+		const mapped = mapChunks([
+			withVectorScore(
+				{
+					text: "boundary keep",
+					score: 1,
+					item: {
+						metadata: {
+							system: "primer",
+							source: "Primer",
+							source_url: "https://primer.style/",
+						},
+					},
 				},
-			},
-		};
-		const dropped = {
-			text: "just below",
-			score: 0.59,
-			item: {
-				metadata: {
-					system: "uswds",
-					source: "USWDS",
-					source_url: "https://designsystem.digital.gov/",
+				0.6,
+			),
+			withVectorScore(
+				{
+					text: "just below",
+					score: 1,
+					item: {
+						metadata: {
+							system: "uswds",
+							source: "USWDS",
+							source_url: "https://designsystem.digital.gov/",
+						},
+					},
 				},
-			},
-		};
-		expect(mapChunks([kept, dropped])).toEqual([
-			{
-				passage: "boundary keep",
-				source: "Primer",
-				url: "https://primer.style/",
-				system: "primer",
-				score: 0.6,
-			},
+				0.59,
+			),
 		]);
+		expect(mapped.map((hit) => hit.score)).toEqual([0.6, 0.59]);
 	});
 
 	it("drops missing, string, out-of-range, and NaN scores without inventing a value", () => {
@@ -108,11 +109,11 @@ describe("mapChunks", () => {
 		};
 		expect(
 			mapChunks([
-				{ text: "kept", score: 0.9, item: { metadata } },
-				{ text: "missing score", item: { metadata } },
-				{ text: "string score", score: "0.9", item: { metadata } },
-				{ text: "out of range", score: 1.1, item: { metadata } },
-				{ text: "nan score", score: Number.NaN, item: { metadata } },
+				{ text: "kept", score: 1, scoring_details: { vector_score: 0.9 }, item: { metadata } },
+				{ text: "missing score", score: 1, item: { metadata } },
+				{ text: "string score", score: 1, scoring_details: { vector_score: "0.9" }, item: { metadata } },
+				{ text: "out of range", score: 0.9, scoring_details: { vector_score: 1.1 }, item: { metadata } },
+				{ text: "nan score", score: 0.9, scoring_details: { vector_score: Number.NaN }, item: { metadata } },
 			]),
 		).toEqual([
 			{

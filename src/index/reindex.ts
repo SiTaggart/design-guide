@@ -1,14 +1,16 @@
 import { createHash } from "node:crypto";
-import { CRAWL_LIMIT, INSTANCE_ID, MAX_ITEM_BYTES } from "../config/instance.ts";
+import { CRAWL_RUNAWAY_PAGES, INSTANCE_ID, MAX_ITEM_BYTES } from "../config/instance.ts";
 import { SEEDS, seedById } from "../config/seed.ts";
 import { isSystemId, type CrawlCounts, type Seed, type SystemId } from "../config/types.ts";
 import {
 	crawlSeed,
-	hitCrawlLimit,
+	crawlStoppedEarly,
+	reachedRunawayCeiling,
 	type CrawlAuth,
 	type CrawlOutcome,
 	type CrawlRecord,
 } from "../crawl/browser-run.ts";
+import { isLlmsIndexFile } from "../crawl/links.ts";
 import {
 	deleteItem,
 	ensureInstance,
@@ -33,6 +35,7 @@ export type SystemReindexResult = {
 	parked?: boolean;
 	usable?: number;
 	held?: boolean;
+	incomplete?: boolean;
 };
 
 const EMPTY_COUNTS: CrawlCounts = { total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 };
@@ -58,6 +61,9 @@ function isSystemGenerationKey(key: string, system: SystemId, generation: string
 }
 
 export function fitsItem(record: CrawlRecord, seed: Seed): boolean {
+	if (isLlmsIndexFile(record.url)) {
+		return false;
+	}
 	const markdown = record.markdown ?? "";
 	if (!markdown.trim() || new TextEncoder().encode(markdown).byteLength > MAX_ITEM_BYTES) {
 		return false;
@@ -149,17 +155,15 @@ function itemsAuthFrom(auth: ReindexAuth): ItemsAuth {
 }
 
 type SwapDecision =
-	| { action: "keep"; hitLimit: boolean; parked: boolean; error?: string }
-	| { action: "commit" };
+	| { action: "keep"; hitLimit: boolean; parked: boolean; incomplete?: boolean; error?: string }
+	| { action: "commit"; incomplete?: boolean };
 
 function swapDecision(input: {
 	status: string;
 	counts: CrawlCounts;
 	usable: number;
-	truncated?: boolean;
+	incomplete?: boolean;
 }): SwapDecision {
-	// A failed terminal status wins over the page cap. Only a completed crawl
-	// or cancelled_due_to_limits is a clean truncation.
 	if (input.status !== "completed" && input.status !== "cancelled_due_to_limits") {
 		return {
 			action: "keep",
@@ -168,14 +172,16 @@ function swapDecision(input: {
 			error: `crawl ended ${input.status}`,
 		};
 	}
-	const hitLimit =
-		input.truncated === true ||
-		hitCrawlLimit({ status: input.status, counts: input.counts }, input.usable);
-	if (hitLimit) {
+	const incomplete =
+		input.incomplete === true ||
+		crawlStoppedEarly(input.status, input.counts.finished) ||
+		reachedRunawayCeiling(input.usable);
+	if (incomplete) {
 		return {
 			action: "keep",
-			hitLimit: true,
+			hitLimit: false,
 			parked: false,
+			incomplete: true,
 		};
 	}
 	if (isStubGeneration(input.usable)) {
@@ -206,6 +212,7 @@ function keepResult(
 		hitLimit: decision.hitLimit,
 		keptPrevious,
 		usable,
+		...(decision.incomplete ? { incomplete: true } : {}),
 		...(decision.parked ? { parked: true } : {}),
 		...(decision.error ? { error: decision.error } : {}),
 	};
@@ -498,7 +505,7 @@ export async function streamSwap(
 		if (batch.cursor === null) {
 			break;
 		}
-		if (page >= CRAWL_LIMIT) {
+		if (usable >= CRAWL_RUNAWAY_PAGES) {
 			truncated = true;
 			break;
 		}
@@ -517,7 +524,7 @@ export async function streamSwap(
 			status: input.snapshot.status,
 			counts,
 			usable,
-			truncated,
+			incomplete: truncated,
 		});
 		if (decision.action === "keep") {
 			try {
@@ -618,7 +625,7 @@ export function isStubGeneration(usable: number): boolean {
 }
 
 export function reindexExitCode(results: readonly SystemReindexResult[]): 0 | 1 {
-	if (results.some((result) => result.hitLimit)) {
+	if (results.some((result) => result.hitLimit || result.incomplete)) {
 		return 1;
 	}
 	if (results.length > 0 && results.every((result) => result.indexed === 0)) {

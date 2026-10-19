@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { SearchCall, WorkerEnv } from "../src/index/ai-search.ts";
 import type { SearchChunk } from "../src/config/types.ts";
 import worker from "../src/worker.ts";
-import { fixtureChunks } from "./fixtures/chunks.ts";
+import { fixtureChunks, withVectorScore } from "./fixtures/chunks.ts";
+import { RETRIEVAL_CANDIDATES, MIN_SEARCH_SCORE } from "../src/config/instance.ts";
 
 const fixtureCitations = [
 	{
@@ -101,32 +102,43 @@ describe("HTTP search against a fixture index", () => {
 		expect(await response.json()).toEqual({ results: fixtureCitations });
 		expect(calls[0]).not.toHaveProperty("messages");
 		expect(calls[0].ai_search_options.query_rewrite).toEqual({ enabled: false });
+		expect(calls[0].ai_search_options.reranking).toEqual({ enabled: false });
+		expect(calls[0].ai_search_options.retrieval).toEqual({
+			max_num_results: RETRIEVAL_CANDIDATES,
+			retrieval_type: "vector",
+		});
 	});
 
 	it("omits a 0.59 hit from citation JSON and keeps a 0.6 hit", async () => {
 		const extra: SearchChunk[] = [
-			{
-				text: "just below",
-				score: 0.59,
-				item: {
-					metadata: {
-						system: "govuk",
-						source: "GOV.UK",
-						source_url: "https://design-system.service.gov.uk/",
+			withVectorScore(
+				{
+					text: "just below",
+					score: 1,
+					item: {
+						metadata: {
+							system: "govuk",
+							source: "GOV.UK",
+							source_url: "https://design-system.service.gov.uk/",
+						},
 					},
 				},
-			},
-			{
-				text: "boundary keep",
-				score: 0.6,
-				item: {
-					metadata: {
-						system: "nhs",
-						source: "NHS",
-						source_url: "https://service-manual.nhs.uk/",
+				0.59,
+			),
+			withVectorScore(
+				{
+					text: "boundary keep",
+					score: 1,
+					item: {
+						metadata: {
+							system: "nhs",
+							source: "NHS",
+							source_url: "https://service-manual.nhs.uk/",
+						},
 					},
 				},
-			},
+				0.6,
+			),
 		];
 		const { env } = envWithIndex([...fixtureChunks, ...extra]);
 		const response = await worker.fetch(
@@ -161,10 +173,10 @@ describe("HTTP search against a fixture index", () => {
 			source_url: "https://design-system.service.gov.uk/",
 		};
 		const extras: SearchChunk[] = [
-			{ text: "missing score", item: { metadata } },
-			{ text: "string score", score: "0.9", item: { metadata } },
-			{ text: "out of range", score: 1.1, item: { metadata } },
-			{ text: "nan score", score: Number.NaN, item: { metadata } },
+			{ text: "missing score", score: 1, item: { metadata } },
+			{ text: "string score", score: 1, scoring_details: { vector_score: "0.9" }, item: { metadata } },
+			{ text: "out of range", score: 0.9, scoring_details: { vector_score: 1.1 }, item: { metadata } },
+			{ text: "nan score", score: 0.9, scoring_details: { vector_score: Number.NaN }, item: { metadata } },
 		];
 		const { env } = envWithIndex([...fixtureChunks, ...extras]);
 		const response = await worker.fetch(
@@ -181,8 +193,56 @@ describe("HTTP search against a fixture index", () => {
 		expect(await response.json()).toEqual({ results: fixtureCitations });
 	});
 
+	it("omits a hit under 0.6 and keeps a hit at or above it", async () => {
+		const chunks: SearchChunk[] = [
+			withVectorScore(
+				{
+					text: "Buttons show the actions available on a page.",
+					score: 1,
+					item: {
+						metadata: {
+							system: "paste",
+							source: "Paste",
+							source_url: "https://paste-dsys.com/components/button",
+						},
+					},
+				},
+				0.458,
+			),
+			withVectorScore(
+				{
+					text: "The wizard includes a Button.",
+					score: 1,
+					item: {
+						metadata: {
+							system: "paste",
+							source: "Paste",
+							source_url: "https://paste-dsys.com/page-templates/wizard",
+						},
+					},
+				},
+				0.833,
+			),
+		];
+		const { env } = envWithIndex(chunks);
+		const response = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: "Paste buttons guidance" }),
+			}),
+			env,
+		);
+		expect(response.status).toBe(200);
+		const body = (await response.json()) as { results: { url: string; score: number }[] };
+		expect(body.results.map((hit) => ({ url: hit.url, score: hit.score }))).toEqual([
+			{ url: "https://paste-dsys.com/page-templates/wizard", score: 0.833 },
+		]);
+		expect(body.results.every((hit) => hit.score >= MIN_SEARCH_SCORE)).toBe(true);
+	});
+
 	it("returns an empty results list when every hit scores below 0.6", async () => {
-		const low = fixtureChunks.map((chunk) => ({ ...chunk, score: 0.59 }));
+		const low = fixtureChunks.map((chunk) => withVectorScore({ ...chunk, score: 1 }, 0.59));
 		const { env } = envWithIndex(low);
 		const response = await worker.fetch(
 			new Request("https://example.test/v1/search", {

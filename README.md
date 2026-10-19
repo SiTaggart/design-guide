@@ -109,7 +109,7 @@ This server has no auth. Do not add a bearer token or an OAuth login.
 The only tool is `search_design_guidance`.
 
 - `query` is required.
-- `k` is optional. Omit it for 8. When set, it must be 1 through 20.
+- `k` is optional. Omit it to return every passage at or above 0.6, up to 50. When set, it must be 1 through 50 and it only shortens that list.
 - `system` is optional. When set, it must be one of `paste`, `primer`, `uswds`, `govuk`, `nhs`, `antd`, `gitlab-pajamas`, `patternfly`, `cloudscape`, `vanilla`, `siemens-ix`, `backpack`, `garden`, or `ouds-web`.
 
 The golden query:
@@ -134,7 +134,7 @@ The tool text is the same citation JSON as `POST /v1/search`:
 }
 ```
 
-Each hit has `passage`, `source`, `url`, `system`, and `score`. Hits with `score` below 0.6 are dropped. If no matches remain after the filter, the tool returns `{ "results": [] }`. The MCP schema requires `query`. HTTP search returns `400` `{ "error": "query_required" }` when `query` is missing.
+Each hit has `passage`, `source`, `url`, `system`, and `score`. `score` is the AI Search vector similarity score. The calling agent decides relevance. Hits with that score below 0.6 are dropped. If no matches remain after the filter, the tool returns `{ "results": [] }`. The MCP schema requires `query`. HTTP search returns `400` `{ "error": "query_required" }` when `query` is missing.
 
 If the MCP client cannot call the tool, use HTTP:
 
@@ -148,7 +148,7 @@ See [Search](#search) for the GET form and the rest of the HTTP contract.
 
 ## Search
 
-`query` is required. `k` defaults to 8 and clamps to 1..20. `system` is an optional seed id.
+`query` is required. `k` is optional and clamps to 1..50. Omit it to return every passage at or above 0.6, up to 50. `system` is an optional seed id.
 
 ```bash
 export BASE_URL=https://design-guide.me-2c5.workers.dev
@@ -164,7 +164,7 @@ curl -sS -X POST "$BASE_URL/v1/search" \
 curl -sS "$BASE_URL/v1/search?query=accessible+combobox+or+listbox+keyboard+and+focus+guidance&k=8"
 ```
 
-A missing query returns `400` with `{ "error": "query_required" }`. No matches after the score filter returns `{ "results": [] }`. Each result is `{ passage, source, url, system, score }`. `passage` is the AI Search chunk text. `url` is the https `source_url` stored on the item. `score` is the AI Search chunk score, passed through. Hits below 0.6 are dropped.
+A missing query returns `400` with `{ "error": "query_required" }`. No matches after the score filter returns `{ "results": [] }`. Each result is `{ passage, source, url, system, score }`. `passage` is the AI Search chunk text. `url` is the https `source_url` stored on the item. `score` is the AI Search vector similarity score (`scoring_details.vector_score`). The worker asks for the top 50 chunks by vector similarity and sends reranking off. Hits below 0.6 are dropped. `llms.txt` index files are dropped. Results are highest similarity first, one chunk per page, at most 50.
 
 `GET /health` returns `200` when at least one completed item exists. Otherwise it returns `503`.
 
@@ -195,7 +195,7 @@ Spectrum and Carbon are parked as crawl misses. Their items are deleted. They ar
 
 Change the seed and deploy. The Worker bundle carries a seed hash. A 5-minute Cloudflare cron discovers one drifted or due system and drains up to 100 queued pages. A daily cron uses the same fill. A Sunday 06:00 UTC recovery discovers the parked seed that has waited longest. `GET /status` is a read-only overview. It does not edit the queue, reindex, or parks. There is no GitHub Actions crawl job.
 
-`GET /status` and `GET /v1/index-status` are the fill record: queue depths, per-system crawl and index timestamps, parks, unparked ids, crawl/render/index errors, and the live discover run. `GET /v1/fill-health` alarms from that record, plus the same cap-defer map and per-seed hash drift the fill scheduler uses: `fleet_freeze`, `stuck:<systemId>`, `pending_no_claims:<systemId>`, or `hard_fail`. A seed in the cap-defer hour is not a freeze. Slack is not the health path. Those routes require `STATUS_TOKEN`.
+`GET /status` and `GET /v1/index-status` are the fill record: queue depths, per-system crawl and index timestamps, parks, unparked ids, crawl/render/index errors, and the live discover run. `GET /v1/fill-health` alarms from that record, plus the same cap-defer map and per-seed hash drift the fill scheduler uses: `fleet_freeze`, `stuck:<systemId>`, `pending_no_claims:<systemId>`, or `hard_fail`. A seed inside its cap-defer backoff is not a freeze. Slack is not the health path. Those routes require `STATUS_TOKEN`.
 
 The worker emails start and finish through the Worker `send_email` binding with `env.EMAIL.send({ from, to, subject, text })`. There is no REST/SMTP path, no Resend, Mailchannels, SES, or agent mailer. Start mail names the trigger (`deploy-drift`, `recrawl`, or `recovery`), discover id, and the one system kicked. Finish mail on a successful discover is not a failure while drain continues. Fail mail is for a discover that errors or a drain tick that claims pages and indexes none. A mid-fill tick that indexes pages does not send fail mail.
 
@@ -217,7 +217,7 @@ bun run reindex
 
 Debug one system with `SYSTEM=primer bun run reindex`.
 
-The cron discovers with one Browser Run `/crawl` job per system (`source: "all"`, `CRAWL_LIMIT` 500, `CRAWL_DEPTH` 500). Depth is not greater than the page cap. A crawl that hits that cap (`cancelled_due_to_limits`, or `completed` at the cap) pages a few records per tick and saves the cursor after each page. When the cursor is done it enqueues the usable pages, does not prune, and releases the discover slot. An errored crawl fails even if `finished` reached the cap. The cap stays 500 unless a later change raises it because the usable set was still under two pages. Hitting the cap is a truncation warning on `/status` (`cap hit: <pages> pages, limit 500`), not a seed error, and a drained capped seed does not alarm `hard_fail`. After a successful discover, drain fetches each claimed URL with `/markdown` and upserts that page. Upload and delete retry AI Search errors 1015, 7009, and 7114 with backoff. A failed page stays failed on the queue and the previous AI Search doc stays. A parked seed does not take the discover slot. The next cron continues the rest. The seed list stays fourteen systems.
+The cron discovers with one Browser Run `/crawl` job per system (`source: "all"`, limit 100,000, depth 100,000). While the system is under the 10,000-page safety ceiling, a tick that finishes paging starts another crawl from the next frontier URL that is not already staged and has not already been used as a start. Frontier URLs drop the query string and the hash, so variants of one path start one crawl. A refresh counts as complete, and pruning runs, only once that frontier is exhausted and no job in the run was capped. Reaching 10,000 indexable pages, stopping early with no frontier left, finishing a follow-up after any job was capped, or skipping a follow-up start after its retries, records the system incomplete, enqueues the pages it has, does not prune, and does not record a seed refresh. Drain still indexes those pages, and it does not move `lastIndexed` while that defer is in place, so the 30-day clock stays. Consecutive incomplete runs wait 1 hour, then 6 hours, then 1 day, then 7 days, and a complete run clears the defer. `llms.txt` and `llms-full.txt` index files are not indexed and are not cited. `/status` shows `incomplete: <pages> pages, ceiling 10000`. An incomplete system is never Live, and it does not alarm `hard_fail`. An errored crawl with nothing staged fails even if `finished` is large, and records the cap defer. An errored follow-up, or a run that exhausts its poll or page retries, finishes incomplete when pages are already staged. After a successful discover, drain fetches each claimed URL with `/markdown` and upserts that page. Upload and delete retry AI Search errors 1015, 7009, and 7114 with backoff. A failed page stays failed on the queue and the previous AI Search doc stays. A parked seed does not take the discover slot. The next cron continues the rest. The seed list stays fourteen systems.
 
 `bun run reindex` still runs the debug whole-site swap. It polls every 15 seconds and collects that system's completed pages in memory. That command is not the indexing runner. A crawl that fails, hits the limit, or produces a stub (`usable < 2`) does not swap. Stubs are parked in KV. DIY Vectorize is not on this path.
 
@@ -235,9 +235,9 @@ The CLI prints a JSON array with one result per system:
 }
 ```
 
-`startUrl` is the URL the crawl started from, primary or fallback. `crawl.total`, `crawl.finished`, `crawl.skipped`, `crawl.disallowed`, and `crawl.errored` come from the job status. robots.txt blocked the `disallowed` pages, and the CLI never uploads them. `indexed` is the number of pages swapped in. It is 0 whenever the CLI kept the previous generation. `hitLimit` is true when `finished` reached `CRAWL_LIMIT`, when the usable page count would fill the index to `CRAWL_LIMIT`, or when Cloudflare ended the job as `cancelled_due_to_limits`. A step timeout or out-of-memory error does not set `hitLimit`. A system with `hitLimit` keeps its previous generation and does not store that cap as `error`.
+`startUrl` is the URL the crawl started from, primary or fallback. `crawl.total`, `crawl.finished`, `crawl.skipped`, `crawl.disallowed`, and `crawl.errored` come from the job status. robots.txt blocked the `disallowed` pages, and the CLI never uploads them. `indexed` is the number of pages swapped in. It is 0 whenever the CLI kept the previous generation. `incomplete` is true when the debug crawl stops early or the usable set reaches the 10,000-page ceiling. That system keeps its previous generation. `hitLimit` stays false on this path.
 
-The CLI exits 1 when any system has `hitLimit`, or when the run has results and every result has `indexed: 0`.
+The CLI exits 1 when any system is `incomplete` or has `hitLimit`, or when the run has results and every result has `indexed: 0`.
 
 ## Develop
 

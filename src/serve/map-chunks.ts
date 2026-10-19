@@ -1,4 +1,3 @@
-import { MIN_SEARCH_SCORE } from "../config/instance.ts";
 import type { Citation, SearchChunk } from "../config/types.ts";
 
 function asString(value: unknown): string {
@@ -20,7 +19,7 @@ function httpsUrl(value: string): string | null {
 	}
 }
 
-export function parseSearchScore(value: unknown): number | undefined {
+function parseSearchScore(value: unknown): number | undefined {
 	if (typeof value !== "number" || !Number.isFinite(value)) {
 		return undefined;
 	}
@@ -30,11 +29,8 @@ export function parseSearchScore(value: unknown): number | undefined {
 	return value;
 }
 
-export function keepScoredChunks(chunks: SearchChunk[]): SearchChunk[] {
-	return chunks.filter((chunk) => {
-		const score = parseSearchScore(chunk.score);
-		return score !== undefined && score >= MIN_SEARCH_SCORE;
-	});
+function similarityScore(chunk: SearchChunk): number | undefined {
+	return parseSearchScore(chunk.scoring_details?.vector_score);
 }
 
 export function mapChunks(chunks: SearchChunk[]): Citation[] {
@@ -44,8 +40,8 @@ export function mapChunks(chunks: SearchChunk[]): Citation[] {
 		const metadata = chunk.item?.metadata ?? {};
 		const source = asString(metadata.source) || asString(chunk.item?.key);
 		const url = httpsUrl(asString(metadata.source_url));
-		const score = parseSearchScore(chunk.score);
-		if (!passage || !source || !url || score === undefined || score < MIN_SEARCH_SCORE) {
+		const score = similarityScore(chunk);
+		if (!passage || !source || !url || score === undefined) {
 			continue;
 		}
 		results.push({

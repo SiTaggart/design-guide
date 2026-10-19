@@ -15,8 +15,9 @@ function result(system: SystemId, indexed: number, hitLimit = false): SystemRein
 }
 
 describe("reindexExitCode", () => {
-	it("fails when any system hit the crawl limit", () => {
+	it("fails when any system hit the crawl limit or is incomplete", () => {
 		expect(reindexExitCode([result("primer", 900), result("govuk", 0, true)])).toBe(1);
+		expect(reindexExitCode([result("primer", 900), { ...result("govuk", 4), incomplete: true }])).toBe(1);
 	});
 
 	it("fails when every system kept its previous generation", () => {
@@ -51,6 +52,12 @@ describe("fitsItem", () => {
 
 	it("does not apply suffix filters to other seeds", () => {
 		expect(fitsItem(page("https://primer.style/components/button"), primer)).toBe(true);
+	});
+
+	it("does not index an llms.txt file", () => {
+		expect(fitsItem(page("https://cloudscape.design/llms.txt"), primer)).toBe(false);
+		expect(fitsItem(page("https://cloudscape.design/llms-full.txt"), primer)).toBe(false);
+		expect(fitsItem(page("https://cloudscape.design/gen-ai/ai-tools/llms-txt-files/"), primer)).toBe(true);
 	});
 });
 

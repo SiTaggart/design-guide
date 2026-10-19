@@ -1,0 +1,1 @@
+ALTER TABLE discover_run ADD COLUMN start_failures INTEGER NOT NULL DEFAULT 0;

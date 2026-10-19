@@ -344,7 +344,7 @@ describe("stuck versus mid-fill", () => {
 		expect(primer).toContain("crawl ended failed");
 	});
 
-	it("shows a drained crawl cap as Live with the page count and limit", () => {
+	it("shows a drained incomplete crawl as Incomplete with the ceiling", () => {
 		const freshness = [
 			{
 				system: "paste" as const,
@@ -377,9 +377,10 @@ describe("stuck versus mid-fill", () => {
 				freshness,
 			});
 			const paste = row(html, "paste");
-			expect(paste).toContain('data-phase="live"');
+			expect(paste).toContain('data-phase="incomplete"');
+			expect(paste).not.toContain(">Live<");
 			expect(paste).not.toContain(">Stuck<");
-			expect(paste).toContain("cap hit: 513 pages, limit 500");
+			expect(paste).toContain("incomplete: 513 pages, ceiling 10000");
 			expect(paste).not.toContain("crawl hit the 500 page limit");
 		}
 	});

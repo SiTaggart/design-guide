@@ -22,7 +22,13 @@ const MCP_HEADERS = {
 function searchInput(live: SystemId[]) {
 	const fields = {
 		query: z.string().describe("Search query"),
-		k: z.number().int().min(MIN_K).max(MAX_K).optional().describe("Result count, 1-20"),
+		k: z
+			.number()
+			.int()
+			.min(MIN_K)
+			.max(MAX_K)
+			.optional()
+			.describe("Optional upper bound on results, 1-50. Omit it to return every passage at or above 0.6, up to 50."),
 	};
 	if (live.length === 0) {
 		return z.object(fields);
@@ -68,7 +74,7 @@ function createDesignGuideServer(env: WorkerEnv, live: Set<SystemId>): McpServer
 		"search_design_guidance",
 		{
 			description:
-				"Search indexed design-system docs and return cited passages. Never invent passages or scores.",
+				"Search indexed design-system docs and return cited passages. The score is a ranking signal only. The calling agent decides relevance. Never invent passages or scores.",
 			inputSchema: searchInput(liveIds),
 		},
 		async (args) =>

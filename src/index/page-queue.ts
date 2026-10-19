@@ -1,4 +1,5 @@
 import { SYSTEM_IDS, isSystemId, type SystemId } from "../config/types.ts";
+import { isStaticAsset, pageKey } from "../crawl/links.ts";
 
 export const DRAIN_LIMIT = 100;
 export const MAX_ATTEMPTS = 5;
@@ -33,6 +34,9 @@ CREATE TABLE IF NOT EXISTS discover_run (
   state TEXT NOT NULL,
   cursor TEXT,
   poll_failures INTEGER NOT NULL DEFAULT 0,
+  start_failures INTEGER NOT NULL DEFAULT 0,
+  capped_any INTEGER NOT NULL DEFAULT 0,
+  skipped_any INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   started_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -68,7 +72,20 @@ CREATE TABLE IF NOT EXISTS seed_refresh (
 
 CREATE TABLE IF NOT EXISTS cap_defer (
   system_id TEXT PRIMARY KEY,
-  deferred_at TEXT NOT NULL
+  deferred_at TEXT NOT NULL,
+  streak INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS discover_frontier (
+  system_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  PRIMARY KEY (system_id, url)
+);
+
+CREATE TABLE IF NOT EXISTS discover_attempt (
+  system_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  PRIMARY KEY (system_id, url)
 );
 `;
 
@@ -87,6 +104,8 @@ export type PageWorkItem = {
 	itemKey: string | null;
 	claimedAt?: string;
 };
+
+export type ClaimedPage = PageWorkItem & { claimedAt: string };
 
 export type QueueDepths = {
 	pending: number;
@@ -111,12 +130,14 @@ export type PageQueue = {
 		items: ReadonlyArray<{ systemId: SystemId; url: string; kind: PageKind }>,
 		now: string,
 	): Promise<void>;
-	claim(limit: number, now: string): Promise<PageWorkItem[]>;
+	claim(limit: number, now: string): Promise<ClaimedPage[]>;
 	complete(
 		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
 		timestamps: { lastCrawled: string; lastIndexed: string },
 		itemKey: string | null,
+		options?: { keepIndexedAt?: boolean },
 	): Promise<boolean>;
+	holdsFreshness(systemId: SystemId): Promise<boolean>;
 	fail(
 		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
 		error: string,
@@ -291,7 +312,7 @@ export class D1PageQueue implements PageQueue {
 		}
 	}
 
-	async claim(limit: number, now: string): Promise<PageWorkItem[]> {
+	async claim(limit: number, now: string): Promise<ClaimedPage[]> {
 		const staleBefore = new Date(Date.parse(now) - STALE_CLAIM_MS).toISOString();
 		const exhaustedBefore = new Date(Date.parse(now) - EXHAUSTED_RETRY_MS).toISOString();
 		// SIT-68: expiry is a lost lease, not a crawl failure. Return the row to
@@ -378,7 +399,7 @@ export class D1PageQueue implements PageQueue {
 			MAX_ATTEMPTS,
 			limit,
 		);
-		const claimed: PageWorkItem[] = [];
+		const claimed: ClaimedPage[] = [];
 		for (const row of rows) {
 			const item = toItem(row);
 			if (!item) {
@@ -404,35 +425,52 @@ export class D1PageQueue implements PageQueue {
 		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
 		timestamps: { lastCrawled: string; lastIndexed: string },
 		itemKey: string | null,
+		options?: { keepIndexedAt?: boolean },
 	): Promise<boolean> {
+		const keepIndexedAt = options?.keepIndexedAt === true;
 		if (item.claimedAt !== undefined && item.attempts !== undefined) {
 			const changes = await run(
 				this.db,
-				`UPDATE page_work
-				 SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
-				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
-				timestamps.lastCrawled,
-				timestamps.lastIndexed,
-				itemKey,
-				item.systemId,
-				item.url,
-				item.attempts,
-				item.claimedAt,
+				keepIndexedAt
+					? `UPDATE page_work
+					   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL
+					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`
+					: `UPDATE page_work
+					   SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
+					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
+				...(keepIndexedAt
+					? [timestamps.lastCrawled, itemKey, item.systemId, item.url, item.attempts, item.claimedAt]
+					: [
+							timestamps.lastCrawled,
+							timestamps.lastIndexed,
+							itemKey,
+							item.systemId,
+							item.url,
+							item.attempts,
+							item.claimedAt,
+						]),
 			);
 			return changes === 1;
 		}
 		await run(
 			this.db,
-			`UPDATE page_work
-			 SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
-			 WHERE system_id = ? AND url = ?`,
-			timestamps.lastCrawled,
-			timestamps.lastIndexed,
-			itemKey,
-			item.systemId,
-			item.url,
+			keepIndexedAt
+				? `UPDATE page_work
+				   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL
+				   WHERE system_id = ? AND url = ?`
+				: `UPDATE page_work
+				   SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
+				   WHERE system_id = ? AND url = ?`,
+			...(keepIndexedAt
+				? [timestamps.lastCrawled, itemKey, item.systemId, item.url]
+				: [timestamps.lastCrawled, timestamps.lastIndexed, itemKey, item.systemId, item.url]),
 		);
 		return true;
+	}
+
+	async holdsFreshness(systemId: SystemId): Promise<boolean> {
+		const deferred = await this.capDefers();
+		return deferred[systemId] !== undefined;
 	}
 
 	async fail(
@@ -590,6 +628,7 @@ export class D1PageQueue implements PageQueue {
 			run.now,
 			run.now,
 		);
+		await this.noteAttempt(run.systemId, run.startUrl);
 	}
 
 	async saveCursor(systemId: SystemId, cursor: string | null, now: string): Promise<void> {
@@ -597,6 +636,81 @@ export class D1PageQueue implements PageQueue {
 			this.db,
 			"UPDATE discover_run SET cursor = ?, poll_failures = 0, updated_at = ? WHERE system_id = ?",
 			cursor,
+			now,
+			systemId,
+		);
+	}
+
+	async noteCapped(systemId: SystemId, now: string): Promise<void> {
+		await run(
+			this.db,
+			"UPDATE discover_run SET capped_any = 1, updated_at = ? WHERE system_id = ?",
+			now,
+			systemId,
+		);
+	}
+
+	async cappedAny(systemId: SystemId): Promise<boolean> {
+		const row = await first<{ capped_any: number }>(
+			this.db,
+			"SELECT capped_any FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		return row?.capped_any === 1;
+	}
+
+	async noteSkipped(systemId: SystemId, now: string): Promise<number> {
+		await run(
+			this.db,
+			"UPDATE discover_run SET skipped_any = skipped_any + 1, updated_at = ? WHERE system_id = ?",
+			now,
+			systemId,
+		);
+		const row = await first<{ skipped_any: number }>(
+			this.db,
+			"SELECT skipped_any FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		return row?.skipped_any ?? 0;
+	}
+
+	async skippedAny(systemId: SystemId): Promise<boolean> {
+		const row = await first<{ skipped_any: number }>(
+			this.db,
+			"SELECT skipped_any FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		return (row?.skipped_any ?? 0) >= 1;
+	}
+
+	async clearPollFailures(systemId: SystemId, now: string): Promise<void> {
+		await run(
+			this.db,
+			"UPDATE discover_run SET poll_failures = 0, updated_at = ? WHERE system_id = ?",
+			now,
+			systemId,
+		);
+	}
+
+	async noteStartFailure(systemId: SystemId, now: string): Promise<number> {
+		await run(
+			this.db,
+			"UPDATE discover_run SET start_failures = start_failures + 1, updated_at = ? WHERE system_id = ?",
+			now,
+			systemId,
+		);
+		const row = await first<{ start_failures: number }>(
+			this.db,
+			"SELECT start_failures FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		return row?.start_failures ?? 0;
+	}
+
+	async clearStartFailures(systemId: SystemId, now: string): Promise<void> {
+		await run(
+			this.db,
+			"UPDATE discover_run SET start_failures = 0, updated_at = ? WHERE system_id = ?",
 			now,
 			systemId,
 		);
@@ -620,7 +734,98 @@ export class D1PageQueue implements PageQueue {
 	async clearRun(systemId: SystemId): Promise<void> {
 		await run(this.db, "DELETE FROM discover_indexable WHERE system_id = ?", systemId);
 		await run(this.db, "DELETE FROM discover_url WHERE system_id = ?", systemId);
+		await run(this.db, "DELETE FROM discover_frontier WHERE system_id = ?", systemId);
+		await run(this.db, "DELETE FROM discover_attempt WHERE system_id = ?", systemId);
 		await run(this.db, "DELETE FROM discover_run WHERE system_id = ?", systemId);
+	}
+
+	async replaceJob(systemId: SystemId, jobId: string, startUrl: string, now: string): Promise<void> {
+		// started_at stays put. The 7-day deadline covers the whole follow-up chain.
+		await run(
+			this.db,
+			`UPDATE discover_run
+			 SET job_id = ?, start_url = ?, cursor = NULL, poll_failures = 0, start_failures = 0, updated_at = ?
+			 WHERE system_id = ?`,
+			jobId,
+			startUrl,
+			now,
+			systemId,
+		);
+		await this.noteAttempt(systemId, startUrl);
+	}
+
+	async noteAttempt(systemId: SystemId, url: string): Promise<void> {
+		await run(
+			this.db,
+			"INSERT INTO discover_attempt (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
+			systemId,
+			url,
+		);
+	}
+
+	async addFrontier(systemId: SystemId, urls: readonly string[]): Promise<void> {
+		const unique = [...new Set(urls)];
+		if (unique.length === 0) {
+			return;
+		}
+		const fresh: string[] = [];
+		for (const group of chunks(unique, 80)) {
+			const existing = await all<{ url: string }>(
+				this.db,
+				`SELECT url FROM discover_frontier WHERE system_id = ? AND url IN (${group.map(() => "?").join(",")})`,
+				systemId,
+				...group,
+			);
+			const have = new Set(existing.map((row) => row.url));
+			for (const url of group) {
+				if (!have.has(url)) {
+					fresh.push(url);
+				}
+			}
+		}
+		for (const group of chunks(fresh, 40)) {
+			const values = group.map(() => "(?, ?)").join(", ");
+			const params: unknown[] = [];
+			for (const url of group) {
+				params.push(systemId, url);
+			}
+			await run(
+				this.db,
+				`INSERT INTO discover_frontier (system_id, url) VALUES ${values} ON CONFLICT DO NOTHING`,
+				...params,
+			);
+		}
+	}
+
+	async nextFrontier(systemId: SystemId, seen: ReadonlySet<string>): Promise<string | null> {
+		const blocked = new Set<string>();
+		for (const url of seen) {
+			blocked.add(pageKey(url));
+		}
+		const attempted = await all<{ url: string }>(
+			this.db,
+			"SELECT url FROM discover_attempt WHERE system_id = ?",
+			systemId,
+		);
+		for (const row of attempted) {
+			blocked.add(pageKey(row.url));
+		}
+		const rows = await all<{ url: string }>(
+			this.db,
+			"SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC",
+			systemId,
+		);
+		const row = rows.find((row) => !blocked.has(pageKey(row.url)) && !isStaticAsset(row.url));
+		return row ? pageKey(row.url) : null;
+	}
+
+	async indexableCount(systemId: SystemId): Promise<number> {
+		const row = await first<{ n: number }>(
+			this.db,
+			"SELECT COUNT(*) AS n FROM discover_indexable WHERE system_id = ?",
+			systemId,
+		);
+		return Number(row?.n ?? 0);
 	}
 
 	async clearWork(systemId: SystemId): Promise<void> {
@@ -753,8 +958,10 @@ export class D1PageQueue implements PageQueue {
 	async noteCapDefer(systemId: SystemId, now: string): Promise<void> {
 		await run(
 			this.db,
-			`INSERT INTO cap_defer (system_id, deferred_at) VALUES (?, ?)
-			 ON CONFLICT(system_id) DO UPDATE SET deferred_at = excluded.deferred_at`,
+			`INSERT INTO cap_defer (system_id, deferred_at, streak) VALUES (?, ?, 1)
+			 ON CONFLICT(system_id) DO UPDATE SET
+			   deferred_at = excluded.deferred_at,
+			   streak = cap_defer.streak + 1`,
 			systemId,
 			now,
 		);
@@ -765,11 +972,18 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async capDefers(): Promise<Record<string, string>> {
-		const rows = await all<{ system_id: string; deferred_at: string }>(
+		const marks = await this.capDeferMarks();
+		return Object.fromEntries(Object.entries(marks).map(([systemId, mark]) => [systemId, mark.at]));
+	}
+
+	async capDeferMarks(): Promise<Record<string, { at: string; streak: number }>> {
+		const rows = await all<{ system_id: string; deferred_at: string; streak: number }>(
 			this.db,
-			"SELECT system_id, deferred_at FROM cap_defer",
+			"SELECT system_id, deferred_at, streak FROM cap_defer",
 		);
-		return Object.fromEntries(rows.map((row) => [row.system_id, row.deferred_at]));
+		return Object.fromEntries(
+			rows.map((row) => [row.system_id, { at: row.deferred_at, streak: row.streak }]),
+		);
 	}
 
 	async markDiscovered(systemId: SystemId, now: string): Promise<void> {
@@ -781,6 +995,14 @@ export class D1PageQueue implements PageQueue {
 			now,
 		);
 	}
+}
+
+function chunks<T>(values: readonly T[], size: number): T[][] {
+	const groups: T[][] = [];
+	for (let index = 0; index < values.length; index += size) {
+		groups.push(values.slice(index, index + size));
+	}
+	return groups;
 }
 
 async function runSql(db: D1Database, sql: string, ...params: unknown[]): Promise<void> {

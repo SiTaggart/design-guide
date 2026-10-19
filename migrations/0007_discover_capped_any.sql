@@ -1,0 +1,1 @@
+ALTER TABLE discover_run ADD COLUMN capped_any INTEGER NOT NULL DEFAULT 0;

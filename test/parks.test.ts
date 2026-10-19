@@ -97,7 +97,7 @@ describe("park state", () => {
 			env,
 		);
 		const body = (await response.json()) as { results: Array<{ system: string }> };
-		expect(calls[0]?.ai_search_options.retrieval.max_num_results).toBe(1);
+		expect(calls[0]?.ai_search_options.retrieval.max_num_results).toBe(50);
 		expect(calls[0]?.ai_search_options.retrieval.filters).toEqual({ system: { $nin: ["paste"] } });
 		expect(body.results.map((hit) => hit.system)).toEqual(["primer"]);
 	});
@@ -141,6 +141,7 @@ describe("park state", () => {
 		const gardenChunk = {
 			text: "Garden combobox keeps keyboard focus in the input while the listbox is open.",
 			score: 0.84,
+			scoring_details: { vector_score: 0.84 },
 			item: {
 				key: "garden/gen/dddd.md",
 				metadata: {
@@ -177,7 +178,7 @@ describe("park state", () => {
 		});
 		expect(parseSearchFields({ query: "focus", system: "garden" }, await loadLiveSystemIds(env))).toEqual({
 			kind: "ok",
-			params: { query: "focus", k: 8, system: "garden" },
+			params: { query: "focus", k: undefined, system: "garden" },
 		});
 		const searched = await worker.fetch(
 			new Request("https://example.test/v1/search", {

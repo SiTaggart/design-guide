@@ -1,13 +1,13 @@
 import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
-import { capHitNote, capHitPageCount, isCrawlCapError, seedFailure } from "../index/crawl-cap.ts";
+import { capHitPageCount, incompleteNote, isCrawlCapError, seedFailure } from "../index/crawl-cap.ts";
 import type { QueueDepths } from "../index/page-queue.ts";
 import type { ParkRecord } from "../index/parks.ts";
 import type { IndexStatusDocument } from "../index/status.ts";
 import { readIndexOverlay } from "./index-status.ts";
 
-export type SystemPhase = "empty" | "mid-fill" | "parked" | "stuck" | "live";
+export type SystemPhase = "empty" | "mid-fill" | "parked" | "stuck" | "incomplete" | "live";
 export type QueueMotion = "stuck" | "filling" | "idle";
 
 const PHASE_LABEL: Record<SystemPhase, string> = {
@@ -15,6 +15,7 @@ const PHASE_LABEL: Record<SystemPhase, string> = {
 	"mid-fill": "Filling",
 	parked: "Parked",
 	stuck: "Stuck",
+	incomplete: "Incomplete",
 	live: "Live",
 };
 
@@ -38,6 +39,7 @@ export function systemPhase(input: {
 	lastIndexed: string | null;
 	lastDiscovered: string | null;
 	error?: string;
+	incomplete?: boolean;
 }): SystemPhase {
 	if (input.parked) {
 		return "parked";
@@ -47,6 +49,9 @@ export function systemPhase(input: {
 	}
 	if (input.failed > 0 || input.error) {
 		return "stuck";
+	}
+	if (input.incomplete) {
+		return "incomplete";
 	}
 	if (input.done > 0 || input.lastIndexed || input.lastCrawled || input.lastDiscovered) {
 		return "live";
@@ -95,6 +100,7 @@ export function renderStatusPage(document: IndexStatusDocument): string {
   .badge.fail, .phase.stuck { background: #fde8e8; color: #7f1d1d; }
   .badge.none, .phase.empty { background: #eceae6; color: #57534e; }
   .phase.parked { background: #e7eaf3; color: #334155; }
+  .phase.incomplete { background: #fff6e0; color: #7a4e00; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 16px 0; }
   .card, .panel { background: #fff; border: 1px solid #e7e2da; border-radius: 12px; padding: 12px 14px; }
   .card span, .muted { color: #78716c; font-size: 0.78rem; }
@@ -107,6 +113,7 @@ export function renderStatusPage(document: IndexStatusDocument): string {
   tr[data-phase="stuck"] { background: #fff5f5; }
   tr[data-phase="mid-fill"] { background: #fffaf0; }
   tr[data-phase="parked"] { background: #f7f8fb; }
+  tr[data-phase="incomplete"] { background: #fffaf0; }
   tr[data-phase="live"] { background: #f4fbf7; }
   tr[data-phase="empty"] { color: #78716c; }
   .phase { display: inline-block; padding: 2px 8px; border-radius: 999px; font-weight: 700; }
@@ -226,7 +233,7 @@ function systemRows(document: IndexStatusDocument): Row[] {
 		const result = results.get(system);
 		const rawError = result?.error;
 		const error = seedFailure(rawError);
-		const capped = result?.hitLimit === true || isCrawlCapError(rawError);
+		const incomplete = result?.incomplete === true || result?.hitLimit === true || isCrawlCapError(rawError);
 		const pending = Number(row?.pending ?? 0);
 		const claimed = Number(row?.claimed ?? 0);
 		const failed = Number(row?.failed ?? 0);
@@ -247,6 +254,7 @@ function systemRows(document: IndexStatusDocument): Row[] {
 				lastIndexed,
 				lastDiscovered,
 				error,
+				incomplete,
 			}),
 			pending,
 			claimed,
@@ -258,8 +266,8 @@ function systemRows(document: IndexStatusDocument): Row[] {
 			notes: notes(
 				park,
 				error,
-				capped
-					? capHitNote(
+				incomplete
+					? incompleteNote(
 							capHitPageCount({
 								pending,
 								claimed,
@@ -294,6 +302,7 @@ function tallyPhases(phases: readonly SystemPhase[]): string {
 		"mid-fill": 0,
 		parked: 0,
 		stuck: 0,
+		incomplete: 0,
 		live: 0,
 	};
 	for (const phase of phases) {

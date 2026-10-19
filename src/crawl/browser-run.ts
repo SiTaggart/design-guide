@@ -1,4 +1,4 @@
-import { CRAWL_DEPTH, CRAWL_LIMIT } from "../config/instance.ts";
+import { BROWSER_CRAWL_DEPTH, BROWSER_CRAWL_LIMIT, CRAWL_RUNAWAY_PAGES } from "../config/instance.ts";
 import type { CrawlCounts, Seed } from "../config/types.ts";
 
 export type CrawlRecord = {
@@ -51,6 +51,16 @@ export type CrawlJobSnapshot = { status: string } & CrawlCounts;
 
 export type StartResult = { jobId: string } | { httpStatus: number; detail: string };
 
+export class CrawlStartError extends Error {
+	readonly httpStatus: number;
+
+	constructor(httpStatus: number, message: string) {
+		super(message);
+		this.name = "CrawlStartError";
+		this.httpStatus = httpStatus;
+	}
+}
+
 export const CLI_POLL_INTERVAL_MS = 15_000;
 export const CRAWL_POLL_DEADLINE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CONSECUTIVE_POLL_FAILURES = 5;
@@ -85,8 +95,8 @@ export function crawlRequestBody(seed: Seed, startUrl: string): CrawlRequestBody
 	return {
 		url: startUrl,
 		source: "all",
-		limit: CRAWL_LIMIT,
-		depth: CRAWL_DEPTH,
+		limit: BROWSER_CRAWL_LIMIT,
+		depth: BROWSER_CRAWL_DEPTH,
 		formats: ["markdown"],
 		render: seed.render ?? true,
 		crawlPurposes: ["search"],
@@ -100,15 +110,17 @@ export function crawlRequestBody(seed: Seed, startUrl: string): CrawlRequestBody
 	};
 }
 
-export function hitCrawlLimit(
-	outcome: Pick<CrawlOutcome, "status" | "counts">,
-	indexed: number,
-): boolean {
-	return (
-		outcome.status === "cancelled_due_to_limits" ||
-		outcome.counts.finished >= CRAWL_LIMIT ||
-		indexed >= CRAWL_LIMIT
-	);
+/** The crawl job stopped before the site's page list was finished. */
+export function crawlStoppedEarly(status: string, finished: number): boolean {
+	if (status === "cancelled_due_to_limits") {
+		return true;
+	}
+	return status === "completed" && finished >= BROWSER_CRAWL_LIMIT;
+}
+
+/** The safety ceiling. This is incomplete, not a full index. */
+export function reachedRunawayCeiling(pages: number): boolean {
+	return pages >= CRAWL_RUNAWAY_PAGES;
 }
 
 export function snapshotJob(
@@ -240,7 +252,18 @@ async function completedRecords(auth: CrawlAuth, jobId: string): Promise<CrawlRe
 export async function startSeedCrawl(
 	auth: CrawlAuth,
 	seed: Seed,
+	startUrlOverride?: string,
 ): Promise<{ startUrl: string; jobId: string }> {
+	if (startUrlOverride) {
+		const started = await startCrawl(auth, seed, startUrlOverride);
+		if ("httpStatus" in started) {
+			throw new CrawlStartError(
+				started.httpStatus,
+				`crawl start for ${startUrlOverride} failed ${started.httpStatus}: ${started.detail}`,
+			);
+		}
+		return { startUrl: startUrlOverride, jobId: started.jobId };
+	}
 	let startUrl = seed.startUrl;
 	let started = await startCrawl(auth, seed, startUrl);
 	if (
@@ -253,7 +276,10 @@ export async function startSeedCrawl(
 		started = await startCrawl(auth, seed, startUrl);
 	}
 	if ("httpStatus" in started) {
-		throw new Error(`crawl start for ${startUrl} failed ${started.httpStatus}: ${started.detail}`);
+		throw new CrawlStartError(
+			started.httpStatus,
+			`crawl start for ${startUrl} failed ${started.httpStatus}: ${started.detail}`,
+		);
 	}
 	return { startUrl, jobId: started.jobId };
 }

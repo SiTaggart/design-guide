@@ -1,4 +1,4 @@
-import { CRAWL_LIMIT } from "../config/instance.ts";
+import { CRAWL_RUNAWAY_PAGES } from "../config/instance.ts";
 
 /** Stored by the older whole-site swap when a crawl stopped at the page cap. */
 export function isCrawlCapError(error: string | undefined): boolean {
@@ -13,8 +13,8 @@ export function seedFailure(error: string | undefined): string | undefined {
 	return error;
 }
 
-export function capHitNote(pages: number, limit = CRAWL_LIMIT): string {
-	return `cap hit: ${pages} pages, limit ${limit}`;
+export function incompleteNote(pages: number, ceiling = CRAWL_RUNAWAY_PAGES): string {
+	return `incomplete: ${pages} pages, ceiling ${ceiling}`;
 }
 
 export function capHitPageCount(input: {

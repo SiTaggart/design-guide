@@ -706,6 +706,7 @@ describe("GET /v1/fill-health", () => {
 		expect(cooling.text).toContain('"fill":"ok"');
 
 		const openedAt = new Date(Date.now() - CAP_RETRY_MS).toISOString();
+		await fleet.queue.clearCapDefer("paste");
 		await fleet.queue.noteCapDefer("paste", openedAt);
 		const expired = await probe(fleet);
 		expect(expired.body.alarms).toEqual(["fleet_freeze"]);
