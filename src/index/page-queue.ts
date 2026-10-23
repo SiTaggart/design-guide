@@ -419,7 +419,49 @@ export class D1PageQueue implements PageQueue {
 				claimed.push({ ...item, status: "claimed", attempts: item.attempts + 1, claimedAt: now });
 			}
 		}
-		return claimed;
+		return this.yieldHeldPages(claimed);
+	}
+
+	// Claims are written before this read, so a later read sees an earlier claim on the same page.
+	private async yieldHeldPages(claimed: ClaimedPage[]): Promise<ClaimedPage[]> {
+		if (claimed.length === 0) {
+			return claimed;
+		}
+		const mine = new Set(claimed.map((item) => `${item.systemId}\0${item.url}`));
+		const rows = await all<{ system_id: string; url: string }>(
+			this.db,
+			"SELECT system_id, url FROM page_work WHERE status = 'claimed'",
+		);
+		const held = new Set<string>();
+		for (const row of rows) {
+			if (!isSystemId(row.system_id) || mine.has(`${row.system_id}\0${row.url}`)) {
+				continue;
+			}
+			const lease = pageLease(row.system_id, row.url);
+			if (lease !== null) {
+				held.add(lease);
+			}
+		}
+		const kept: ClaimedPage[] = [];
+		for (const item of claimed) {
+			const lease = pageLease(item.systemId, item.url);
+			if (lease === null || !held.has(lease)) {
+				kept.push(item);
+				continue;
+			}
+			await run(
+				this.db,
+				`UPDATE page_work
+				 SET status = 'pending', attempts = attempts - 1
+				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
+				item.systemId,
+				item.url,
+				item.attempts,
+				item.claimedAt,
+			);
+			console.log(JSON.stringify({ event: "page_claim_yield", system: item.systemId, url: item.url }));
+		}
+		return kept;
 	}
 
 	async complete(
@@ -817,20 +859,24 @@ export class D1PageQueue implements PageQueue {
 			"SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC",
 			systemId,
 		);
+		const rejected: string[] = [];
 		let chosen: string | null = null;
 		for (const row of rows) {
 			if (admittedUrl(row.url, seed) === null) {
-				await run(
-					this.db,
-					"DELETE FROM discover_frontier WHERE system_id = ? AND url = ?",
-					systemId,
-					row.url,
-				);
+				rejected.push(row.url);
 				continue;
 			}
 			if (chosen === null && !blocked.has(pageKey(row.url)) && !isStaticAsset(row.url)) {
 				chosen = pageKey(row.url);
 			}
+		}
+		for (const group of chunks(rejected, 80)) {
+			await run(
+				this.db,
+				`DELETE FROM discover_frontier WHERE system_id = ? AND url IN (${group.map(() => "?").join(",")})`,
+				systemId,
+				...group,
+			);
 		}
 		return chosen;
 	}
@@ -1011,6 +1057,11 @@ export class D1PageQueue implements PageQueue {
 			now,
 		);
 	}
+}
+
+function pageLease(systemId: SystemId, url: string): string | null {
+	const page = admittedUrl(url, seedById(systemId));
+	return page === null ? null : `${systemId}\0${page}`;
 }
 
 function chunks<T>(values: readonly T[], size: number): T[][] {

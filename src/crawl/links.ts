@@ -9,7 +9,7 @@ function globToRegExp(pattern: string): RegExp {
 	return new RegExp(`^${escaped}$`);
 }
 
-function matchesPattern(url: string, pattern: string): boolean {
+export function matchesPattern(url: string, pattern: string): boolean {
 	return globToRegExp(pattern).test(url);
 }
 
@@ -57,8 +57,13 @@ export function canonicalLink(value: string, base: string): string | null {
 		}
 		url.hash = "";
 		url.search = "";
-		if (url.pathname.length > 1 && url.pathname.endsWith("/")) {
-			url.pathname = url.pathname.slice(0, -1);
+		const path = url.pathname;
+		if (path.length > 1 && path.endsWith("/")) {
+			let end = path.length - 1;
+			while (end > 0 && path.charCodeAt(end) === 47) {
+				end -= 1;
+			}
+			url.pathname = path.slice(0, end + 1);
 		}
 		return url.toString();
 	} catch {
@@ -101,11 +106,17 @@ export function fallbackScope(seed: Seed): Seed | null {
 	if (!seed.fallbackStartUrl) {
 		return null;
 	}
-	const prefix = seed.fallbackStartUrl.replace(/\/$/, "");
+	const project = seed.fallbackStartUrl.replace(/\/$/, "");
+	const startUrl = `${project}/-/tree/main/contents`;
 	return {
 		...seed,
-		startUrl: seed.fallbackStartUrl,
-		includePatterns: [prefix, `${prefix}/**`],
+		startUrl,
+		includePatterns: [
+			startUrl,
+			`${project}/-/blob/main/contents/**`,
+			`${project}/-/raw/main/contents/**`,
+			`${project}/-/tree/main/contents/**`,
+		],
 	};
 }
 
@@ -166,6 +177,23 @@ function maskMarkdownCode(markdown: string): string {
 		.join("\n");
 }
 
+function directorySlashAllowed(resolvedHref: string, seed: Seed): boolean {
+	let parsed: URL;
+	try {
+		parsed = new URL(resolvedHref);
+	} catch {
+		return false;
+	}
+	if (parsed.pathname.length <= 1 || !parsed.pathname.endsWith("/")) {
+		return false;
+	}
+	if (linkAllowed(resolvedHref, seed)) {
+		return true;
+	}
+	const fallback = fallbackScope(seed);
+	return fallback !== null && linkAllowed(resolvedHref, fallback);
+}
+
 export function linkBase(pageUrl: string, markdown: string, seed: Seed): string {
 	const match = maskMarkdownCode(markdown).match(BASE_HREF);
 	const href = match?.[1] ?? match?.[2] ?? match?.[3];
@@ -174,7 +202,9 @@ export function linkBase(pageUrl: string, markdown: string, seed: Seed): string 
 	}
 	try {
 		const resolved = new URL(href, pageUrl);
-		if (resolved.origin !== new URL(pageUrl).origin || admittedUrl(resolved.href, seed) === null) {
+		const sameOrigin = resolved.origin === new URL(pageUrl).origin;
+		const admitted = admittedUrl(resolved.href, seed) !== null || directorySlashAllowed(resolved.href, seed);
+		if (!sameOrigin || !admitted) {
 			return pageUrl;
 		}
 		return resolved.href;

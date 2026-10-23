@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { seedById } from "../src/config/seed.ts";
-import { admittedUrl } from "../src/crawl/links.ts";
+import { admittedUrl, canonicalLink } from "../src/crawl/links.ts";
 
 const HOME = "https://web.unified-design-system.orange.com/orange";
 const CHILD = "https://web.unified-design-system.orange.com/orange/docs/1.5/page";
@@ -21,8 +21,28 @@ describe("seed root admission", () => {
 		const seed = seedById("siemens-ix");
 		expect(admittedUrl("https://ix.siemens.io/docs", seed)).toBeNull();
 		expect(admittedUrl("https://ix.siemens.io/docs/", seed)).toBeNull();
+		expect(admittedUrl("https://ix.siemens.io/docs//", seed)).toBeNull();
 		expect(admittedUrl("https://ix.siemens.io/docs/home/overview", seed)).toBe(
 			"https://ix.siemens.io/docs/home/overview",
 		);
+	});
+
+	it("strips a long trailing slash run and stays the same url", () => {
+		const seed = seedById("backpack");
+		const page = "https://www.skyscanner.design/latest/real";
+		const admitted = admittedUrl(`${page}${"/".repeat(100_000)}`, seed);
+		expect(admitted).toBe(page);
+		expect(admittedUrl(admitted ?? "", seed)).toBe(admitted);
+		expect(canonicalLink("https://example.test///", "https://example.test///")).toBe("https://example.test/");
+	});
+
+	it("returns the same url when admission runs again", () => {
+		const seed = seedById("backpack");
+		const page = "https://www.skyscanner.design/latest/real";
+		for (const input of [page, `${page}/`, `${page}?view=1`, `${page}${"/".repeat(16)}`]) {
+			const admitted = admittedUrl(input, seed);
+			expect(admitted).toBe(page);
+			expect(admittedUrl(admitted ?? "", seed)).toBe(admitted);
+		}
 	});
 });

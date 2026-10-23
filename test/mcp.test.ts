@@ -195,6 +195,41 @@ describe("streamable HTTP MCP on the search worker", () => {
 		expect(calls[0].ai_search_options.query_rewrite).toEqual({ enabled: false });
 	});
 
+	it("accepts a query of the cap in code points and rejects one more", async () => {
+		const { env, calls } = envWithIndex(fixtureChunks);
+		const atCap = "😀".repeat(MAX_QUERY_CHARS);
+		const accepted = await mcpRpc(env, {
+			jsonrpc: "2.0",
+			id: 12,
+			method: "tools/call",
+			params: {
+				name: "search_design_guidance",
+				arguments: { query: atCap },
+			},
+		});
+		expect(accepted.status).toBe(200);
+		const ok = rpcResult(await readMcpBody(accepted)) as { isError?: boolean };
+		expect(ok.isError).toBeUndefined();
+		expect(calls.map((call) => call.query)).toEqual([atCap]);
+		const rejected = await mcpRpc(env, {
+			jsonrpc: "2.0",
+			id: 13,
+			method: "tools/call",
+			params: {
+				name: "search_design_guidance",
+				arguments: { query: `${atCap}😀` },
+			},
+		});
+		expect(rejected.status).toBe(200);
+		const tool = rpcResult(await readMcpBody(rejected)) as {
+			content: Array<{ type: string; text: string }>;
+			isError?: boolean;
+		};
+		expect(tool.isError).toBe(true);
+		expect(JSON.parse(tool.content[0]?.text ?? "")).toEqual({ error: "query_too_long" });
+		expect(calls.map((call) => call.query)).toEqual([atCap]);
+	});
+
 	it("returns a tool error for a query longer than the cap and does not search", async () => {
 		const { env, calls } = envWithIndex(fixtureChunks);
 		const response = await mcpRpc(env, {

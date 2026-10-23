@@ -3,6 +3,7 @@ import { BROWSER_CRAWL_DEPTH, BROWSER_CRAWL_LIMIT, CRAWL_RUNAWAY_PAGES } from ".
 import { seedById } from "../src/config/seed.ts";
 import type { Seed } from "../src/config/types.ts";
 import { crawlRequestBody, crawlStoppedEarly, reachedRunawayCeiling } from "../src/crawl/browser-run.ts";
+import { admittedUrl, fallbackScope, matchesPattern } from "../src/crawl/links.ts";
 
 describe("crawlRequestBody", () => {
 	it("asks Browser Run for its maximum page limit and depth", () => {
@@ -64,28 +65,62 @@ describe("crawlRequestBody", () => {
 
 	it("uses the start url it is handed so a fallback crawl reports the fallback", () => {
 		const pajamas = seedById("gitlab-pajamas");
-		const body = crawlRequestBody(pajamas, pajamas.fallbackStartUrl ?? "");
-		expect(body.url).toBe("https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com");
+		const start = fallbackScope(pajamas)?.startUrl ?? "";
+		const body = crawlRequestBody(pajamas, start);
+		expect(body.url).toBe("https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com/-/tree/main/contents");
 	});
 
-	it("scopes a fallback start to the project prefix and keeps exclude patterns", () => {
+	it("matches the fallback start url to an include pattern", () => {
 		const pajamas = seedById("gitlab-pajamas");
-		const prefix = "https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com";
+		const scope = fallbackScope(pajamas);
+		const body = crawlRequestBody(pajamas, scope?.startUrl ?? "");
+		const patterns = body.options.includePatterns ?? [];
+		expect(body.url).toBe(scope?.startUrl);
+		expect(patterns.some((pattern) => matchesPattern(body.url, pattern))).toBe(true);
+	});
+
+	it("limits a fallback start to the contents path and keeps exclude patterns", () => {
+		const pajamas = seedById("gitlab-pajamas");
+		const project = "https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com";
+		const scope = fallbackScope(pajamas);
+		const contents = scope?.includePatterns;
 		const primary = crawlRequestBody(pajamas, pajamas.startUrl);
 		expect(primary.options).not.toHaveProperty("includePatterns");
-		expect(crawlRequestBody(pajamas, prefix).options).toMatchObject({
+		expect(crawlRequestBody(pajamas, project).options).toMatchObject({
 			includeExternalLinks: false,
 			includeSubdomains: false,
-			includePatterns: [prefix, `${prefix}/**`],
+			includePatterns: contents,
 			excludePatterns: pajamas.excludePatterns,
 		});
-		expect(crawlRequestBody(pajamas, `${prefix}/-/blob/main/README.md`).options.includePatterns).toEqual([
-			prefix,
-			`${prefix}/**`,
-		]);
+		expect(
+			crawlRequestBody(pajamas, `${project}/-/blob/main/contents/components/button.md`).options.includePatterns,
+		).toEqual(contents);
+		expect(crawlRequestBody(pajamas, `${project}/-/blob/main/README.md`).options.includePatterns).toEqual(contents);
 		expect(crawlRequestBody(pajamas, "https://gitlab.com/other/project").options).not.toHaveProperty(
 			"includePatterns",
 		);
+	});
+
+	it("admits main contents pages and rejects other gitlab views", () => {
+		const pajamas = seedById("gitlab-pajamas");
+		const project = "https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com";
+		const blob = `${project}/-/blob/main/contents/components/button.md`;
+		const tree = `${project}/-/tree/main/contents/components`;
+		const raw = `${project}/-/raw/main/contents/components/button.md`;
+		expect(admittedUrl(blob, pajamas)).toBe(blob);
+		expect(admittedUrl(tree, pajamas)).toBe(tree);
+		expect(admittedUrl(raw, pajamas)).toBe(raw);
+		expect(admittedUrl(`${project}/-/tree/main/contents`, pajamas)).toBe(`${project}/-/tree/main/contents`);
+		for (const url of [
+			`${project}/-/commits/main/contents`,
+			`${project}/-/blame/main/contents/components/button.md`,
+			`${project}/-/wikis/contents`,
+			`${project}/-/blob/feature/contents/components/button.md`,
+			`${project}/-/tree/other/contents`,
+			`${project}/-/blob/main/README.md`,
+		]) {
+			expect(admittedUrl(url, pajamas)).toBeNull();
+		}
 	});
 });
 

@@ -13,6 +13,19 @@ type BodyFields = {
 	system?: unknown;
 };
 
+function codePointLength(value: string): number {
+	let count = 0;
+	for (let index = 0; index < value.length; ) {
+		const code = value.codePointAt(index);
+		if (code === undefined) {
+			break;
+		}
+		count += 1;
+		index += code > 0xffff ? 2 : 1;
+	}
+	return count;
+}
+
 function clampK(value: unknown): number | undefined {
 	if (value === undefined || value === null || value === "") {
 		return undefined;
@@ -51,7 +64,7 @@ export function parseSearchFields(
 	if (!query) {
 		return { kind: "query_required" };
 	}
-	if (query.length > MAX_QUERY_CHARS) {
+	if (codePointLength(query) > MAX_QUERY_CHARS) {
 		return { kind: "query_too_long" };
 	}
 	const system = readSystem(fields.system, live);

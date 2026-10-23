@@ -129,8 +129,13 @@ describe("crawlSeed", () => {
 			pages: { completed: [{ records: [{ url: "https://gitlab.com/readme", status: "completed", markdown: "readme" }] }] },
 		});
 		const outcome = await crawlSeed(auth, seed);
-		expect(startedUrls).toEqual(["https://design.gitlab.com/", "https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com"]);
-		expect(outcome.startUrl).toBe("https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com");
+		expect(startedUrls).toEqual([
+			"https://design.gitlab.com/",
+			"https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com/-/tree/main/contents",
+		]);
+		expect(outcome.startUrl).toBe(
+			"https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com/-/tree/main/contents",
+		);
 		expect(outcome.records).toHaveLength(1);
 	});
 
@@ -157,7 +162,10 @@ describe("crawlSeed", () => {
 
 	it("throws with the failing url when the fallback start is rejected too", async () => {
 		installFakeCrawl({
-			startStatus: { "https://design.gitlab.com/": 500, "https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com": 400 },
+			startStatus: {
+				"https://design.gitlab.com/": 500,
+				"https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com/-/tree/main/contents": 400,
+			},
 			jobStatus: "completed",
 			total: 0,
 			finished: 0,

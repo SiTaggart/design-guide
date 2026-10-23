@@ -714,7 +714,7 @@ describe("held index clock", () => {
 			auth: { accountId: "acct", apiToken: "token" },
 			now: NOW,
 			fetchMarkdown: async () => "# guidance",
-			indexPage: async (_auth, _seed, _item, _markdown, timestamps) => {
+			indexPage: async (_auth, _seed, _item, _pageUrl, _markdown, timestamps) => {
 				written.push(timestamps.lastIndexed);
 				return "paste/page/new.md";
 			},
@@ -825,13 +825,9 @@ describe("held index clock", () => {
 			seedById("paste"),
 			{
 				systemId: "paste",
-				url,
-				kind: "reindex",
-				enqueuedAt: NOW,
 				attempts: 1,
-				status: "claimed",
-				itemKey: null,
 			},
+			url,
 			"# new button",
 			{ lastCrawled: NOW, lastIndexed: held },
 			NOW,
@@ -960,6 +956,30 @@ describe("deleteOrphanDocs", () => {
 			new Set(["https://primer.style/keep"]),
 		);
 		expect(deleted).toEqual(["old-gen"]);
+	});
+
+	it("keeps a live document when a dropped row names its key", async () => {
+		const deleted: string[] = [];
+		vi.spyOn(itemsRest, "listItems").mockResolvedValue([
+			{
+				id: "live",
+				key: "backpack/page/real.md",
+				metadata: { system: "backpack", source_url: "https://www.skyscanner.design/latest/real" },
+			},
+		]);
+		vi.spyOn(itemsRest, "deleteItem").mockImplementation(async (_auth, id) => {
+			deleted.push(id);
+		});
+		vi.spyOn(itemsRest, "deleteItemByKey").mockImplementation(async (_auth, key) => {
+			deleted.push(key);
+		});
+		await deleteOrphanDocs(
+			{ accountId: "acct", apiToken: "token", instanceId: "design-guide" },
+			"backpack",
+			[{ url: "https://www.skyscanner.design/latest/real/", itemKey: "backpack/page/real.md" }],
+			new Set(["https://www.skyscanner.design/latest/real"]),
+		);
+		expect(deleted).toEqual([]);
 	});
 });
 
@@ -1494,13 +1514,10 @@ describe("legacy page copies", () => {
 			seedById("primer"),
 			{
 				systemId: "primer",
-				url: "https://primer.style/select",
-				kind: "seed",
-				enqueuedAt: NOW,
 				attempts: 1,
-				status: "claimed",
 				itemKey: null,
 			},
+			"https://primer.style/select",
 			"# select",
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			NOW,
