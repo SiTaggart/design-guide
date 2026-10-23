@@ -67,6 +67,19 @@ describe("crawlRequestBody", () => {
 		const body = crawlRequestBody(pajamas, pajamas.fallbackStartUrl ?? "");
 		expect(body.url).toBe("https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com");
 	});
+
+	it("scopes a fallback start to the project prefix and keeps exclude patterns", () => {
+		const pajamas = seedById("gitlab-pajamas");
+		const prefix = "https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com";
+		const primary = crawlRequestBody(pajamas, pajamas.startUrl);
+		expect(primary.options).not.toHaveProperty("includePatterns");
+		expect(crawlRequestBody(pajamas, prefix).options).toMatchObject({
+			includeExternalLinks: false,
+			includeSubdomains: false,
+			includePatterns: [prefix, `${prefix}/**`],
+			excludePatterns: pajamas.excludePatterns,
+		});
+	});
 });
 
 describe("crawl bounds", () => {

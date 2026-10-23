@@ -193,6 +193,27 @@ describe("streamable HTTP MCP on the search worker", () => {
 		expect(calls[0].ai_search_options.query_rewrite).toEqual({ enabled: false });
 	});
 
+	it("returns a tool error for a query longer than the cap and does not search", async () => {
+		const { env, calls } = envWithIndex(fixtureChunks);
+		const response = await mcpRpc(env, {
+			jsonrpc: "2.0",
+			id: 11,
+			method: "tools/call",
+			params: {
+				name: "search_design_guidance",
+				arguments: { query: "q".repeat(2_001) },
+			},
+		});
+		expect(response.status).toBe(200);
+		const tool = rpcResult(await readMcpBody(response)) as {
+			content: Array<{ type: string; text: string }>;
+			isError?: boolean;
+		};
+		expect(tool.isError).toBe(true);
+		expect(JSON.parse(tool.content[0]?.text ?? "")).toEqual({ error: "query_too_long" });
+		expect(calls).toEqual([]);
+	});
+
 	it("returns a tool error for a missing query", async () => {
 		const { env, calls } = envWithIndex(fixtureChunks);
 		const response = await mcpRpc(env, {

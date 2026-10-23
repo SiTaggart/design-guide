@@ -60,6 +60,28 @@ function envWithIndex(chunks: typeof fixtureChunks, ready = true): {
 }
 
 describe("HTTP search against a fixture index", () => {
+	it("returns 400 when the query is longer than the cap and does not search", async () => {
+		const { env, calls } = envWithIndex(fixtureChunks);
+		const overLong = "q".repeat(2_001);
+		const posted = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: overLong }),
+			}),
+			env,
+		);
+		expect(posted.status).toBe(400);
+		expect(await posted.json()).toEqual({ error: "query_too_long" });
+		const gotten = await worker.fetch(
+			new Request(`https://example.test/v1/search?query=${overLong}`),
+			env,
+		);
+		expect(gotten.status).toBe(400);
+		expect(await gotten.json()).toEqual({ error: "query_too_long" });
+		expect(calls).toEqual([]);
+	});
+
 	it("returns 400 when query is missing", async () => {
 		const { env } = envWithIndex(fixtureChunks);
 		const response = await worker.fetch(
