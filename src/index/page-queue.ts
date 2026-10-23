@@ -1,5 +1,6 @@
+import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, isSystemId, type SystemId } from "../config/types.ts";
-import { isStaticAsset, pageKey } from "../crawl/links.ts";
+import { admittedUrl, isStaticAsset, pageKey } from "../crawl/links.ts";
 
 export const DRAIN_LIMIT = 100;
 export const MAX_ATTEMPTS = 5;
@@ -798,6 +799,7 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async nextFrontier(systemId: SystemId, seen: ReadonlySet<string>): Promise<string | null> {
+		const seed = seedById(systemId);
 		const blocked = new Set<string>();
 		for (const url of seen) {
 			blocked.add(pageKey(url));
@@ -815,8 +817,22 @@ export class D1PageQueue implements PageQueue {
 			"SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC",
 			systemId,
 		);
-		const row = rows.find((row) => !blocked.has(pageKey(row.url)) && !isStaticAsset(row.url));
-		return row ? pageKey(row.url) : null;
+		let chosen: string | null = null;
+		for (const row of rows) {
+			if (admittedUrl(row.url, seed) === null) {
+				await run(
+					this.db,
+					"DELETE FROM discover_frontier WHERE system_id = ? AND url = ?",
+					systemId,
+					row.url,
+				);
+				continue;
+			}
+			if (chosen === null && !blocked.has(pageKey(row.url)) && !isStaticAsset(row.url)) {
+				chosen = pageKey(row.url);
+			}
+		}
+		return chosen;
 	}
 
 	async indexableCount(systemId: SystemId): Promise<number> {
