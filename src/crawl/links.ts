@@ -128,14 +128,52 @@ function isSeedRoot(url: string, seed: Seed): boolean {
 
 const BASE_HREF = /<base\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i;
 
-export function linkBase(pageUrl: string, markdown: string): string {
-	const match = BASE_HREF.exec(markdown);
+function openFence(line: string): { mark: string; size: number } | null {
+	const match = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+	if (!match || (match[2].startsWith("`") && match[3].includes("`"))) {
+		return null;
+	}
+	return { mark: match[2][0], size: match[2].length };
+}
+
+function closesFence(line: string, fence: { mark: string; size: number }): boolean {
+	const match = /^( {0,3})(`{3,}|~{3,})[ \t]*$/.exec(line);
+	return match !== null && match[2][0] === fence.mark && match[2].length >= fence.size;
+}
+
+function maskMarkdownCode(markdown: string): string {
+	let fence: { mark: string; size: number } | null = null;
+	return markdown
+		.split("\n")
+		.map((line) => {
+			if (fence) {
+				if (closesFence(line, fence)) {
+					fence = null;
+				}
+				return "";
+			}
+			const opened = openFence(line);
+			if (opened) {
+				fence = opened;
+				return "";
+			}
+			return line.replace(/(`+)(?:(?!\1).)*?\1/g, (match) => " ".repeat(match.length));
+		})
+		.join("\n");
+}
+
+export function linkBase(pageUrl: string, markdown: string, seed: Seed): string {
+	const match = maskMarkdownCode(markdown).match(BASE_HREF);
 	const href = match?.[1] ?? match?.[2] ?? match?.[3];
 	if (!href) {
 		return pageUrl;
 	}
 	try {
-		return new URL(href, pageUrl).href;
+		const resolved = new URL(href, pageUrl);
+		if (resolved.origin !== new URL(pageUrl).origin || admittedUrl(resolved.href, seed) === null) {
+			return pageUrl;
+		}
+		return resolved.href;
 	} catch {
 		return pageUrl;
 	}

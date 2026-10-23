@@ -413,7 +413,7 @@ async function continueDiscover(
 					if (record.markdown) {
 						await queue.addFrontier(
 							run.systemId,
-							frontierLinks(record.markdown, linkBase(record.url, record.markdown), seed),
+							frontierLinks(record.markdown, linkBase(record.url, record.markdown, seed), seed),
 						);
 					}
 					if (record.status === "completed" && fitsItem({ ...record, url: canonical }, seed)) {
