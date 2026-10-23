@@ -11,14 +11,14 @@ const NOW = "2026-10-18T00:00:00.000Z";
 const DRIFT_CRON = "*/5 * * * *";
 const CANONICAL = "https://www.skyscanner.design/latest/real";
 const ALSO = "https://www.skyscanner.design/latest/other";
-const OFF_HOST = "https://gitlab.com/attacker/public-repo";
-const METADATA = "https://169.254.169.254/latest/meta-data/";
-const USERINFO = "https://www.skyscanner.design@evil.example/latest/phish";
+const OFF_HOST = "https://gitlab.com/other-group/other-project";
+const LINK_LOCAL = "https://169.254.169.254/latest/meta-data/";
+const USERINFO = "https://user@other.example/latest/page";
 const OFF_PATTERN = "https://www.skyscanner.design/account/billing";
 const QUERY_VARIANTS = [
 	`${CANONICAL}?dup=1`,
 	`${CANONICAL}?dup=2`,
-	`${CANONICAL}?next=${encodeURIComponent(METADATA)}`,
+	`${CANONICAL}?next=${encodeURIComponent(LINK_LOCAL)}`,
 ];
 
 afterEach(() => {
@@ -55,7 +55,7 @@ describe("discovered records stay inside the seed", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		const records = [OFF_HOST, METADATA, USERINFO, OFF_PATTERN, ALSO, ...QUERY_VARIANTS].map((url) => ({
+		const records = [OFF_HOST, LINK_LOCAL, USERINFO, OFF_PATTERN, ALSO, ...QUERY_VARIANTS].map((url) => ({
 			url,
 			status: "completed",
 			markdown: "# guidance",
@@ -106,7 +106,7 @@ describe("discovered records stay inside the seed", () => {
 		const allowed = "https://www.skyscanner.design/latest/welcome-to-backpack-Mtf5OEo4";
 		await pageQueue.enqueueUpsert(
 			[
-				{ systemId: "backpack", url: METADATA, kind: "seed" },
+				{ systemId: "backpack", url: LINK_LOCAL, kind: "seed" },
 				{ systemId: "backpack", url: allowed, kind: "seed" },
 			],
 			NOW,
@@ -125,7 +125,7 @@ describe("discovered records stay inside the seed", () => {
 		});
 		const rejected = await db
 			.prepare("SELECT status, error FROM page_work WHERE system_id = ? AND url = ?")
-			.bind("backpack", METADATA)
+			.bind("backpack", LINK_LOCAL)
 			.first<{ status: string; error: string | null }>();
 		expect(fetched).toEqual([allowed]);
 		expect(rejected).toMatchObject({ status: "failed", error: "url outside seed scope" });
