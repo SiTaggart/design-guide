@@ -21,8 +21,19 @@ describe("seed root admission", () => {
 		const seed = seedById("siemens-ix");
 		expect(admittedUrl("https://ix.siemens.io/docs", seed)).toBeNull();
 		expect(admittedUrl("https://ix.siemens.io/docs/", seed)).toBeNull();
+		expect(admittedUrl("https://ix.siemens.io/docs//", seed)).toBeNull();
 		expect(admittedUrl("https://ix.siemens.io/docs/home/overview", seed)).toBe(
 			"https://ix.siemens.io/docs/home/overview",
 		);
+	});
+
+	it("returns the same url when admission runs again", () => {
+		const seed = seedById("backpack");
+		const page = "https://www.skyscanner.design/latest/real";
+		for (const input of [page, `${page}/`, `${page}?view=1`, `${page}${"/".repeat(16)}`]) {
+			const admitted = admittedUrl(input, seed);
+			expect(admitted).toBe(page);
+			expect(admittedUrl(admitted ?? "", seed)).toBe(admitted);
+		}
 	});
 });

@@ -1060,22 +1060,8 @@ export class D1PageQueue implements PageQueue {
 }
 
 function pageLease(systemId: SystemId, url: string): string | null {
-	const seed = seedById(systemId);
-	let page = admittedUrl(url, seed);
-	if (page === null) {
-		return null;
-	}
-	for (let step = 0; step < 8; step += 1) {
-		const next = admittedUrl(page, seed);
-		if (next === null) {
-			return null;
-		}
-		if (next === page) {
-			return `${systemId}\0${page}`;
-		}
-		page = next;
-	}
-	return `${systemId}\0${page}`;
+	const page = admittedUrl(url, seedById(systemId));
+	return page === null ? null : `${systemId}\0${page}`;
 }
 
 function chunks<T>(values: readonly T[], size: number): T[][] {

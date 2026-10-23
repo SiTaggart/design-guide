@@ -182,6 +182,65 @@ describe("an admitted page has one live claim", () => {
 		expect((await pageQueue.claim(1, LATEST)).map((item) => item.url)).toEqual([other]);
 	});
 
+	it("keeps one catalog item when a repeated-slash row admits the same page", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const repeated = `${CANONICAL}${"/".repeat(16)}`;
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "backpack", url: CANONICAL, kind: "seed" },
+				{ systemId: "backpack", url: repeated, kind: "seed" },
+			],
+			NOW,
+		);
+		const items: Stored[] = [];
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let stored!: () => void;
+		const firstStored = new Promise<void>((resolve) => {
+			stored = resolve;
+		});
+		let uploads = 0;
+		vi.stubGlobal(
+			"fetch",
+			catalog(items, async () => {
+				uploads += 1;
+				if (uploads === 1) {
+					stored();
+					await gate;
+				}
+			}),
+		);
+		const first = drainTick({
+			queue: pageQueue,
+			auth: AUTH,
+			now: NOW,
+			limit: 1,
+			fetchMarkdown: async () => "# real",
+		});
+		await firstStored;
+		const second = await drainTick({
+			queue: pageQueue,
+			auth: AUTH,
+			now: LATER,
+			limit: 1,
+			fetchMarkdown: async () => "# real",
+		});
+		const repeatedRow = await db
+			.prepare("SELECT status, attempts FROM page_work WHERE url = ?")
+			.bind(repeated)
+			.first<{ status: string; attempts: number }>();
+		expect(repeatedRow).toEqual({ status: "pending", attempts: 0 });
+		expect(second).toEqual({ claimed: 0, indexed: 0, failed: 0 });
+		expect(pageKeys(items)).toHaveLength(1);
+		release();
+		expect(await first).toEqual({ claimed: 1, indexed: 1, failed: 0 });
+		expect(pageKeys(items)).toHaveLength(1);
+	});
+
 	it("returns the canonical row to pending while a multi-slash row is claimed", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);

@@ -57,7 +57,7 @@ export function canonicalLink(value: string, base: string): string | null {
 		}
 		url.hash = "";
 		url.search = "";
-		if (url.pathname.length > 1 && url.pathname.endsWith("/")) {
+		while (url.pathname.length > 1 && url.pathname.endsWith("/")) {
 			url.pathname = url.pathname.slice(0, -1);
 		}
 		return url.toString();
