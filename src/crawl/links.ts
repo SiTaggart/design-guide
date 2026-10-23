@@ -13,6 +13,10 @@ function matchesPattern(url: string, pattern: string): boolean {
 	return globToRegExp(pattern).test(url);
 }
 
+function matchesExclude(url: string, pattern: string): boolean {
+	return matchesPattern(url, pattern) || (pattern.endsWith("/**") && matchesPattern(url, pattern.slice(0, -3)));
+}
+
 const STATIC_EXTENSION =
 	/\.(?:avif|bmp|gif|ico|jpe?g|png|svg|tiff?|webp|eot|otf|ttf|woff2?|css|cjs|js|mjs|aac|avi|flac|m4a|m4v|mov|mp3|mp4|mpe?g|ogg|ogv|wav|webm|7z|bz2|gz|rar|tar|tgz|zip)$/i;
 
@@ -87,7 +91,7 @@ export function linkAllowed(url: string, seed: Seed): boolean {
 	) {
 		return false;
 	}
-	if (seed.excludePatterns?.some((pattern) => matchesPattern(url, pattern))) {
+	if (seed.excludePatterns?.some((pattern) => matchesExclude(url, pattern))) {
 		return false;
 	}
 	return true;
