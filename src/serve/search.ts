@@ -9,6 +9,7 @@ const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
 export type SearchOutcome =
 	| { kind: "query_required" }
+	| { kind: "query_too_long" }
 	| { kind: "empty" }
 	| { kind: "ok"; body: SearchResponse }
 	| { kind: "index_not_ready" };
@@ -22,7 +23,7 @@ export async function resolveSearch(
 	parsed: ParseResult,
 	parked?: ReadonlySet<string>,
 ): Promise<SearchOutcome> {
-	if (parsed.kind === "query_required" || parsed.kind === "empty") {
+	if (parsed.kind === "query_required" || parsed.kind === "query_too_long" || parsed.kind === "empty") {
 		return parsed;
 	}
 	try {
@@ -43,8 +44,8 @@ export async function resolveSearch(
 }
 
 function searchHttpResponse(outcome: SearchOutcome): Response {
-	if (outcome.kind === "query_required") {
-		return new Response(JSON.stringify({ error: "query_required" }), {
+	if (outcome.kind === "query_required" || outcome.kind === "query_too_long") {
+		return new Response(JSON.stringify({ error: outcome.kind }), {
 			status: 400,
 			headers: JSON_HEADERS,
 		});

@@ -14,4 +14,6 @@ export const MIN_SEARCH_SCORE = 0.6;
 export const MIN_K = 1;
 /** AI Search `max_num_results` ceiling. https://developers.cloudflare.com/ai-search/configuration/retrieval/result-controls/ */
 export const MAX_K = 50;
+/** Longest search query forwarded to AI Search, in characters after trim. */
+export const MAX_QUERY_CHARS = 2_000;
 export const RETRIEVAL_CANDIDATES = MAX_K;

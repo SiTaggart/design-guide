@@ -45,9 +45,9 @@ type ToolResult = {
 };
 
 function toolFromOutcome(outcome: SearchOutcome): ToolResult {
-	if (outcome.kind === "query_required") {
+	if (outcome.kind === "query_required" || outcome.kind === "query_too_long") {
 		return {
-			content: [{ type: "text", text: JSON.stringify({ error: "query_required" }) }],
+			content: [{ type: "text", text: JSON.stringify({ error: outcome.kind }) }],
 			isError: true,
 		};
 	}

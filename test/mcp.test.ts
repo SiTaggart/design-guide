@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_QUERY_CHARS } from "../src/config/instance.ts";
 import type { SearchCall, WorkerEnv } from "../src/index/ai-search.ts";
 import { SYSTEM_IDS, type SearchChunk } from "../src/config/types.ts";
 import worker from "../src/worker.ts";
@@ -201,7 +202,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 			method: "tools/call",
 			params: {
 				name: "search_design_guidance",
-				arguments: { query: "q".repeat(2_001) },
+				arguments: { query: "q".repeat(MAX_QUERY_CHARS + 1) },
 			},
 		});
 		expect(response.status).toBe(200);

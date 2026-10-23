@@ -4,7 +4,7 @@ import type { SearchCall, WorkerEnv } from "../src/index/ai-search.ts";
 import type { SearchChunk } from "../src/config/types.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks, withVectorScore } from "./fixtures/chunks.ts";
-import { RETRIEVAL_CANDIDATES, MIN_SEARCH_SCORE } from "../src/config/instance.ts";
+import { MAX_QUERY_CHARS, RETRIEVAL_CANDIDATES, MIN_SEARCH_SCORE } from "../src/config/instance.ts";
 
 const fixtureCitations = [
 	{
@@ -62,7 +62,7 @@ function envWithIndex(chunks: typeof fixtureChunks, ready = true): {
 describe("HTTP search against a fixture index", () => {
 	it("returns 400 when the query is longer than the cap and does not search", async () => {
 		const { env, calls } = envWithIndex(fixtureChunks);
-		const overLong = "q".repeat(2_001);
+		const overLong = "q".repeat(MAX_QUERY_CHARS + 1);
 		const posted = await worker.fetch(
 			new Request("https://example.test/v1/search", {
 				method: "POST",
