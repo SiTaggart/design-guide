@@ -286,7 +286,7 @@ export async function startSeedCrawl(
 		started.httpStatus >= 400 &&
 		started.httpStatus < 600
 	) {
-		startUrl = seed.fallbackStartUrl;
+		startUrl = fallbackScope(seed)?.startUrl ?? seed.fallbackStartUrl;
 		started = await startCrawl(auth, seed, startUrl);
 	}
 	if ("httpStatus" in started) {

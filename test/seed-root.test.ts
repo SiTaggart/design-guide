@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { seedById } from "../src/config/seed.ts";
-import { admittedUrl } from "../src/crawl/links.ts";
+import { admittedUrl, canonicalLink } from "../src/crawl/links.ts";
 
 const HOME = "https://web.unified-design-system.orange.com/orange";
 const CHILD = "https://web.unified-design-system.orange.com/orange/docs/1.5/page";
@@ -25,6 +25,17 @@ describe("seed root admission", () => {
 		expect(admittedUrl("https://ix.siemens.io/docs/home/overview", seed)).toBe(
 			"https://ix.siemens.io/docs/home/overview",
 		);
+	});
+
+	it("strips a long trailing slash run and stays the same url", () => {
+		const seed = seedById("backpack");
+		const page = "https://www.skyscanner.design/latest/real";
+		const started = performance.now();
+		const admitted = admittedUrl(`${page}${"/".repeat(100_000)}`, seed);
+		expect(performance.now() - started).toBeLessThan(1_000);
+		expect(admitted).toBe(page);
+		expect(admittedUrl(admitted ?? "", seed)).toBe(admitted);
+		expect(canonicalLink("https://example.test///", "https://example.test///")).toBe("https://example.test/");
 	});
 
 	it("returns the same url when admission runs again", () => {

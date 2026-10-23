@@ -9,7 +9,7 @@ function globToRegExp(pattern: string): RegExp {
 	return new RegExp(`^${escaped}$`);
 }
 
-function matchesPattern(url: string, pattern: string): boolean {
+export function matchesPattern(url: string, pattern: string): boolean {
 	return globToRegExp(pattern).test(url);
 }
 
@@ -57,8 +57,8 @@ export function canonicalLink(value: string, base: string): string | null {
 		}
 		url.hash = "";
 		url.search = "";
-		while (url.pathname.length > 1 && url.pathname.endsWith("/")) {
-			url.pathname = url.pathname.slice(0, -1);
+		if (url.pathname.length > 1) {
+			url.pathname = url.pathname.replace(/\/+$/u, (_match, offset: number) => (offset === 0 ? "/" : ""));
 		}
 		return url.toString();
 	} catch {
@@ -102,11 +102,16 @@ export function fallbackScope(seed: Seed): Seed | null {
 		return null;
 	}
 	const project = seed.fallbackStartUrl.replace(/\/$/, "");
-	const contents = `${project}/**/contents`;
+	const startUrl = `${project}/-/tree/main/contents`;
 	return {
 		...seed,
-		startUrl: seed.fallbackStartUrl,
-		includePatterns: [contents, `${contents}/**`],
+		startUrl,
+		includePatterns: [
+			startUrl,
+			`${project}/-/blob/main/contents/**`,
+			`${project}/-/raw/main/contents/**`,
+			`${project}/-/tree/main/contents/**`,
+		],
 	};
 }
 
