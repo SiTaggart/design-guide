@@ -3,6 +3,7 @@ import { INSTANCE_ID } from "../config/instance.ts";
 import { seedById } from "../config/seed.ts";
 import type { Seed, SystemId } from "../config/types.ts";
 import { fetchPageMarkdown, type CrawlAuth } from "../crawl/browser-run.ts";
+import { admittedUrl } from "../crawl/links.ts";
 import {
 	deleteItem,
 	deleteItemByKey,
@@ -203,6 +204,13 @@ export async function drainTick(input: {
 		if (!(await input.queue.owns(item))) {
 			continue;
 		}
+		const seed = seedById(item.systemId);
+		if (admittedUrl(item.url, seed) === null) {
+			if (await input.queue.fail(item, "url outside seed scope")) {
+				failed += 1;
+			}
+			continue;
+		}
 		try {
 			const markdown = await fetchMarkdown(item.url);
 			if (!(await input.queue.owns(item))) {
@@ -210,8 +218,8 @@ export async function drainTick(input: {
 			}
 			const stamp = item.claimedAt ?? input.now;
 			const itemKey = input.indexPage
-				? await input.indexPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps, stamp)
-				: await uploadQueuedPage(itemsAuth, seedById(item.systemId), item, markdown, timestamps, stamp);
+				? await input.indexPage(itemsAuth, seed, item, markdown, timestamps, stamp)
+				: await uploadQueuedPage(itemsAuth, seed, item, markdown, timestamps, stamp);
 			if (!input.indexPage) {
 				const cleaned = await cleanupReplacedItems(
 					itemsAuth,

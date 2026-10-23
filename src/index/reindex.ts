@@ -10,7 +10,7 @@ import {
 	type CrawlOutcome,
 	type CrawlRecord,
 } from "../crawl/browser-run.ts";
-import { isLlmsIndexFile } from "../crawl/links.ts";
+import { admittedUrl, isLlmsIndexFile } from "../crawl/links.ts";
 import {
 	deleteItem,
 	ensureInstance,
@@ -218,9 +218,25 @@ function keepResult(
 	};
 }
 
+function admittedRecords(records: readonly CrawlRecord[], seed: Seed): CrawlRecord[] {
+	const byUrl = new Map<string, CrawlRecord>();
+	for (const record of records) {
+		const url = admittedUrl(record.url, seed);
+		if (!url) {
+			continue;
+		}
+		const normalized = { ...record, url };
+		if (fitsItem(normalized, seed)) {
+			byUrl.set(url, normalized);
+		}
+	}
+	return [...byUrl.values()];
+}
+
 function indexableRecords(records: readonly CrawlRecord[], seed: Seed): CrawlRecord[] {
-	return records.filter(
-		(record) => record.status === "completed" && record.url.startsWith("https://") && fitsItem(record, seed),
+	return admittedRecords(
+		records.filter((record) => record.status === "completed"),
+		seed,
 	);
 }
 
@@ -295,7 +311,7 @@ export async function swapFromOutcome(
 	outcome: CrawlOutcome,
 	options?: { generation?: string },
 ): Promise<SystemReindexResult> {
-	const usable = outcome.records.filter((record) => fitsItem(record, seed));
+	const usable = admittedRecords(outcome.records, seed);
 	const decision = swapDecision({
 		status: outcome.status,
 		counts: outcome.counts,

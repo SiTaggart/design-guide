@@ -80,7 +80,11 @@ export function linkAllowed(url: string, seed: Seed): boolean {
 	if (!hostOk) {
 		return false;
 	}
-	if (seed.includePatterns?.length && !seed.includePatterns.some((pattern) => matchesPattern(url, pattern))) {
+	if (
+		!isSeedRoot(url, seed) &&
+		seed.includePatterns?.length &&
+		!seed.includePatterns.some((pattern) => matchesPattern(url, pattern))
+	) {
 		return false;
 	}
 	if (seed.excludePatterns?.some((pattern) => matchesPattern(url, pattern))) {
@@ -89,19 +93,105 @@ export function linkAllowed(url: string, seed: Seed): boolean {
 	return true;
 }
 
+export function fallbackScope(seed: Seed): Seed | null {
+	if (!seed.fallbackStartUrl) {
+		return null;
+	}
+	const prefix = seed.fallbackStartUrl.replace(/\/$/, "");
+	return {
+		...seed,
+		startUrl: seed.fallbackStartUrl,
+		includePatterns: [prefix, `${prefix}/**`],
+	};
+}
+
+export function admittedUrl(url: string, seed: Seed): string | null {
+	const canonical = canonicalLink(url, url);
+	if (!canonical) {
+		return null;
+	}
+	if (linkAllowed(canonical, seed)) {
+		return canonical;
+	}
+	const fallback = fallbackScope(seed);
+	if (fallback && linkAllowed(canonical, fallback)) {
+		return canonical;
+	}
+	return null;
+}
+
+function isSeedRoot(url: string, seed: Seed): boolean {
+	const root = canonicalLink(seed.startUrl, seed.startUrl);
+	const candidate = canonicalLink(url, url);
+	return root !== null && candidate === root;
+}
+
+const BASE_HREF = /<base\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i;
+
+function openFence(line: string): { mark: string; size: number } | null {
+	const match = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+	if (!match || (match[2].startsWith("`") && match[3].includes("`"))) {
+		return null;
+	}
+	return { mark: match[2][0], size: match[2].length };
+}
+
+function closesFence(line: string, fence: { mark: string; size: number }): boolean {
+	const match = /^( {0,3})(`{3,}|~{3,})[ \t]*$/.exec(line);
+	return match !== null && match[2][0] === fence.mark && match[2].length >= fence.size;
+}
+
+function maskMarkdownCode(markdown: string): string {
+	let fence: { mark: string; size: number } | null = null;
+	return markdown
+		.split("\n")
+		.map((line) => {
+			if (fence) {
+				if (closesFence(line, fence)) {
+					fence = null;
+				}
+				return "";
+			}
+			const opened = openFence(line);
+			if (opened) {
+				fence = opened;
+				return "";
+			}
+			return line.replace(/(`+)(?:(?!\1).)*?\1/g, (match) => " ".repeat(match.length));
+		})
+		.join("\n");
+}
+
+export function linkBase(pageUrl: string, markdown: string, seed: Seed): string {
+	const match = maskMarkdownCode(markdown).match(BASE_HREF);
+	const href = match?.[1] ?? match?.[2] ?? match?.[3];
+	if (!href) {
+		return pageUrl;
+	}
+	try {
+		const resolved = new URL(href, pageUrl);
+		if (resolved.origin !== new URL(pageUrl).origin || admittedUrl(resolved.href, seed) === null) {
+			return pageUrl;
+		}
+		return resolved.href;
+	} catch {
+		return pageUrl;
+	}
+}
+
 export function frontierLinks(markdown: string, pageUrl: string, seed: Seed): string[] {
 	const found = new Set<string>();
 	const raw = markdown.match(/https?:\/\/[^\s<>()"']+/g) ?? [];
 	for (const match of raw) {
 		const cleaned = match.replace(/[),.;]+$/g, "");
 		const link = canonicalLink(cleaned, pageUrl);
-		if (link && linkAllowed(link, seed) && !isLlmsIndexFile(link) && !isStaticAsset(link)) {
+		if (link && admittedUrl(link, seed) === link && !isLlmsIndexFile(link) && !isStaticAsset(link)) {
 			found.add(link);
 		}
 	}
 	for (const match of markdown.matchAll(/\[[^\]]*]\(([^)\s]+)\)/g)) {
 		const link = canonicalLink(match[1] ?? "", pageUrl);
-		if (link && linkAllowed(link, seed) && !isLlmsIndexFile(link) && !isStaticAsset(link)) {
+		if (link && admittedUrl(link, seed) === link && !isLlmsIndexFile(link) && !isStaticAsset(link)) {
 			found.add(link);
 		}
 	}

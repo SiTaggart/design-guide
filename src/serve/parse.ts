@@ -1,10 +1,11 @@
-import { MAX_K, MIN_K } from "../config/instance.ts";
+import { MAX_K, MAX_QUERY_CHARS, MIN_K } from "../config/instance.ts";
 import { isSystemId, type SearchParams, type SystemId } from "../config/types.ts";
 
 export type ParseOk = { kind: "ok"; params: SearchParams };
 export type ParseEmpty = { kind: "empty" };
 export type ParseMissing = { kind: "query_required" };
-export type ParseResult = ParseOk | ParseEmpty | ParseMissing;
+export type ParseTooLong = { kind: "query_too_long" };
+export type ParseResult = ParseOk | ParseEmpty | ParseMissing | ParseTooLong;
 
 type BodyFields = {
 	query?: unknown;
@@ -49,6 +50,9 @@ export function parseSearchFields(
 	const query = typeof fields.query === "string" ? fields.query.trim() : "";
 	if (!query) {
 		return { kind: "query_required" };
+	}
+	if (query.length > MAX_QUERY_CHARS) {
+		return { kind: "query_too_long" };
 	}
 	const system = readSystem(fields.system, live);
 	if (system === "unknown") {

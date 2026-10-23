@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Seed } from "../src/config/types.ts";
-import { crawlSeed, crawlStoppedEarly, type CrawlRecord } from "../src/crawl/browser-run.ts";
+import {
+	CrawlStartError,
+	crawlSeed,
+	crawlStoppedEarly,
+	startSeedCrawl,
+	type CrawlRecord,
+} from "../src/crawl/browser-run.ts";
 
 type JobPage = { records: CrawlRecord[]; cursor?: string | number };
 
@@ -134,6 +140,19 @@ describe("crawlSeed", () => {
 		expect(startedUrls).toEqual(["https://design.gitlab.com/"]);
 		expect(outcome.records).toEqual([]);
 		expect(outcome.counts).toEqual({ total: 0, finished: 0, skipped: 0, disallowed: 0, errored: 0 });
+	});
+
+	it("does not switch hosts when an explicit start url is rejected", async () => {
+		const explicit = "https://design.gitlab.com/components";
+		const { startedUrls } = installFakeCrawl({
+			startStatus: { [explicit]: 403 },
+			jobStatus: "completed",
+			total: 0,
+			finished: 0,
+			pages: {},
+		});
+		await expect(startSeedCrawl(auth, seed, explicit)).rejects.toBeInstanceOf(CrawlStartError);
+		expect(startedUrls).toEqual([explicit]);
 	});
 
 	it("throws with the failing url when the fallback start is rejected too", async () => {

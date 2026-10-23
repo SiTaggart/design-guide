@@ -8,6 +8,7 @@
 		"reindex": "tsx scripts/reindex.ts",
 		"test": "vitest run",
 		"typecheck": "tsc --noEmit",
+		"check": "bunx tsc --noEmit && bun run test",
 		"cf-typegen": "wrangler types"
 	},
 	"devDependencies": {

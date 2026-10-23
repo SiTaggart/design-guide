@@ -1,10 +1,21 @@
 import { describe, expect, it } from "vitest";
+import { MAX_QUERY_CHARS } from "../src/config/instance.ts";
 import { parseSearchFields } from "../src/serve/parse.ts";
 
 describe("parseSearchFields", () => {
 	it("rejects a missing query", () => {
 		expect(parseSearchFields({})).toEqual({ kind: "query_required" });
 		expect(parseSearchFields({ query: "   " })).toEqual({ kind: "query_required" });
+	});
+
+	it("rejects a query longer than the cap and keeps one at the cap", () => {
+		expect(parseSearchFields({ query: "q".repeat(MAX_QUERY_CHARS + 1) })).toEqual({
+			kind: "query_too_long",
+		});
+		expect(parseSearchFields({ query: `  ${"q".repeat(MAX_QUERY_CHARS)}  ` })).toMatchObject({
+			kind: "ok",
+			params: { query: "q".repeat(MAX_QUERY_CHARS) },
+		});
 	});
 
 	it("omits k unless the caller sets it, and clamps a set k to 1..50", () => {

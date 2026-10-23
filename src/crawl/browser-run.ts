@@ -1,5 +1,6 @@
 import { BROWSER_CRAWL_DEPTH, BROWSER_CRAWL_LIMIT, CRAWL_RUNAWAY_PAGES } from "../config/instance.ts";
 import type { CrawlCounts, Seed } from "../config/types.ts";
+import { fallbackScope } from "./links.ts";
 
 export type CrawlRecord = {
 	url: string;
@@ -91,21 +92,34 @@ function toCount(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+function seedForStart(seed: Seed, startUrl: string): Seed {
+	const scoped = fallbackScope(seed);
+	if (!scoped?.fallbackStartUrl) {
+		return seed;
+	}
+	const prefix = scoped.fallbackStartUrl.replace(/\/$/, "");
+	if (startUrl === prefix || startUrl.startsWith(`${prefix}/`)) {
+		return scoped;
+	}
+	return seed;
+}
+
 export function crawlRequestBody(seed: Seed, startUrl: string): CrawlRequestBody {
+	const scoped = seedForStart(seed, startUrl);
 	return {
 		url: startUrl,
 		source: "all",
 		limit: BROWSER_CRAWL_LIMIT,
 		depth: BROWSER_CRAWL_DEPTH,
 		formats: ["markdown"],
-		render: seed.render ?? true,
+		render: scoped.render ?? true,
 		crawlPurposes: ["search"],
 		contentUse: "reference",
 		options: {
 			includeExternalLinks: false,
-			includeSubdomains: seed.includeSubdomains ?? false,
-			...(seed.includePatterns?.length ? { includePatterns: seed.includePatterns } : {}),
-			...(seed.excludePatterns?.length ? { excludePatterns: seed.excludePatterns } : {}),
+			includeSubdomains: scoped.includeSubdomains ?? false,
+			...(scoped.includePatterns?.length ? { includePatterns: scoped.includePatterns } : {}),
+			...(scoped.excludePatterns?.length ? { excludePatterns: scoped.excludePatterns } : {}),
 		},
 	};
 }

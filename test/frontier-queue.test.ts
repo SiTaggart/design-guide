@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { discoverTick } from "../src/index/discover.ts";
 import { D1PageQueue } from "../src/index/page-queue.ts";
+import { fixtureChunks } from "./fixtures/chunks.ts";
 import { memoryD1 } from "./helpers/d1.ts";
+import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
 function countingFrontierInserts(db: D1Database): { inserts: () => number } {
 	let inserts = 0;
@@ -29,5 +32,56 @@ describe("discover frontier writes", () => {
 		await pageQueue.addFrontier("paste", nav);
 		expect(counter.inserts()).toBe(again);
 		expect(await pageQueue.nextFrontier("paste", new Set())).toBe("https://paste-dsys.com/components/nav-0");
+	});
+
+	it("drops a frontier row outside the seed without fetching it", async () => {
+		const outside = "https://www.skyscanner.design/account/billing";
+		const inside = "https://www.skyscanner.design/latest/other";
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		await pageQueue.insertRun({
+			systemId: "backpack",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-backpack",
+			startUrl: "https://www.skyscanner.design/latest/welcome-to-backpack-Mtf5OEo4",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: "2026-10-18T00:00:00.000Z",
+			now: "2026-10-18T00:00:00.000Z",
+		});
+		await pageQueue.addFrontier("backpack", [outside, inside]);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const fetched: string[] = [];
+		await discoverTick(env, "*/5 * * * *", new Date("2026-10-18T00:00:00.000Z"), {
+			poll: async () => ({ status: "completed", finished: 0, total: 0 }),
+			page: async () => ({ records: [], cursor: null }),
+			start: async (_auth, _seed, startUrl) => {
+				const url = startUrl ?? "";
+				fetched.push(url);
+				return { startUrl: url, jobId: "job-next" };
+			},
+			cancel: async () => undefined,
+		});
+		const stored = async () => {
+			const rows = await db
+				.prepare("SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url")
+				.bind("backpack")
+				.all<{ url: string }>();
+			return rows.results?.map((row) => row.url) ?? [];
+		};
+		expect(fetched).toEqual([inside]);
+		expect(await stored()).toEqual([inside]);
+		await pageQueue.addFrontier("backpack", [outside]);
+		expect(await pageQueue.nextFrontier("backpack", new Set())).toBeNull();
+		expect(await stored()).toEqual([inside]);
+		expect(await pageQueue.nextFrontier("backpack", new Set())).toBeNull();
+		expect(await stored()).toEqual([inside]);
 	});
 });
