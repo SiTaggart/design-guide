@@ -57,8 +57,13 @@ export function canonicalLink(value: string, base: string): string | null {
 		}
 		url.hash = "";
 		url.search = "";
-		if (url.pathname.length > 1) {
-			url.pathname = url.pathname.replace(/\/+$/u, (_match, offset: number) => (offset === 0 ? "/" : ""));
+		const path = url.pathname;
+		if (path.length > 1 && path.endsWith("/")) {
+			let end = path.length - 1;
+			while (end > 0 && path.charCodeAt(end) === 47) {
+				end -= 1;
+			}
+			url.pathname = path.slice(0, end + 1);
 		}
 		return url.toString();
 	} catch {
