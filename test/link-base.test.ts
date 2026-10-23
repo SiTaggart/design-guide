@@ -68,6 +68,17 @@ describe("relative links use the fetched page", () => {
 		expect(started).toEqual([BUTTON]);
 	});
 
+	it("keeps the directory slash on a base href", async () => {
+		const page = "https://ix.siemens.io/docs/home/overview";
+		const urls = await frontierUrls("siemens-ix", page, [
+			{
+				url: page,
+				markdown: '<base href="/docs/">\nSee [button](components/button).',
+			},
+		]);
+		expect(urls).toEqual(["https://ix.siemens.io/docs/components/button"]);
+	});
+
 	it("ignores a base tag inside a code block", async () => {
 		const fenced = ["```html", '<base href="/example/">', "```", "See [button](components/button)."].join("\n");
 		const inline = "The tag `<base href=\"/example/\">` is sample markup. See [grid](components/grid).";

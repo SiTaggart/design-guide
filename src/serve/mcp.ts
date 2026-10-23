@@ -21,7 +21,7 @@ const MCP_HEADERS = {
 
 function searchInput(live: SystemId[]) {
 	const fields = {
-		query: z.string().describe(`Search query, at most ${MAX_QUERY_CHARS} characters after trimming.`),
+		query: z.string().describe(`Search query, at most ${MAX_QUERY_CHARS} Unicode code points after trimming.`),
 		k: z
 			.number()
 			.int()

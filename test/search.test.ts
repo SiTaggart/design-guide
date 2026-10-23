@@ -82,6 +82,32 @@ describe("HTTP search against a fixture index", () => {
 		expect(calls).toEqual([]);
 	});
 
+	it("accepts a query of the cap in code points and rejects one more", async () => {
+		const { env, calls } = envWithIndex(fixtureChunks);
+		const atCap = "😀".repeat(MAX_QUERY_CHARS);
+		const posted = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: atCap }),
+			}),
+			env,
+		);
+		expect(posted.status).toBe(200);
+		expect(calls.map((call) => call.query)).toEqual([atCap]);
+		const rejected = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: `${atCap}😀` }),
+			}),
+			env,
+		);
+		expect(rejected.status).toBe(400);
+		expect(await rejected.json()).toEqual({ error: "query_too_long" });
+		expect(calls.map((call) => call.query)).toEqual([atCap]);
+	});
+
 	it("returns 400 when query is missing", async () => {
 		const { env } = envWithIndex(fixtureChunks);
 		const response = await worker.fetch(

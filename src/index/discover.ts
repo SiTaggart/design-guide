@@ -236,6 +236,11 @@ export async function deleteOrphanDocs(
 		const queuedOrphan = typeof sourceUrl === "string" && urls.has(sourceUrl) && systemMatch;
 		const outsideLive =
 			liveUrls.size > 0 && typeof sourceUrl === "string" && !liveUrls.has(sourceUrl) && systemMatch;
+		const liveSource = typeof sourceUrl === "string" && liveUrls.has(sourceUrl) && systemMatch;
+		if (liveSource) {
+			keys.delete(item.key);
+			continue;
+		}
 		if (!queuedOrphan && !outsideLive && !keys.has(item.key)) {
 			continue;
 		}

@@ -68,21 +68,22 @@ describe("crawlRequestBody", () => {
 		expect(body.url).toBe("https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com");
 	});
 
-	it("scopes a fallback start to the project prefix and keeps exclude patterns", () => {
+	it("limits a fallback start to the contents path and keeps exclude patterns", () => {
 		const pajamas = seedById("gitlab-pajamas");
-		const prefix = "https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com";
+		const project = "https://gitlab.com/gitlab-org/gitlab-services/design.gitlab.com";
+		const contents = [`${project}/**/contents`, `${project}/**/contents/**`];
 		const primary = crawlRequestBody(pajamas, pajamas.startUrl);
 		expect(primary.options).not.toHaveProperty("includePatterns");
-		expect(crawlRequestBody(pajamas, prefix).options).toMatchObject({
+		expect(crawlRequestBody(pajamas, project).options).toMatchObject({
 			includeExternalLinks: false,
 			includeSubdomains: false,
-			includePatterns: [prefix, `${prefix}/**`],
+			includePatterns: contents,
 			excludePatterns: pajamas.excludePatterns,
 		});
-		expect(crawlRequestBody(pajamas, `${prefix}/-/blob/main/README.md`).options.includePatterns).toEqual([
-			prefix,
-			`${prefix}/**`,
-		]);
+		expect(
+			crawlRequestBody(pajamas, `${project}/-/blob/main/contents/components/button.md`).options.includePatterns,
+		).toEqual(contents);
+		expect(crawlRequestBody(pajamas, `${project}/-/blob/main/README.md`).options.includePatterns).toEqual(contents);
 		expect(crawlRequestBody(pajamas, "https://gitlab.com/other/project").options).not.toHaveProperty(
 			"includePatterns",
 		);

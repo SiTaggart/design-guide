@@ -101,11 +101,12 @@ export function fallbackScope(seed: Seed): Seed | null {
 	if (!seed.fallbackStartUrl) {
 		return null;
 	}
-	const prefix = seed.fallbackStartUrl.replace(/\/$/, "");
+	const project = seed.fallbackStartUrl.replace(/\/$/, "");
+	const contents = `${project}/**/contents`;
 	return {
 		...seed,
 		startUrl: seed.fallbackStartUrl,
-		includePatterns: [prefix, `${prefix}/**`],
+		includePatterns: [contents, `${contents}/**`],
 	};
 }
 
@@ -166,6 +167,23 @@ function maskMarkdownCode(markdown: string): string {
 		.join("\n");
 }
 
+function directorySlashAllowed(resolvedHref: string, seed: Seed): boolean {
+	let parsed: URL;
+	try {
+		parsed = new URL(resolvedHref);
+	} catch {
+		return false;
+	}
+	if (parsed.pathname.length <= 1 || !parsed.pathname.endsWith("/")) {
+		return false;
+	}
+	if (linkAllowed(resolvedHref, seed)) {
+		return true;
+	}
+	const fallback = fallbackScope(seed);
+	return fallback !== null && linkAllowed(resolvedHref, fallback);
+}
+
 export function linkBase(pageUrl: string, markdown: string, seed: Seed): string {
 	const match = maskMarkdownCode(markdown).match(BASE_HREF);
 	const href = match?.[1] ?? match?.[2] ?? match?.[3];
@@ -174,7 +192,9 @@ export function linkBase(pageUrl: string, markdown: string, seed: Seed): string 
 	}
 	try {
 		const resolved = new URL(href, pageUrl);
-		if (resolved.origin !== new URL(pageUrl).origin || admittedUrl(resolved.href, seed) === null) {
+		const sameOrigin = resolved.origin === new URL(pageUrl).origin;
+		const admitted = admittedUrl(resolved.href, seed) !== null || directorySlashAllowed(resolved.href, seed);
+		if (!sameOrigin || !admitted) {
 			return pageUrl;
 		}
 		return resolved.href;

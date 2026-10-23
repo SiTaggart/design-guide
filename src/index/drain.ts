@@ -3,7 +3,7 @@ import { INSTANCE_ID } from "../config/instance.ts";
 import { seedById } from "../config/seed.ts";
 import type { Seed, SystemId } from "../config/types.ts";
 import { fetchPageMarkdown, type CrawlAuth } from "../crawl/browser-run.ts";
-import { admittedUrl } from "../crawl/links.ts";
+import { admittedUrl, pageKey } from "../crawl/links.ts";
 import {
 	deleteItem,
 	deleteItemByKey,
@@ -31,19 +31,20 @@ export function pageItemKey(system: SystemId, url: string, attempts: number, sta
 export async function uploadQueuedPage(
 	auth: ItemsAuth,
 	seed: Seed,
-	item: PageWorkItem,
+	item: Pick<PageWorkItem, "systemId" | "attempts" | "claimedAt">,
+	pageUrl: string,
 	markdown: string,
 	timestamps: { lastCrawled: string; lastIndexed: string },
 	now: string,
 ): Promise<string> {
-	if (!fitsItem({ url: item.url, status: "completed", markdown }, seed)) {
+	if (!fitsItem({ url: pageUrl, status: "completed", markdown }, seed)) {
 		throw new Error("page is not indexable");
 	}
-	const key = pageItemKey(item.systemId, item.url, item.attempts, item.claimedAt ?? now);
+	const key = pageItemKey(item.systemId, pageUrl, item.attempts, item.claimedAt ?? now);
 	await uploadItem(auth, key, markdown, {
 		system: seed.id,
 		source: seed.source,
-		source_url: item.url,
+		source_url: pageUrl,
 		lastCrawled: timestamps.lastCrawled,
 		lastIndexed: timestamps.lastIndexed,
 	});
@@ -53,14 +54,15 @@ export async function uploadQueuedPage(
 export async function indexQueuedPage(
 	auth: ItemsAuth,
 	seed: Seed,
-	item: PageWorkItem,
+	item: Pick<PageWorkItem, "systemId" | "attempts" | "claimedAt" | "itemKey">,
+	pageUrl: string,
 	markdown: string,
 	timestamps: { lastCrawled: string; lastIndexed: string },
 	now: string,
 	catalog?: { items: ItemRecord[] | null },
 ): Promise<string> {
-	const key = await uploadQueuedPage(auth, seed, item, markdown, timestamps, now);
-	const cleaned = await cleanupReplacedItems(auth, item.systemId, item.url, key, item.itemKey, catalog);
+	const key = await uploadQueuedPage(auth, seed, item, pageUrl, markdown, timestamps, now);
+	const cleaned = await cleanupReplacedItems(auth, item.systemId, pageUrl, key, item.itemKey, catalog);
 	if (cleaned !== "clean") {
 		throw new Error("legacy cleanup failed");
 	}
@@ -72,7 +74,7 @@ type CleanupOutcome = "clean" | "failed" | "unowned" | "detached";
 async function cleanupReplacedItems(
 	auth: ItemsAuth,
 	systemId: SystemId,
-	url: string,
+	pageUrl: string,
 	keepKey: string,
 	previousKey: string | null,
 	catalog?: { items: ItemRecord[] | null },
@@ -102,7 +104,7 @@ async function cleanupReplacedItems(
 			JSON.stringify({
 				event: "page_replace_list_failed",
 				system: systemId,
-				url,
+				url: pageUrl,
 				error: error instanceof Error ? error.message : String(error),
 			}),
 		);
@@ -119,7 +121,8 @@ async function cleanupReplacedItems(
 		const sourceUrl = found.metadata?.source_url;
 		const metaSystem = found.metadata?.system;
 		const sameSystem = metaSystem === undefined || metaSystem === systemId;
-		if (sourceUrl !== url || !sameSystem) {
+		const samePage = typeof sourceUrl === "string" && pageKey(sourceUrl) === pageUrl;
+		if (!samePage || !sameSystem) {
 			continue;
 		}
 		pendingKeys.add(found.key);
@@ -135,7 +138,7 @@ async function cleanupReplacedItems(
 				JSON.stringify({
 					event: "page_replace_delete_failed",
 					system: systemId,
-					url,
+					url: pageUrl,
 					error: error instanceof Error ? error.message : String(error),
 				}),
 			);
@@ -154,7 +157,7 @@ async function cleanupReplacedItems(
 				JSON.stringify({
 					event: "page_replace_delete_failed",
 					system: systemId,
-					url,
+					url: pageUrl,
 					key,
 					error: error instanceof Error ? error.message : String(error),
 				}),
@@ -183,6 +186,7 @@ export async function drainTick(input: {
 	await ensureInstance(itemsAuth);
 	const fetchMarkdown = input.fetchMarkdown ?? ((url: string) => fetchPageMarkdown(input.auth, url));
 	const catalog: { items: ItemRecord[] | null } = { items: null };
+	const storedPages = new Map<string, string>();
 	const heldClock = new Map<SystemId, boolean>();
 	const keepsClock = async (systemId: SystemId): Promise<boolean> => {
 		const cached = heldClock.get(systemId);
@@ -205,33 +209,40 @@ export async function drainTick(input: {
 			continue;
 		}
 		const seed = seedById(item.systemId);
-		if (admittedUrl(item.url, seed) === null) {
+		const pageUrl = admittedUrl(item.url, seed);
+		if (pageUrl === null) {
 			if (await input.queue.fail(item, "url outside seed scope")) {
 				failed += 1;
 			}
 			continue;
 		}
+		const stored = storedPages.get(`${item.systemId}\0${pageUrl}`);
 		try {
-			const markdown = await fetchMarkdown(item.url);
-			if (!(await input.queue.owns(item))) {
-				continue;
+			let itemKey: string;
+			if (stored === undefined) {
+				const markdown = await fetchMarkdown(pageUrl);
+				if (!(await input.queue.owns(item))) {
+					continue;
+				}
+				const stamp = item.claimedAt ?? input.now;
+				itemKey = input.indexPage
+					? await input.indexPage(itemsAuth, seed, item, pageUrl, markdown, timestamps, stamp)
+					: await uploadQueuedPage(itemsAuth, seed, item, pageUrl, markdown, timestamps, stamp);
+			} else {
+				itemKey = stored;
 			}
-			const stamp = item.claimedAt ?? input.now;
-			const itemKey = input.indexPage
-				? await input.indexPage(itemsAuth, seed, item, markdown, timestamps, stamp)
-				: await uploadQueuedPage(itemsAuth, seed, item, markdown, timestamps, stamp);
 			if (!input.indexPage) {
 				const cleaned = await cleanupReplacedItems(
 					itemsAuth,
 					item.systemId,
-					item.url,
+					pageUrl,
 					itemKey,
 					item.itemKey,
 					catalog,
 					() => input.queue.owns(item),
 				);
 				if (cleaned === "unowned") {
-					if (itemKey !== item.itemKey) {
+					if (stored === undefined && itemKey !== item.itemKey) {
 						await deleteItemByKey(itemsAuth, itemKey);
 					}
 					continue;
@@ -249,6 +260,9 @@ export async function drainTick(input: {
 			}
 			if (await input.queue.complete(item, timestamps, itemKey, { keepIndexedAt })) {
 				indexed += 1;
+				if (stored === undefined) {
+					storedPages.set(`${item.systemId}\0${pageUrl}`, itemKey);
+				}
 			}
 		} catch (error) {
 			if (await input.queue.fail(item, error instanceof Error ? error.message : String(error))) {

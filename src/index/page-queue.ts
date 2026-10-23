@@ -817,20 +817,24 @@ export class D1PageQueue implements PageQueue {
 			"SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC",
 			systemId,
 		);
+		const rejected: string[] = [];
 		let chosen: string | null = null;
 		for (const row of rows) {
 			if (admittedUrl(row.url, seed) === null) {
-				await run(
-					this.db,
-					"DELETE FROM discover_frontier WHERE system_id = ? AND url = ?",
-					systemId,
-					row.url,
-				);
+				rejected.push(row.url);
 				continue;
 			}
 			if (chosen === null && !blocked.has(pageKey(row.url)) && !isStaticAsset(row.url)) {
 				chosen = pageKey(row.url);
 			}
+		}
+		for (const group of chunks(rejected, 80)) {
+			await run(
+				this.db,
+				`DELETE FROM discover_frontier WHERE system_id = ? AND url IN (${group.map(() => "?").join(",")})`,
+				systemId,
+				...group,
+			);
 		}
 		return chosen;
 	}
