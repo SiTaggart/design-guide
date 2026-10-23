@@ -10,6 +10,7 @@ import { fixtureChunks } from "./fixtures/chunks.ts";
 const NOW = "2026-10-18T00:00:00.000Z";
 const DRIFT_CRON = "*/5 * * * *";
 const CANONICAL = "https://www.skyscanner.design/latest/real";
+const ALSO = "https://www.skyscanner.design/latest/other";
 const OFF_HOST = "https://gitlab.com/attacker/public-repo";
 const METADATA = "https://169.254.169.254/latest/meta-data/";
 const USERINFO = "https://www.skyscanner.design@evil.example/latest/phish";
@@ -54,7 +55,7 @@ describe("discovered records stay inside the seed", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		const records = [OFF_HOST, METADATA, USERINFO, OFF_PATTERN, ...QUERY_VARIANTS].map((url) => ({
+		const records = [OFF_HOST, METADATA, USERINFO, OFF_PATTERN, ALSO, ...QUERY_VARIANTS].map((url) => ({
 			url,
 			status: "completed",
 			markdown: "# guidance",
@@ -84,10 +85,16 @@ describe("discovered records stay inside the seed", () => {
 				return "backpack/page/real.md";
 			},
 		});
-		expect({ rows, fetched, uploaded, failed: drained.failed }).toEqual({
-			rows: [CANONICAL],
-			fetched: [CANONICAL],
-			uploaded: [CANONICAL],
+		const kept = [ALSO, CANONICAL];
+		expect({
+			rows,
+			fetched: [...fetched].sort(),
+			uploaded: [...uploaded].sort(),
+			failed: drained.failed,
+		}).toEqual({
+			rows: kept,
+			fetched: kept,
+			uploaded: kept,
 			failed: 0,
 		});
 	});

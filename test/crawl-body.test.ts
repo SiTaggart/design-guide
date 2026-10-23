@@ -79,6 +79,13 @@ describe("crawlRequestBody", () => {
 			includePatterns: [prefix, `${prefix}/**`],
 			excludePatterns: pajamas.excludePatterns,
 		});
+		expect(crawlRequestBody(pajamas, `${prefix}/-/blob/main/README.md`).options.includePatterns).toEqual([
+			prefix,
+			`${prefix}/**`,
+		]);
+		expect(crawlRequestBody(pajamas, "https://gitlab.com/other/project").options).not.toHaveProperty(
+			"includePatterns",
+		);
 	});
 });
 

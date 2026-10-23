@@ -89,19 +89,46 @@ export function linkAllowed(url: string, seed: Seed): boolean {
 	return true;
 }
 
+export function fallbackScope(seed: Seed): Seed | null {
+	if (!seed.fallbackStartUrl) {
+		return null;
+	}
+	const prefix = seed.fallbackStartUrl.replace(/\/$/, "");
+	return {
+		...seed,
+		startUrl: seed.fallbackStartUrl,
+		includePatterns: [prefix, `${prefix}/**`],
+	};
+}
+
+export function admittedUrl(url: string, seed: Seed): string | null {
+	const canonical = canonicalLink(url, url);
+	if (!canonical) {
+		return null;
+	}
+	if (linkAllowed(canonical, seed)) {
+		return canonical;
+	}
+	const fallback = fallbackScope(seed);
+	if (fallback && linkAllowed(canonical, fallback)) {
+		return canonical;
+	}
+	return null;
+}
+
 export function frontierLinks(markdown: string, pageUrl: string, seed: Seed): string[] {
 	const found = new Set<string>();
 	const raw = markdown.match(/https?:\/\/[^\s<>()"']+/g) ?? [];
 	for (const match of raw) {
 		const cleaned = match.replace(/[),.;]+$/g, "");
 		const link = canonicalLink(cleaned, pageUrl);
-		if (link && linkAllowed(link, seed) && !isLlmsIndexFile(link) && !isStaticAsset(link)) {
+		if (link && admittedUrl(link, seed) === link && !isLlmsIndexFile(link) && !isStaticAsset(link)) {
 			found.add(link);
 		}
 	}
 	for (const match of markdown.matchAll(/\[[^\]]*]\(([^)\s]+)\)/g)) {
 		const link = canonicalLink(match[1] ?? "", pageUrl);
-		if (link && linkAllowed(link, seed) && !isLlmsIndexFile(link) && !isStaticAsset(link)) {
+		if (link && admittedUrl(link, seed) === link && !isLlmsIndexFile(link) && !isStaticAsset(link)) {
 			found.add(link);
 		}
 	}
