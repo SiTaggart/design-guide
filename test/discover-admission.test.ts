@@ -164,7 +164,7 @@ describe("discovered records stay inside the seed", () => {
 				return "backpack/page/real.md";
 			},
 		});
-		const kept = [query, slash];
+		const kept = [query, slash].sort();
 		const rejected = await db
 			.prepare("SELECT status, error FROM page_work WHERE system_id = ? AND url = ?")
 			.bind("backpack", outside)

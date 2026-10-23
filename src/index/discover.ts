@@ -11,7 +11,7 @@ import {
 	startSeedCrawl,
 	type CrawlAuth,
 } from "../crawl/browser-run.ts";
-import { admittedUrl, frontierLinks } from "../crawl/links.ts";
+import { admittedUrl, frontierLinks, linkBase } from "../crawl/links.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
 import { deleteItem, deleteItemByKey, listItems, type ItemsAuth } from "./items-rest.ts";
@@ -411,7 +411,10 @@ async function continueDiscover(
 					}
 					await queue.stageUrl(run.systemId, canonical);
 					if (record.markdown) {
-						await queue.addFrontier(run.systemId, frontierLinks(record.markdown, canonical, seed));
+						await queue.addFrontier(
+							run.systemId,
+							frontierLinks(record.markdown, linkBase(record.url, record.markdown), seed),
+						);
 					}
 					if (record.status === "completed" && fitsItem({ ...record, url: canonical }, seed)) {
 						if (reachedRunawayCeiling(await queue.indexableCount(run.systemId))) {

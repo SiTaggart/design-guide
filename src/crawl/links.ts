@@ -80,7 +80,11 @@ export function linkAllowed(url: string, seed: Seed): boolean {
 	if (!hostOk) {
 		return false;
 	}
-	if (seed.includePatterns?.length && !seed.includePatterns.some((pattern) => matchesPattern(url, pattern))) {
+	if (
+		!isSeedRoot(url, seed) &&
+		seed.includePatterns?.length &&
+		!seed.includePatterns.some((pattern) => matchesPattern(url, pattern))
+	) {
 		return false;
 	}
 	if (seed.excludePatterns?.some((pattern) => matchesPattern(url, pattern))) {
@@ -114,6 +118,27 @@ export function admittedUrl(url: string, seed: Seed): string | null {
 		return canonical;
 	}
 	return null;
+}
+
+function isSeedRoot(url: string, seed: Seed): boolean {
+	const root = canonicalLink(seed.startUrl, seed.startUrl);
+	const candidate = canonicalLink(url, url);
+	return root !== null && candidate === root;
+}
+
+const BASE_HREF = /<base\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i;
+
+export function linkBase(pageUrl: string, markdown: string): string {
+	const match = BASE_HREF.exec(markdown);
+	const href = match?.[1] ?? match?.[2] ?? match?.[3];
+	if (!href) {
+		return pageUrl;
+	}
+	try {
+		return new URL(href, pageUrl).href;
+	} catch {
+		return pageUrl;
+	}
 }
 
 export function frontierLinks(markdown: string, pageUrl: string, seed: Seed): string[] {

@@ -205,7 +205,7 @@ export async function drainTick(input: {
 			continue;
 		}
 		const seed = seedById(item.systemId);
-		if (admittedUrl(item.url, seed) !== item.url) {
+		if (admittedUrl(item.url, seed) === null) {
 			if (await input.queue.fail(item, "url outside seed scope")) {
 				failed += 1;
 			}

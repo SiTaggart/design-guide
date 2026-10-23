@@ -1,7 +1,7 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/server/validators/cf-worker";
 import { z } from "zod";
-import { MAX_K, MIN_K } from "../config/instance.ts";
+import { MAX_K, MAX_QUERY_CHARS, MIN_K } from "../config/instance.ts";
 import type { SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
 import { liveSet } from "../index/retrieval-hold.ts";
@@ -21,7 +21,7 @@ const MCP_HEADERS = {
 
 function searchInput(live: SystemId[]) {
 	const fields = {
-		query: z.string().describe("Search query"),
+		query: z.string().describe(`Search query, at most ${MAX_QUERY_CHARS} characters after trimming.`),
 		k: z
 			.number()
 			.int()
