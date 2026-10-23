@@ -132,4 +132,47 @@ describe("discovered records stay inside the seed", () => {
 		expect(drained.failed).toBe(1);
 		expect(drained.indexed).toBe(1);
 	});
+
+	it("fetches a queued row when its canonical form is inside the seed", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		await pageQueue.ensure();
+		const slash = "https://www.skyscanner.design/latest/real/";
+		const query = "https://www.skyscanner.design/latest/real?view=1";
+		const outside = "https://www.skyscanner.design/account/billing";
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "backpack", url: slash, kind: "seed" },
+				{ systemId: "backpack", url: query, kind: "seed" },
+				{ systemId: "backpack", url: outside, kind: "seed" },
+			],
+			NOW,
+		);
+		vi.spyOn(itemsRest, "ensureInstance").mockResolvedValue();
+		const fetched: string[] = [];
+		const uploaded: string[] = [];
+		const drained = await drainTick({
+			queue: pageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async (url) => {
+				fetched.push(url);
+				return "# guidance";
+			},
+			indexPage: async (_auth, _seed, item) => {
+				uploaded.push(item.url);
+				return "backpack/page/real.md";
+			},
+		});
+		const kept = [query, slash];
+		const rejected = await db
+			.prepare("SELECT status, error FROM page_work WHERE system_id = ? AND url = ?")
+			.bind("backpack", outside)
+			.first<{ status: string; error: string | null }>();
+		expect([...fetched].sort()).toEqual(kept);
+		expect([...uploaded].sort()).toEqual(kept);
+		expect(rejected).toMatchObject({ status: "failed", error: "url outside seed scope" });
+		expect(drained.failed).toBe(1);
+		expect(drained.indexed).toBe(2);
+	});
 });

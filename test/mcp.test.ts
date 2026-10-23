@@ -138,7 +138,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 				inputSchema: {
 					required?: string[];
 					properties?: {
-						query?: { type?: string };
+						query?: { type?: string; description?: string };
 						system?: { enum?: string[] };
 						k?: { minimum?: number; maximum?: number; type?: string };
 					};
@@ -152,6 +152,7 @@ describe("streamable HTTP MCP on the search worker", () => {
 		);
 		expect(listedResult.tools[0].inputSchema.required).toEqual(["query"]);
 		expect(listedResult.tools[0].inputSchema.properties?.query?.type).toBe("string");
+		expect(listedResult.tools[0].inputSchema.properties?.query?.description).toContain("2000");
 		expect(listedResult.tools[0].inputSchema.properties?.system?.enum).toEqual([...SYSTEM_IDS]);
 		expect(listedResult.tools[0].inputSchema.properties?.k).toMatchObject({
 			type: "integer",
