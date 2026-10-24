@@ -223,17 +223,10 @@ async function guardedChanges(
 	changes: number,
 	landedStatus: PageStatus,
 ): Promise<boolean> {
-	if (changes === 1) {
-		return true;
+	if (changes !== 1 && !step.tick?.budget.deadline && !(await claimLanded(step, item, landedStatus))) {
+		console.log(JSON.stringify({ event: "page_claim_lost", op, system: item.systemId, url: item.url }));
 	}
-	if (step.tick?.budget.deadline) {
-		return false;
-	}
-	if (await claimLanded(step, item, landedStatus)) {
-		return true;
-	}
-	console.log(JSON.stringify({ event: "page_claim_lost", op, system: item.systemId, url: item.url }));
-	return false;
+	return changes === 1;
 }
 
 export class D1PageQueue implements PageQueue {

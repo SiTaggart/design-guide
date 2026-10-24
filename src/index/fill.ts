@@ -238,8 +238,8 @@ export async function noteIndexedSeeds(env: WorkerEnv, queue: D1PageQueue, now: 
 		if (indexed[row.system] === hash) {
 			continue;
 		}
-		await writeIndexedHash(env, row.system, hash);
 		await queue.markDiscovered(row.system, now.toISOString());
+		await writeIndexedHash(env, row.system, hash);
 		indexed[row.system] = hash;
 		wrote = true;
 	}

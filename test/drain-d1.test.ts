@@ -616,7 +616,7 @@ describe("drain D1 steps", () => {
 		});
 	});
 
-	it("counts a complete that commits and then reports a transient error", async () => {
+	it("does not log a lost claim when a complete commits and then reports a transient error", async () => {
 		const db = memoryD1();
 		const queue = new D1PageQueue(db);
 		await queue.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
@@ -629,7 +629,7 @@ describe("drain D1 steps", () => {
 			retries: D1_STEP_RETRIES,
 			sleep: async () => undefined,
 		});
-		expect(await wrapped.complete(item!, { lastCrawled: NOW, lastIndexed: NOW }, "primer/page.md")).toBe(true);
+		expect(await wrapped.complete(item!, { lastCrawled: NOW, lastIndexed: NOW }, "primer/page.md")).toBe(false);
 		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(false);
 		expect(
 			await db
