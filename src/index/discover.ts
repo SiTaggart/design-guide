@@ -19,7 +19,7 @@ import { parkedSystemIds, readParks, writePark, type Parks } from "./parks.ts";
 import { isStubGeneration, fitsItem } from "./reindex.ts";
 import { driftedSystems, systemSeedHash } from "./seed-hash.ts";
 import { isRecoveryCron } from "./trigger.ts";
-import type { D1QueueOptions } from "./d1-step.ts";
+import { isTickDeadlineStop, type D1QueueOptions } from "./d1-step.ts";
 import {
 	D1PageQueue,
 	isDue,
@@ -283,6 +283,9 @@ export async function discoverTick(
 	try {
 		return await runDiscover(env, cron, now, { ...defaultDeps, ...deps }, queueOptions);
 	} catch (error) {
+		if (isTickDeadlineStop(error)) {
+			return { action: "skip", reason: "deadline" };
+		}
 		return { action: "failed", error: error instanceof Error ? error.message : String(error) };
 	}
 }
@@ -444,6 +447,9 @@ async function continueDiscover(
 				await queue.saveCursor(run.systemId, cursor, iso);
 			}
 		} catch (error) {
+			if (isTickDeadlineStop(error)) {
+				throw error;
+			}
 			const failures = await queue.notePollFailure(run.systemId, iso);
 			if (failures >= MAX_POLL_FAILURES) {
 				return failOrFinish(env, queue, auth, run, deps, iso, startFailureMessage(error));
@@ -464,6 +470,9 @@ async function continueDiscover(
 				await queue.replaceJob(run.systemId, started.jobId, started.startUrl, iso);
 				return { action: "continued", systemId: run.systemId, accepted };
 			} catch (error) {
+				if (isTickDeadlineStop(error)) {
+					throw error;
+				}
 				const message = startFailureMessage(error);
 				console.log(
 					JSON.stringify({

@@ -86,6 +86,9 @@ export async function fillTick(
 			return;
 		}
 		const discover = await discoverTick(env, cron, now, discoverDeps, queueOptions);
+		if (budget.deadline) {
+			return;
+		}
 		if (budget.exhausted) {
 			const reason = discover.action === "failed" ? discover.error : errorMessage(budget.error);
 			await stopTick(env, reason, now);
@@ -100,7 +103,13 @@ export async function fillTick(
 				now: now.toISOString(),
 			});
 		} catch (error) {
+			if (budget.deadline) {
+				return;
+			}
 			drainError = errorMessage(error);
+		}
+		if (budget.deadline) {
+			return;
 		}
 		if (budget.exhausted) {
 			await noteFill(env, discover, drain, emptyDepths(), drainError, now);
@@ -324,6 +333,8 @@ async function mailFill(
 				env,
 				{ trigger: discover.trigger, workflowId: `discover-${discover.trigger}-${discover.systemId}` },
 				[resultFor(discover.systemId, seed.startUrl, discover.urls, discover.hitLimit, discover.incomplete)],
+				undefined,
+				{ readQueue },
 			);
 		}
 		if (discover.action === "parked") {
@@ -339,6 +350,8 @@ async function mailFill(
 				env,
 				{ trigger: discover.trigger, workflowId: `discover-${discover.trigger}-${discover.systemId}` },
 				[result],
+				undefined,
+				{ readQueue },
 			);
 		}
 		const outcome = fillOutcome(discover, drain, depths, drainError);
