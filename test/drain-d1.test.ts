@@ -3,10 +3,11 @@ import { NonRetryableError } from "cloudflare:workflows";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { createD1TickBudget, D1_STEP_RETRIES } from "../src/index/d1-step.ts";
-import { fillTick } from "../src/index/fill.ts";
+import { drainTick } from "../src/index/drain.ts";
+import { fillTick, noteIndexedSeeds } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import { D1PageQueue, FILL_LEASE_STALE_MS, FILL_LEASE_WINDOW, FILL_TICK_DEADLINE_MS } from "../src/index/page-queue.ts";
-import { systemSeedHash } from "../src/index/seed-hash.ts";
+import { seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
 import { PARKS_KEY } from "../src/index/parks.ts";
 import { LAST_INDEXED_HASH_KEY, STATUS_KEY } from "../src/index/status.ts";
 import { DRIFT_CRON } from "../src/index/trigger.ts";
@@ -1194,5 +1195,106 @@ describe("drain D1 steps", () => {
 			.bind(PAGE)
 			.first<{ status: string; attempts: number }>();
 		expect(row).toEqual({ status: "done", attempts: 1 });
+	});
+
+	it("does not count a page another holder already finished", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const doneUrl = "https://primer.style/components/action-list";
+		const failUrl = "https://primer.style/components/blankslate";
+		await queue.enqueueUpsert(
+			[
+				{ systemId: "primer", url: doneUrl, kind: "reindex" },
+				{ systemId: "primer", url: failUrl, kind: "reindex" },
+			],
+			OLD,
+		);
+		const otherKey = "primer/page/other.md";
+		const otherError = "other holder";
+		const racing = new D1PageQueue(
+			wrapStatement(db, async (sql, op) => {
+				if (/set status = 'done'/i.test(sql)) {
+					await db
+						.prepare(
+							`UPDATE page_work
+							 SET status = 'done', claim_token = NULL, claimed_at = NULL, item_key = ?, error = NULL
+							 WHERE url = ?`,
+						)
+						.bind(otherKey, doneUrl)
+						.run();
+				}
+				if (/set status = 'failed'/i.test(sql)) {
+					await db
+						.prepare(
+							`UPDATE page_work
+							 SET status = 'failed', claim_token = NULL, claimed_at = NULL, error = ?
+							 WHERE url = ?`,
+						)
+						.bind(otherError, failUrl)
+						.run();
+				}
+				return op();
+			}),
+		);
+		mockIndex();
+		const counts = await drainTick({
+			queue: racing,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async (url) => {
+				if (url === failUrl) {
+					throw new Error("render failed");
+				}
+				return "# action list";
+			},
+		});
+		expect(counts).toEqual({ claimed: 2, indexed: 0, failed: 0 });
+		expect(
+			await db
+				.prepare("SELECT status, item_key, error FROM page_work WHERE url = ?")
+				.bind(doneUrl)
+				.first<{ status: string; item_key: string | null; error: string | null }>(),
+		).toEqual({ status: "done", item_key: otherKey, error: null });
+		expect(
+			await db
+				.prepare("SELECT status, error FROM page_work WHERE url = ?")
+				.bind(failUrl)
+				.first<{ status: string; error: string | null }>(),
+		).toEqual({ status: "failed", error: otherError });
+	});
+
+	it("leaves no indexed hash when markDiscovered fails", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+		});
+		const hash = systemSeedHash(seedById("primer"));
+		const url = "https://primer.style/components";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], OLD);
+		await pageQueue.complete(
+			{ systemId: "primer", url },
+			{ lastCrawled: NOW, lastIndexed: NOW },
+			"primer/page/components.md",
+		);
+		await pageQueue.recordSeedRefresh("primer", hash, OLD);
+		const failing = new D1PageQueue(
+			wrapStatement(db, async (sql, op) => {
+				if (/into system_mark/i.test(sql)) {
+					throw new Error("discover mark failed");
+				}
+				return op();
+			}),
+		);
+		await expect(noteIndexedSeeds(env, failing, new Date(NOW))).rejects.toThrow("discover mark failed");
+		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		expect(
+			await db
+				.prepare("SELECT last_discovered FROM system_mark WHERE system_id = ?")
+				.bind("primer")
+				.first<{ last_discovered: string }>(),
+		).toBeNull();
 	});
 });
