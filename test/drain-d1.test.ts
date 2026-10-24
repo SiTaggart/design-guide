@@ -571,6 +571,52 @@ describe("drain D1 steps", () => {
 		expect(await new D1PageQueue(db).claimFillLease(crypto.randomUUID(), NOW)).toBe(true);
 	});
 
+	it("a deadline during post-drain writes no failed status and sends no fail mail", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const kv = memoryKV();
+		const status = JSON.stringify({ state: "ok", systems: [], parks: {} });
+		await kv.put(STATUS_KEY, status);
+		await kv.put(LAST_INDEXED_HASH_KEY, "keep-me");
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await settle(env, queue);
+		const { sent } = mockIndex();
+		env.EMAIL = {
+			send: async (message) => {
+				sent.push(message as { subject?: string; text?: string });
+				return { messageId: "m" };
+			},
+		};
+		let clock = Date.now();
+		const started = clock;
+		let drained = false;
+		vi.spyOn(Date, "now").mockImplementation(() => clock);
+		env.PAGE_QUEUE = wrapStatement(db, async (sql, op) => {
+			const result = await op();
+			if (/with served\b/i.test(sql)) {
+				drained = true;
+				clock = started + FILL_TICK_DEADLINE_MS;
+			}
+			return result;
+		});
+		await fillTick(env, DRIFT_CRON, new Date(NOW), {}, {
+			sleep: async () => {
+				throw new Error("slept after the drain");
+			},
+		});
+		expect(drained).toBe(true);
+		expect(sent).toEqual([]);
+		expect(JSON.parse(kv.store.get(STATUS_KEY) ?? "{}")).toMatchObject({ state: "ok" });
+		expect(kv.store.get(LAST_INDEXED_HASH_KEY)).toBe("keep-me");
+		expect((await db.prepare("SELECT COUNT(*) AS n FROM fill_lease").first<{ n: number }>())?.n).toBe(0);
+		expect(await new D1PageQueue(db).claimFillLease(crypto.randomUUID(), NOW)).toBe(true);
+	});
+
 	it("a tick that hits the deadline leaves a healthy system unchanged", async () => {
 		const db = memoryD1();
 		const queue = new D1PageQueue(db);
