@@ -1,7 +1,7 @@
 import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, isSystemId, type SystemId } from "../config/types.ts";
 import { admittedUrl, isStaticAsset, pageKey } from "../crawl/links.ts";
-import { retryingDatabase, type D1QueueOptions } from "./d1-step.ts";
+import { d1Query, tickFrom, type D1QueryStep, type D1QueueOptions } from "./d1-step.ts";
 
 export const DRAIN_LIMIT = 100;
 export const MAX_ATTEMPTS = 5;
@@ -9,6 +9,8 @@ export const FRESHNESS_MS = 30 * 24 * 60 * 60 * 1000;
 /** Same hour as discover cap defer. A real exhausted failure waits this long, then claim() tries it again. */
 export const EXHAUSTED_RETRY_MS = 60 * 60 * 1000;
 const STALE_CLAIM_MS = 15 * 60 * 1000;
+export const FILL_LEASE_STALE_MS = STALE_CLAIM_MS;
+const FILL_LEASE_ID = "fill";
 const CLAIM_EXPIRED = "claim expired";
 
 export type PageKind = "seed" | "reindex";
@@ -150,26 +152,33 @@ function toItem(row: WorkRow): PageWorkItem | null {
 	};
 }
 
-async function all<T>(db: D1Database, sql: string, ...params: unknown[]): Promise<T[]> {
-	const result = await db.prepare(sql).bind(...params).all<T>();
+async function all<T>(step: D1QueryStep, sql: string, ...params: unknown[]): Promise<T[]> {
+	const result = await d1Query<{ results?: T[] }>(step, true, "all", sql, params);
 	return result.results ?? [];
 }
 
-async function first<T>(db: D1Database, sql: string, ...params: unknown[]): Promise<T | null> {
-	const row = await db.prepare(sql).bind(...params).first<T>();
+async function first<T>(step: D1QueryStep, sql: string, ...params: unknown[]): Promise<T | null> {
+	const row = await d1Query<T | null>(step, true, "first", sql, params);
 	return row ?? null;
 }
 
-async function run(db: D1Database, sql: string, ...params: unknown[]): Promise<number> {
-	const result = await db.prepare(sql).bind(...params).run();
+async function run(step: D1QueryStep, sql: string, ...params: unknown[]): Promise<number> {
+	const result = await d1Query<{ meta?: { changes?: number } }>(step, true, "run", sql, params);
+	return result.meta?.changes ?? 0;
+}
+
+async function runOnce(step: D1QueryStep, sql: string, ...params: unknown[]): Promise<number> {
+	const result = await d1Query<{ meta?: { changes?: number } }>(step, false, "run", sql, params);
 	return result.meta?.changes ?? 0;
 }
 
 export class D1PageQueue implements PageQueue {
 	private readonly db: D1Database;
+	private readonly step: D1QueryStep;
 
 	constructor(db: D1Database, options?: D1QueueOptions) {
-		this.db = options?.retries ? retryingDatabase(db, options.retries, options.sleep) : db;
+		this.db = db;
+		this.step = { db, tick: tickFrom(options) };
 	}
 
 	async enqueueUpsert(
@@ -178,7 +187,7 @@ export class D1PageQueue implements PageQueue {
 	): Promise<void> {
 		for (const item of items) {
 			await run(
-				this.db,
+				this.step,
 				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts)
 				 VALUES (?, ?, ?, 'pending', ?, 0)
 				 ON CONFLICT(system_id, url) DO UPDATE SET
@@ -218,7 +227,7 @@ export class D1PageQueue implements PageQueue {
 		// hour after claimed_at, then takes the same rewind. A row with no claim
 		// time stays failed. claim-expired rows do not wait out that hour.
 		await run(
-			this.db,
+			this.step,
 			`UPDATE page_work
 			 SET status = 'pending',
 			     error = NULL,
@@ -244,7 +253,7 @@ export class D1PageQueue implements PageQueue {
 		// served time is a single aggregate, so done rows are not ranked. A
 		// system with no claim or index yet goes first within a round.
 		const rows = await all<WorkRow>(
-			this.db,
+			this.step,
 			`WITH served AS (
 			   SELECT system_id,
 			          MAX(
@@ -300,7 +309,7 @@ export class D1PageQueue implements PageQueue {
 				continue;
 			}
 			const changes = await run(
-				this.db,
+				this.step,
 				`INSERT INTO page_work (
 				   system_id, url, kind, status, enqueued_at, attempts,
 				   last_crawled, last_indexed, claimed_at, error, item_key
@@ -340,7 +349,7 @@ export class D1PageQueue implements PageQueue {
 		}
 		const mine = new Set(claimed.map((item) => `${item.systemId}\0${item.url}`));
 		const rows = await all<{ system_id: string; url: string }>(
-			this.db,
+			this.step,
 			"SELECT system_id, url FROM page_work WHERE status = 'claimed'",
 		);
 		const held = new Set<string>();
@@ -361,7 +370,7 @@ export class D1PageQueue implements PageQueue {
 				continue;
 			}
 			await run(
-				this.db,
+				this.step,
 				`UPDATE page_work
 				 SET status = 'pending', attempts = attempts - 1
 				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
@@ -384,7 +393,7 @@ export class D1PageQueue implements PageQueue {
 		const keepIndexedAt = options?.keepIndexedAt === true;
 		if (item.claimedAt !== undefined && item.attempts !== undefined) {
 			const changes = await run(
-				this.db,
+				this.step,
 				keepIndexedAt
 					? `UPDATE page_work
 					   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL
@@ -407,7 +416,7 @@ export class D1PageQueue implements PageQueue {
 			return changes === 1;
 		}
 		await run(
-			this.db,
+			this.step,
 			keepIndexedAt
 				? `UPDATE page_work
 				   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL
@@ -433,7 +442,7 @@ export class D1PageQueue implements PageQueue {
 	): Promise<boolean> {
 		if (item.claimedAt !== undefined && item.attempts !== undefined) {
 			const changes = await run(
-				this.db,
+				this.step,
 				`UPDATE page_work
 				 SET status = 'failed', error = ?
 				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
@@ -446,7 +455,7 @@ export class D1PageQueue implements PageQueue {
 			return changes === 1;
 		}
 		await run(
-			this.db,
+			this.step,
 			`UPDATE page_work
 			 SET status = 'failed', error = ?
 			 WHERE system_id = ? AND url = ?`,
@@ -459,7 +468,7 @@ export class D1PageQueue implements PageQueue {
 
 	async depths(): Promise<QueueDepths> {
 		const rows = await all<{ status: string; n: number }>(
-			this.db,
+			this.step,
 			"SELECT status, COUNT(*) AS n FROM page_work GROUP BY status",
 		);
 		const depths = emptyDepths();
@@ -476,7 +485,7 @@ export class D1PageQueue implements PageQueue {
 		liveUrls: ReadonlySet<string>,
 	): Promise<Array<{ url: string; itemKey: string | null }>> {
 		const rows = await all<{ url: string; item_key: string | null }>(
-			this.db,
+			this.step,
 			"SELECT url, item_key FROM page_work WHERE system_id = ?",
 			systemId,
 		);
@@ -487,7 +496,7 @@ export class D1PageQueue implements PageQueue {
 
 	async removeUrls(systemId: SystemId, urls: readonly string[]): Promise<void> {
 		for (const url of urls) {
-			await run(this.db, "DELETE FROM page_work WHERE system_id = ? AND url = ?", systemId, url);
+			await run(this.step, "DELETE FROM page_work WHERE system_id = ? AND url = ?", systemId, url);
 		}
 	}
 
@@ -513,7 +522,7 @@ export class D1PageQueue implements PageQueue {
 			failed: number;
 			done: number;
 		}>(
-			this.db,
+			this.step,
 			`SELECT system_id,
 			        MAX(last_crawled) AS last_crawled,
 			        MAX(last_indexed) AS last_indexed,
@@ -525,7 +534,7 @@ export class D1PageQueue implements PageQueue {
 			 GROUP BY system_id`,
 		);
 		const marks = await all<{ system_id: string; last_discovered: string | null }>(
-			this.db,
+			this.step,
 			"SELECT system_id, last_discovered FROM system_mark",
 		);
 		const byId = new Map(rows.filter((row) => isSystemId(row.system_id)).map((row) => [row.system_id, row]));
@@ -549,7 +558,7 @@ export class D1PageQueue implements PageQueue {
 
 	async running(): Promise<DiscoverRun | null> {
 		const row = await first<RunRow>(
-			this.db,
+			this.step,
 			`SELECT system_id, kind, trigger_name, job_id, start_url, cursor, poll_failures, started_at
 			 FROM discover_run LIMIT 1`,
 		);
@@ -569,8 +578,8 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async insertRun(run: DiscoverRun & { now: string }): Promise<void> {
-		await runSql(
-			this.db,
+		await runOnce(
+			this.step,
 			`INSERT INTO discover_run (
 			   system_id, kind, trigger_name, job_id, start_url, state, cursor, poll_failures, started_at, updated_at
 			 ) VALUES (?, ?, ?, ?, ?, 'running', NULL, 0, ?, ?)`,
@@ -587,7 +596,7 @@ export class D1PageQueue implements PageQueue {
 
 	async saveCursor(systemId: SystemId, cursor: string | null, now: string): Promise<void> {
 		await run(
-			this.db,
+			this.step,
 			"UPDATE discover_run SET cursor = ?, poll_failures = 0, updated_at = ? WHERE system_id = ?",
 			cursor,
 			now,
@@ -597,7 +606,7 @@ export class D1PageQueue implements PageQueue {
 
 	async noteCapped(systemId: SystemId, now: string): Promise<void> {
 		await run(
-			this.db,
+			this.step,
 			"UPDATE discover_run SET capped_any = 1, updated_at = ? WHERE system_id = ?",
 			now,
 			systemId,
@@ -606,7 +615,7 @@ export class D1PageQueue implements PageQueue {
 
 	async cappedAny(systemId: SystemId): Promise<boolean> {
 		const row = await first<{ capped_any: number }>(
-			this.db,
+			this.step,
 			"SELECT capped_any FROM discover_run WHERE system_id = ?",
 			systemId,
 		);
@@ -614,14 +623,14 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async noteSkipped(systemId: SystemId, now: string): Promise<number> {
-		await run(
-			this.db,
+		await runOnce(
+			this.step,
 			"UPDATE discover_run SET skipped_any = skipped_any + 1, updated_at = ? WHERE system_id = ?",
 			now,
 			systemId,
 		);
 		const row = await first<{ skipped_any: number }>(
-			this.db,
+			this.step,
 			"SELECT skipped_any FROM discover_run WHERE system_id = ?",
 			systemId,
 		);
@@ -630,7 +639,7 @@ export class D1PageQueue implements PageQueue {
 
 	async skippedAny(systemId: SystemId): Promise<boolean> {
 		const row = await first<{ skipped_any: number }>(
-			this.db,
+			this.step,
 			"SELECT skipped_any FROM discover_run WHERE system_id = ?",
 			systemId,
 		);
@@ -639,7 +648,7 @@ export class D1PageQueue implements PageQueue {
 
 	async clearPollFailures(systemId: SystemId, now: string): Promise<void> {
 		await run(
-			this.db,
+			this.step,
 			"UPDATE discover_run SET poll_failures = 0, updated_at = ? WHERE system_id = ?",
 			now,
 			systemId,
@@ -647,14 +656,14 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async noteStartFailure(systemId: SystemId, now: string): Promise<number> {
-		await run(
-			this.db,
+		await runOnce(
+			this.step,
 			"UPDATE discover_run SET start_failures = start_failures + 1, updated_at = ? WHERE system_id = ?",
 			now,
 			systemId,
 		);
 		const row = await first<{ start_failures: number }>(
-			this.db,
+			this.step,
 			"SELECT start_failures FROM discover_run WHERE system_id = ?",
 			systemId,
 		);
@@ -663,7 +672,7 @@ export class D1PageQueue implements PageQueue {
 
 	async clearStartFailures(systemId: SystemId, now: string): Promise<void> {
 		await run(
-			this.db,
+			this.step,
 			"UPDATE discover_run SET start_failures = 0, updated_at = ? WHERE system_id = ?",
 			now,
 			systemId,
@@ -671,14 +680,14 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async notePollFailure(systemId: SystemId, now: string): Promise<number> {
-		await run(
-			this.db,
+		await runOnce(
+			this.step,
 			"UPDATE discover_run SET poll_failures = poll_failures + 1, updated_at = ? WHERE system_id = ?",
 			now,
 			systemId,
 		);
 		const row = await first<{ poll_failures: number }>(
-			this.db,
+			this.step,
 			"SELECT poll_failures FROM discover_run WHERE system_id = ?",
 			systemId,
 		);
@@ -686,17 +695,17 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async clearRun(systemId: SystemId): Promise<void> {
-		await run(this.db, "DELETE FROM discover_indexable WHERE system_id = ?", systemId);
-		await run(this.db, "DELETE FROM discover_url WHERE system_id = ?", systemId);
-		await run(this.db, "DELETE FROM discover_frontier WHERE system_id = ?", systemId);
-		await run(this.db, "DELETE FROM discover_attempt WHERE system_id = ?", systemId);
-		await run(this.db, "DELETE FROM discover_run WHERE system_id = ?", systemId);
+		await run(this.step, "DELETE FROM discover_indexable WHERE system_id = ?", systemId);
+		await run(this.step, "DELETE FROM discover_url WHERE system_id = ?", systemId);
+		await run(this.step, "DELETE FROM discover_frontier WHERE system_id = ?", systemId);
+		await run(this.step, "DELETE FROM discover_attempt WHERE system_id = ?", systemId);
+		await run(this.step, "DELETE FROM discover_run WHERE system_id = ?", systemId);
 	}
 
 	async replaceJob(systemId: SystemId, jobId: string, startUrl: string, now: string): Promise<void> {
 		// started_at stays put. The 7-day deadline covers the whole follow-up chain.
 		await run(
-			this.db,
+			this.step,
 			`UPDATE discover_run
 			 SET job_id = ?, start_url = ?, cursor = NULL, poll_failures = 0, start_failures = 0, updated_at = ?
 			 WHERE system_id = ?`,
@@ -710,7 +719,7 @@ export class D1PageQueue implements PageQueue {
 
 	async noteAttempt(systemId: SystemId, url: string): Promise<void> {
 		await run(
-			this.db,
+			this.step,
 			"INSERT INTO discover_attempt (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
 			systemId,
 			url,
@@ -725,7 +734,7 @@ export class D1PageQueue implements PageQueue {
 		const fresh: string[] = [];
 		for (const group of chunks(unique, 80)) {
 			const existing = await all<{ url: string }>(
-				this.db,
+				this.step,
 				`SELECT url FROM discover_frontier WHERE system_id = ? AND url IN (${group.map(() => "?").join(",")})`,
 				systemId,
 				...group,
@@ -744,7 +753,7 @@ export class D1PageQueue implements PageQueue {
 				params.push(systemId, url);
 			}
 			await run(
-				this.db,
+				this.step,
 				`INSERT INTO discover_frontier (system_id, url) VALUES ${values} ON CONFLICT DO NOTHING`,
 				...params,
 			);
@@ -758,7 +767,7 @@ export class D1PageQueue implements PageQueue {
 			blocked.add(pageKey(url));
 		}
 		const attempted = await all<{ url: string }>(
-			this.db,
+			this.step,
 			"SELECT url FROM discover_attempt WHERE system_id = ?",
 			systemId,
 		);
@@ -766,7 +775,7 @@ export class D1PageQueue implements PageQueue {
 			blocked.add(pageKey(row.url));
 		}
 		const rows = await all<{ url: string }>(
-			this.db,
+			this.step,
 			"SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC",
 			systemId,
 		);
@@ -783,7 +792,7 @@ export class D1PageQueue implements PageQueue {
 		}
 		for (const group of chunks(rejected, 80)) {
 			await run(
-				this.db,
+				this.step,
 				`DELETE FROM discover_frontier WHERE system_id = ? AND url IN (${group.map(() => "?").join(",")})`,
 				systemId,
 				...group,
@@ -794,7 +803,7 @@ export class D1PageQueue implements PageQueue {
 
 	async indexableCount(systemId: SystemId): Promise<number> {
 		const row = await first<{ n: number }>(
-			this.db,
+			this.step,
 			"SELECT COUNT(*) AS n FROM discover_indexable WHERE system_id = ?",
 			systemId,
 		);
@@ -802,12 +811,12 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async clearWork(systemId: SystemId): Promise<void> {
-		await run(this.db, "DELETE FROM page_work WHERE system_id = ?", systemId);
+		await run(this.step, "DELETE FROM page_work WHERE system_id = ?", systemId);
 	}
 
 	async stageUrl(systemId: SystemId, url: string): Promise<void> {
 		await run(
-			this.db,
+			this.step,
 			"INSERT INTO discover_url (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
 			systemId,
 			url,
@@ -816,7 +825,7 @@ export class D1PageQueue implements PageQueue {
 
 	async stagedUrls(systemId: SystemId): Promise<string[]> {
 		const rows = await all<{ url: string }>(
-			this.db,
+			this.step,
 			"SELECT url FROM discover_url WHERE system_id = ? ORDER BY url ASC",
 			systemId,
 		);
@@ -825,7 +834,7 @@ export class D1PageQueue implements PageQueue {
 
 	async stageIndexable(systemId: SystemId, url: string): Promise<void> {
 		await run(
-			this.db,
+			this.step,
 			"INSERT INTO discover_indexable (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
 			systemId,
 			url,
@@ -834,7 +843,7 @@ export class D1PageQueue implements PageQueue {
 
 	async indexableUrls(systemId: SystemId): Promise<string[]> {
 		const rows = await all<{ url: string }>(
-			this.db,
+			this.step,
 			"SELECT url FROM discover_indexable WHERE system_id = ? ORDER BY url ASC",
 			systemId,
 		);
@@ -843,7 +852,7 @@ export class D1PageQueue implements PageQueue {
 
 	async noteRecoveryAttempt(systemId: SystemId, now: string): Promise<void> {
 		await run(
-			this.db,
+			this.step,
 			`INSERT INTO recovery_attempt (system_id, attempted_at) VALUES (?, ?)
 			 ON CONFLICT(system_id) DO UPDATE SET attempted_at = excluded.attempted_at`,
 			systemId,
@@ -856,7 +865,7 @@ export class D1PageQueue implements PageQueue {
 			return false;
 		}
 		const row = await first<{ ok: number }>(
-			this.db,
+			this.step,
 			`SELECT 1 AS ok FROM page_work
 			 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
 			item.systemId,
@@ -875,7 +884,7 @@ export class D1PageQueue implements PageQueue {
 			return false;
 		}
 		const changes = await run(
-			this.db,
+			this.step,
 			`UPDATE page_work
 			 SET status = 'pending',
 			     attempts = CASE WHEN attempts >= ? THEN ? ELSE attempts END,
@@ -901,7 +910,7 @@ export class D1PageQueue implements PageQueue {
 
 	async recordSeedRefresh(systemId: SystemId, seedHash: string, enqueuedAt: string): Promise<void> {
 		await run(
-			this.db,
+			this.step,
 			`INSERT INTO seed_refresh (system_id, seed_hash, enqueued_at) VALUES (?, ?, ?)
 			 ON CONFLICT(system_id) DO UPDATE SET seed_hash = excluded.seed_hash, enqueued_at = excluded.enqueued_at`,
 			systemId,
@@ -912,7 +921,7 @@ export class D1PageQueue implements PageQueue {
 
 	async seedRefreshes(): Promise<Record<string, { seedHash: string; enqueuedAt: string }>> {
 		const rows = await all<{ system_id: string; seed_hash: string; enqueued_at: string }>(
-			this.db,
+			this.step,
 			"SELECT system_id, seed_hash, enqueued_at FROM seed_refresh",
 		);
 		return Object.fromEntries(
@@ -922,15 +931,15 @@ export class D1PageQueue implements PageQueue {
 
 	async recoveryAttempts(): Promise<Record<string, string>> {
 		const rows = await all<{ system_id: string; attempted_at: string }>(
-			this.db,
+			this.step,
 			"SELECT system_id, attempted_at FROM recovery_attempt",
 		);
 		return Object.fromEntries(rows.map((row) => [row.system_id, row.attempted_at]));
 	}
 
 	async noteCapDefer(systemId: SystemId, now: string): Promise<void> {
-		await run(
-			this.db,
+		await runOnce(
+			this.step,
 			`INSERT INTO cap_defer (system_id, deferred_at, streak) VALUES (?, ?, 1)
 			 ON CONFLICT(system_id) DO UPDATE SET
 			   deferred_at = excluded.deferred_at,
@@ -941,7 +950,7 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async clearCapDefer(systemId: SystemId): Promise<void> {
-		await run(this.db, "DELETE FROM cap_defer WHERE system_id = ?", systemId);
+		await run(this.step, "DELETE FROM cap_defer WHERE system_id = ?", systemId);
 	}
 
 	async capDefers(): Promise<Record<string, string>> {
@@ -951,7 +960,7 @@ export class D1PageQueue implements PageQueue {
 
 	async capDeferMarks(): Promise<Record<string, { at: string; streak: number }>> {
 		const rows = await all<{ system_id: string; deferred_at: string; streak: number }>(
-			this.db,
+			this.step,
 			"SELECT system_id, deferred_at, streak FROM cap_defer",
 		);
 		return Object.fromEntries(
@@ -961,12 +970,34 @@ export class D1PageQueue implements PageQueue {
 
 	async markDiscovered(systemId: SystemId, now: string): Promise<void> {
 		await run(
-			this.db,
+			this.step,
 			`INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)
 			 ON CONFLICT(system_id) DO UPDATE SET last_discovered = excluded.last_discovered`,
 			systemId,
 			now,
 		);
+	}
+
+	async claimFillLease(owner: string, now: string): Promise<boolean> {
+		const staleBefore = new Date(Date.parse(now) - FILL_LEASE_STALE_MS).toISOString();
+		const changes = await run(
+			this.step,
+			`INSERT INTO fill_lease (id, owner, claimed_at) VALUES (?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   owner = excluded.owner,
+			   claimed_at = excluded.claimed_at
+			 WHERE fill_lease.owner = excluded.owner
+			    OR fill_lease.claimed_at < ?`,
+			FILL_LEASE_ID,
+			owner,
+			now,
+			staleBefore,
+		);
+		return changes === 1;
+	}
+
+	async releaseFillLease(owner: string): Promise<void> {
+		await run(this.step, "DELETE FROM fill_lease WHERE id = ? AND owner = ?", FILL_LEASE_ID, owner);
 	}
 }
 
@@ -981,10 +1012,6 @@ function chunks<T>(values: readonly T[], size: number): T[][] {
 		groups.push(values.slice(index, index + size));
 	}
 	return groups;
-}
-
-async function runSql(db: D1Database, sql: string, ...params: unknown[]): Promise<void> {
-	await run(db, sql, ...params);
 }
 
 export function isDue(input: {

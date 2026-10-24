@@ -56,6 +56,12 @@ describe("page queue migrations", () => {
 		expect(columns.results.map((column) => column.name)).toEqual(PAGE_WORK_COLUMNS);
 	});
 
+	it("creates the fill lease with IF NOT EXISTS", () => {
+		const sql = readFileSync(join(root, "migrations/0012_fill_lease.sql"), "utf8");
+		expect(sql).toContain("CREATE TABLE IF NOT EXISTS fill_lease");
+		expect(sql).toContain("PRIMARY KEY");
+	});
+
 	it("keeps CREATE TABLE out of the worker source", () => {
 		const hits = filesUnder(join(root, "src")).filter((path) => readFileSync(path, "utf8").includes("CREATE TABLE"));
 		expect(hits).toEqual([]);

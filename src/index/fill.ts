@@ -8,7 +8,7 @@ import {
 	sendStartIndexMail,
 } from "./mail.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
-import { D1_STEP_RETRIES, type D1QueueOptions } from "./d1-step.ts";
+import { createD1TickBudget, D1_STEP_RETRIES, type D1QueueOptions } from "./d1-step.ts";
 import { D1PageQueue, emptyDepths, type QueueDepths } from "./page-queue.ts";
 import { systemSeedHash } from "./seed-hash.ts";
 import { clearPark, readParks } from "./parks.ts";
@@ -63,47 +63,91 @@ export async function fillTick(
 		return;
 	}
 
+	const budget = createD1TickBudget();
 	const queueOptions: D1QueueOptions = {
 		retries: D1_STEP_RETRIES,
+		budget,
 		...(options?.sleep ? { sleep: options.sleep } : {}),
 	};
-	const discover = await discoverTick(env, cron, now, discoverDeps, queueOptions);
-	let drain: DrainCounts = { claimed: 0, indexed: 0, failed: 0 };
-	let drainError: string | undefined;
+	const queue = new D1PageQueue(env.PAGE_QUEUE, queueOptions);
+	const owner = crypto.randomUUID();
+	let held = false;
 	try {
-		drain = await drainTick({
-			queue: new D1PageQueue(env.PAGE_QUEUE, queueOptions),
-			auth,
-			now: now.toISOString(),
-		});
-	} catch (error) {
-		drainError = errorMessage(error);
-	}
-	let depths = emptyDepths();
-	try {
-		const pageQueue = new D1PageQueue(env.PAGE_QUEUE, queueOptions);
-		await unparkFilled(env, pageQueue, discover.action === "parked" ? discover.systemId : undefined);
-		if (discover.action !== "failed" && !drainError) {
-			await noteIndexedSeeds(env, pageQueue, now);
+		try {
+			held = await queue.claimFillLease(owner, now.toISOString());
+		} catch (error) {
+			await stopTick(env, errorMessage(error), now);
+			return;
 		}
-		depths = await pageQueue.depths();
-	} catch (error) {
-		drainError = drainError ?? errorMessage(error);
+		if (!held) {
+			console.log(JSON.stringify({ event: "index_cron_skip", cron, reason: "fill-lease" }));
+			return;
+		}
+		const discover = await discoverTick(env, cron, now, discoverDeps, queueOptions);
+		if (budget.exhausted) {
+			const reason = discover.action === "failed" ? discover.error : errorMessage(budget.error);
+			await stopTick(env, reason, now);
+			return;
+		}
+		let drain: DrainCounts = { claimed: 0, indexed: 0, failed: 0 };
+		let drainError: string | undefined;
+		try {
+			drain = await drainTick({
+				queue: new D1PageQueue(env.PAGE_QUEUE, queueOptions),
+				auth,
+				now: now.toISOString(),
+			});
+		} catch (error) {
+			drainError = errorMessage(error);
+		}
+		if (budget.exhausted) {
+			await noteFill(env, discover, drain, emptyDepths(), drainError, now);
+			await mailFill(env, discover, drain, emptyDepths(), drainError, now, false);
+			return;
+		}
+		let depths = emptyDepths();
+		try {
+			const pageQueue = new D1PageQueue(env.PAGE_QUEUE, queueOptions);
+			await unparkFilled(env, pageQueue, discover.action === "parked" ? discover.systemId : undefined);
+			if (discover.action !== "failed" && !drainError) {
+				await noteIndexedSeeds(env, pageQueue, now);
+			}
+			depths = await pageQueue.depths();
+		} catch (error) {
+			drainError = drainError ?? errorMessage(error);
+		}
+		await noteFill(env, discover, drain, depths, drainError, now);
+		await mailFill(env, discover, drain, depths, drainError, now, !budget.exhausted);
+		console.log(
+			JSON.stringify({
+				event: "index_fill",
+				cron,
+				discover: discover.action,
+				system: "systemId" in discover ? discover.systemId : undefined,
+				claimed: drain.claimed,
+				indexed: drain.indexed,
+				failed: drain.failed,
+				depths,
+			}),
+		);
+	} finally {
+		if (held && !budget.exhausted) {
+			try {
+				await queue.releaseFillLease(owner);
+			} catch (error) {
+				console.log(
+					JSON.stringify({ event: "fill_lease_release_failed", error: errorMessage(error) }),
+				);
+			}
+		}
 	}
-	await noteFill(env, discover, drain, depths, drainError, now);
-	await mailFill(env, discover, drain, depths, drainError, now);
-	console.log(
-		JSON.stringify({
-			event: "index_fill",
-			cron,
-			discover: discover.action,
-			system: "systemId" in discover ? discover.systemId : undefined,
-			claimed: drain.claimed,
-			indexed: drain.indexed,
-			failed: drain.failed,
-			depths,
-		}),
-	);
+}
+
+async function stopTick(env: WorkerEnv, reason: string, now: Date): Promise<void> {
+	const discover: DiscoverTickResult = { action: "failed", error: reason };
+	const drain: DrainCounts = { claimed: 0, indexed: 0, failed: 0 };
+	await noteFill(env, discover, drain, emptyDepths(), undefined, now);
+	await mailFill(env, discover, drain, emptyDepths(), undefined, now, false);
 }
 
 async function unparkFilled(env: WorkerEnv, queue: D1PageQueue, justParked?: SystemId): Promise<void> {
@@ -262,6 +306,7 @@ async function mailFill(
 	depths: QueueDepths,
 	drainError: string | undefined,
 	now: Date,
+	readQueue = true,
 ): Promise<void> {
 	try {
 		if (discover.action === "started") {
@@ -305,6 +350,7 @@ async function mailFill(
 					{ trigger, workflowId: workflowOf(discover, now) ?? `drain-${now.toISOString()}` },
 					system ? [failedResult(system, reason)] : [],
 					reason,
+					{ readQueue },
 				);
 				await rememberFailMail(env, reason, now);
 			}

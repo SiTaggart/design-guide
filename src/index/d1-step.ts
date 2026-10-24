@@ -8,15 +8,42 @@ export const D1_STEP_RETRIES = {
 
 export type D1StepRetries = typeof D1_STEP_RETRIES;
 
+export type D1TickBudget = {
+	exhausted: boolean;
+	error?: unknown;
+};
+
+export type D1Tick = {
+	retries: D1StepRetries;
+	sleep?: (ms: number) => Promise<void>;
+	budget: D1TickBudget;
+};
+
 export type D1QueueOptions = {
 	retries?: D1StepRetries;
 	sleep?: (ms: number) => Promise<void>;
+	budget?: D1TickBudget;
 };
 
-type Policy = {
-	retries: D1StepRetries;
-	sleep?: (ms: number) => Promise<void>;
+export type D1QueryStep = {
+	db: D1Database;
+	tick?: D1Tick;
 };
+
+export function createD1TickBudget(): D1TickBudget {
+	return { exhausted: false };
+}
+
+export function tickFrom(options?: D1QueueOptions): D1Tick | undefined {
+	if (!options?.retries) {
+		return undefined;
+	}
+	return {
+		retries: options.retries,
+		...(options.sleep ? { sleep: options.sleep } : {}),
+		budget: options.budget ?? createD1TickBudget(),
+	};
+}
 
 export function isTransientD1Error(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
@@ -28,6 +55,13 @@ export function isTransientD1Error(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+export function budgetError(budget: D1TickBudget): Error {
+	if (budget.error instanceof Error) {
+		return budget.error;
+	}
+	return new NonRetryableError("D1 retry budget exhausted");
 }
 
 function delayMs(delay: D1StepRetries["delay"]): number {
@@ -51,11 +85,14 @@ function defaultSleep(ms: number): Promise<void> {
 	});
 }
 
-export async function d1Step<T>(name: string, policy: Policy, run: () => Promise<T>): Promise<T> {
-	const sleep = policy.sleep ?? defaultSleep;
-	const base = delayMs(policy.retries.delay);
+export async function d1Step<T>(name: string, tick: D1Tick, run: () => Promise<T>): Promise<T> {
+	if (tick.budget.exhausted) {
+		throw budgetError(tick.budget);
+	}
+	const sleep = tick.sleep ?? defaultSleep;
+	const base = delayMs(tick.retries.delay);
 	let last: unknown;
-	for (let attempt = 0; attempt <= policy.retries.limit; attempt += 1) {
+	for (let attempt = 0; attempt <= tick.retries.limit; attempt += 1) {
 		try {
 			return await run();
 		} catch (error) {
@@ -63,10 +100,12 @@ export async function d1Step<T>(name: string, policy: Policy, run: () => Promise
 				throw error instanceof NonRetryableError ? error : new NonRetryableError(errorMessage(error));
 			}
 			last = error;
-			if (attempt === policy.retries.limit) {
+			if (attempt === tick.retries.limit) {
+				tick.budget.exhausted = true;
+				tick.budget.error = error;
 				break;
 			}
-			const wait = backoffMs(base, attempt, policy.retries.backoff);
+			const wait = backoffMs(base, attempt, tick.retries.backoff);
 			console.log(JSON.stringify({ event: "d1_step_retry", step: name, attempt: attempt + 1, delayMs: wait }));
 			await sleep(wait);
 		}
@@ -74,44 +113,40 @@ export async function d1Step<T>(name: string, policy: Policy, run: () => Promise
 	throw last instanceof Error ? last : new Error(String(last));
 }
 
-type Statement = {
-	bind: (...params: unknown[]) => Statement;
-	all: (...args: unknown[]) => Promise<unknown>;
-	run: (...args: unknown[]) => Promise<unknown>;
-	first: (...args: unknown[]) => Promise<unknown>;
-};
+type Method = "all" | "run" | "first";
 
-function prepared(db: D1Database, sql: string, policy: Policy, params?: readonly unknown[]): Statement {
-	const step = sql.trim().split(/\s+/, 1)[0]?.toLowerCase() || "d1";
-	const invoke = (method: "all" | "run" | "first", args: readonly unknown[]) =>
-		d1Step(step, policy, () => {
-			const statement = db.prepare(sql) as unknown as Statement;
-			const bound = params === undefined ? statement : statement.bind(...params);
-			return bound[method](...args);
-		});
-	return {
-		bind: (...next: unknown[]) => prepared(db, sql, policy, next),
-		all: (...args: unknown[]) => invoke("all", args),
-		run: (...args: unknown[]) => invoke("run", args),
-		first: (...args: unknown[]) => invoke("first", args),
-	};
+function invoke(db: D1Database, method: Method, sql: string, params: readonly unknown[]): Promise<unknown> {
+	const prepared = db.prepare(sql);
+	const statement =
+		params.length === 0
+			? prepared
+			: (prepared.bind as (this: D1PreparedStatement, ...values: unknown[]) => D1PreparedStatement).apply(
+					prepared,
+					[...params],
+				);
+	if (method === "all") {
+		return statement.all();
+	}
+	if (method === "run") {
+		return statement.run();
+	}
+	return statement.first();
 }
 
-export function retryingDatabase(
-	db: D1Database,
-	retries: D1StepRetries,
-	sleep?: (ms: number) => Promise<void>,
-): D1Database {
-	const policy: Policy = { retries, ...(sleep ? { sleep } : {}) };
-	return new Proxy(db, {
-		get(target, prop, receiver) {
-			if (prop === "prepare") {
-				return (sql: string) => prepared(target, sql, policy);
-			}
-			if (prop === "exec") {
-				return (sql: string) => d1Step("exec", policy, () => target.exec(sql));
-			}
-			return Reflect.get(target, prop, receiver);
-		},
-	});
+export async function d1Query<T>(
+	step: D1QueryStep,
+	retry: boolean,
+	method: Method,
+	sql: string,
+	params: readonly unknown[],
+): Promise<T> {
+	if (step.tick?.budget.exhausted) {
+		throw budgetError(step.tick.budget);
+	}
+	const run = () => invoke(step.db, method, sql, params);
+	if (!retry || !step.tick) {
+		return run() as Promise<T>;
+	}
+	const name = sql.trim().split(/\s+/, 1)[0]?.toLowerCase() || "d1";
+	return d1Step(name, step.tick, run) as Promise<T>;
 }
