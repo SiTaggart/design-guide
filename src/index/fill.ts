@@ -9,7 +9,7 @@ import {
 } from "./mail.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
 import { createD1TickBudget, D1_STEP_RETRIES, type D1QueueOptions } from "./d1-step.ts";
-import { D1PageQueue, emptyDepths, type QueueDepths } from "./page-queue.ts";
+import { D1PageQueue, FILL_TICK_DEADLINE_MS, emptyDepths, type QueueDepths } from "./page-queue.ts";
 import { systemSeedHash } from "./seed-hash.ts";
 import { clearPark, readParks } from "./parks.ts";
 import { clearRetrievalHold } from "./retrieval-hold.ts";
@@ -71,6 +71,7 @@ export async function fillTick(
 	};
 	const queue = new D1PageQueue(env.PAGE_QUEUE, queueOptions);
 	const owner = crypto.randomUUID();
+	const claimDeadlineMs = Date.now() + FILL_TICK_DEADLINE_MS;
 	let held = false;
 	try {
 		try {
@@ -96,6 +97,7 @@ export async function fillTick(
 				queue: new D1PageQueue(env.PAGE_QUEUE, queueOptions),
 				auth,
 				now: now.toISOString(),
+				claimDeadlineMs,
 			});
 		} catch (error) {
 			drainError = errorMessage(error);
@@ -131,7 +133,7 @@ export async function fillTick(
 			}),
 		);
 	} finally {
-		if (held && !budget.exhausted) {
+		if (held || budget.exhausted) {
 			try {
 				await queue.releaseFillLease(owner);
 			} catch (error) {

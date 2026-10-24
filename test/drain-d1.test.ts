@@ -5,7 +5,8 @@ import { SYSTEM_IDS } from "../src/config/types.ts";
 import { D1_STEP_RETRIES } from "../src/index/d1-step.ts";
 import { fillTick } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
-import { D1PageQueue, FILL_LEASE_STALE_MS } from "../src/index/page-queue.ts";
+import { drainTick } from "../src/index/drain.ts";
+import { D1PageQueue, FILL_LEASE_STALE_MS, FILL_LEASE_WINDOW, type PageQueue } from "../src/index/page-queue.ts";
 import { systemSeedHash } from "../src/index/seed-hash.ts";
 import { LAST_INDEXED_HASH_KEY, STATUS_KEY } from "../src/index/status.ts";
 import { DRIFT_CRON } from "../src/index/trigger.ts";
@@ -42,7 +43,7 @@ function flake(db: D1Database, mode: FailMode, calls: string[]): D1Database {
 		if (mode === "always") {
 			return new Error(TRANSIENT);
 		}
-		if (claimLeft > 0 && /INSERT INTO page_work/i.test(sql)) {
+		if (claimLeft > 0 && /claim_token/i.test(sql)) {
 			claimLeft -= 1;
 			return new Error(TRANSIENT);
 		}
@@ -261,8 +262,10 @@ describe("drain D1 steps", () => {
 
 	it("sends one fail mail after transient D1 errors exhaust the retries", async () => {
 		const { calls, sleeps, sent } = await runTick("always");
-		expect(calls).toHaveLength(4);
-		expect(new Set(calls).size).toBe(1);
+		expect(calls).toHaveLength(5);
+		expect(new Set(calls.slice(0, 4)).size).toBe(1);
+		expect(calls[0]).toContain("INSERT INTO fill_lease");
+		expect(calls[4]).toContain("DELETE FROM fill_lease");
 		expect(sleeps).toEqual([10_000, 20_000, 40_000]);
 		expect(sent).toHaveLength(1);
 		expect(sent[0]?.subject).toContain("fail");
@@ -371,21 +374,79 @@ describe("drain D1 steps", () => {
 		const setup = new D1PageQueue(db);
 		await setup.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
 		const sleeps: number[] = [];
-		const queue = new D1PageQueue(commitThenThrow(db, /INSERT INTO page_work/i), {
+		const queue = new D1PageQueue(commitThenThrow(db, /claim_token/i), {
 			retries: D1_STEP_RETRIES,
 			sleep: async (ms) => {
 				sleeps.push(ms);
 			},
 		});
 		const claimed = await queue.claim(10, NOW);
+		const owned = claimed[0];
 		expect(claimed.map((item) => item.url)).toEqual([PAGE]);
-		expect(claimed[0]?.attempts).toBe(1);
+		expect(owned?.attempts).toBe(1);
+		expect(owned?.claimedAt).toBe(NOW);
+		expect(owned?.claimToken).toBeTruthy();
+		expect(owned?.claimToken).not.toBe(NOW);
+		expect(await queue.owns(owned!)).toBe(true);
 		expect(sleeps).toEqual([10_000]);
 		const row = await db
-			.prepare("SELECT status, attempts FROM page_work WHERE url = ?")
+			.prepare("SELECT status, attempts, claimed_at, claim_token FROM page_work WHERE url = ?")
 			.bind(PAGE)
-			.first<{ status: string; attempts: number }>();
-		expect(row).toEqual({ status: "claimed", attempts: 1 });
+			.first<{ status: string; attempts: number; claimed_at: string; claim_token: string }>();
+		expect(row).toEqual({
+			status: "claimed",
+			attempts: 1,
+			claimed_at: NOW,
+			claim_token: owned?.claimToken,
+		});
+	});
+
+	it("does not let two claims at the same now both own a row", async () => {
+		const queue = new D1PageQueue(memoryD1());
+		await queue.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		const first = await queue.claim(10, NOW);
+		const second = await queue.claim(10, NOW);
+		const owned = first[0];
+		expect(second).toEqual([]);
+		expect(owned?.claimedAt).toBe(NOW);
+		expect(owned?.claimToken).toBeTruthy();
+		expect(await queue.owns(owned!)).toBe(true);
+		expect(await queue.owns({ ...owned!, claimToken: crypto.randomUUID() })).toBe(false);
+		const row = await (queue as unknown as { db: D1Database }).db
+			.prepare("SELECT attempts, claim_token FROM page_work WHERE url = ?")
+			.bind(PAGE)
+			.first<{ attempts: number; claim_token: string }>();
+		expect(row).toEqual({ attempts: 1, claim_token: owned?.claimToken });
+	});
+
+	it("does not recreate a deleted row, including when the claim is retried", async () => {
+		const db = memoryD1();
+		const setup = new D1PageQueue(db);
+		await setup.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		await db.prepare("DELETE FROM page_work WHERE url = ?").bind(PAGE).run();
+		const absent = new D1PageQueue(db);
+		expect(await absent.claim(10, NOW)).toEqual([]);
+		expect((await db.prepare("SELECT COUNT(*) AS n FROM page_work").first<{ n: number }>())?.n).toBe(0);
+
+		await setup.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		let drop = true;
+		const queue = new D1PageQueue(
+			wrapStatement(db, async (sql, op) => {
+				if (drop && /claim_token/i.test(sql)) {
+					drop = false;
+					await db.prepare("DELETE FROM page_work WHERE url = ?").bind(PAGE).run();
+					await op();
+					throw new Error(TRANSIENT);
+				}
+				return op();
+			}),
+			{
+				retries: D1_STEP_RETRIES,
+				sleep: async () => undefined,
+			},
+		);
+		expect(await queue.claim(10, NOW)).toEqual([]);
+		expect((await db.prepare("SELECT COUNT(*) AS n FROM page_work").first<{ n: number }>())?.n).toBe(0);
 	});
 
 	it("does not retry a poll-failure counter after the write commits", async () => {
@@ -415,6 +476,75 @@ describe("drain D1 steps", () => {
 		expect(row?.poll_failures).toBe(1);
 	});
 
+	it("keeps the fill lease past a full tick and inside the next cron", () => {
+		const window = FILL_LEASE_WINDOW;
+		expect(window.tickDeadlineMs + window.maxBackoffMs + window.marginMs).toBeLessThan(window.ttlMs);
+		expect(window.ttlMs).toBe(FILL_LEASE_STALE_MS);
+		expect(window.ttlMs).toBeLessThan(window.cronIntervalMs);
+	});
+
+	it("stops claiming new pages after the tick deadline", async () => {
+		const claim = vi.fn(async () => {
+			throw new Error("claimed after the deadline");
+		});
+		const counts = await drainTick({
+			queue: { claim } as unknown as PageQueue,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			claimDeadlineMs: Date.now() - 1,
+		});
+		expect(counts).toEqual({ claimed: 0, indexed: 0, failed: 0 });
+		expect(claim).not.toHaveBeenCalled();
+	});
+
+	it("releases the fill lease after the retry budget is exhausted so the next tick can claim it", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const kv = memoryKV();
+		await kv.put(LAST_INDEXED_HASH_KEY, "keep-me");
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await settle(env, queue);
+		const { sent } = mockIndex();
+		env.EMAIL = {
+			send: async (message) => {
+				sent.push(message as { subject?: string; text?: string });
+				return { messageId: "m" };
+			},
+		};
+		const calls: string[] = [];
+		const sleeps: number[] = [];
+		let leased = false;
+		env.PAGE_QUEUE = wrapStatement(db, async (sql, op) => {
+			calls.push(sql);
+			if (/INSERT INTO fill_lease/i.test(sql)) {
+				leased = true;
+				return op();
+			}
+			if (/DELETE FROM fill_lease/i.test(sql)) {
+				return op();
+			}
+			if (leased) {
+				throw new Error(TRANSIENT);
+			}
+			return op();
+		});
+		await fillTick(env, DRIFT_CRON, new Date(NOW), {}, {
+			sleep: async (ms) => {
+				sleeps.push(ms);
+			},
+		});
+		expect(sleeps).toEqual([10_000, 20_000, 40_000]);
+		expect(calls.filter((sql) => /DELETE FROM fill_lease/i.test(sql))).toHaveLength(1);
+		expect(sent).toHaveLength(1);
+		expect((await db.prepare("SELECT COUNT(*) AS n FROM fill_lease").first<{ n: number }>())?.n).toBe(0);
+		expect(await new D1PageQueue(db).claimFillLease(crypto.randomUUID(), NOW)).toBe(true);
+	});
+
 	it("claimFillLease blocks a second owner until release, and a stale lease can be taken", async () => {
 		const queue = new D1PageQueue(memoryD1());
 		expect(await queue.claimFillLease("owner-a", NOW)).toBe(true);
@@ -425,7 +555,7 @@ describe("drain D1 steps", () => {
 		expect(await queue.claimFillLease("owner-c", later)).toBe(true);
 	});
 
-	it("claimFillLease blocks a second tick while the first is sleeping", async () => {
+	it("two ticks starting at the same now cannot both hold the fill lease", async () => {
 		const db = memoryD1();
 		const queue = new D1PageQueue(db);
 		const kv = memoryKV();
@@ -461,6 +591,12 @@ describe("drain D1 steps", () => {
 			},
 		});
 		await sleeping;
+		const held = await db
+			.prepare("SELECT owner, claimed_at FROM fill_lease WHERE id = 'fill'")
+			.first<{ owner: string; claimed_at: string }>();
+		expect(held?.claimed_at).toBe(NOW);
+		expect(held?.owner).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+		expect(held?.owner).not.toBe(NOW);
 		const secondCalls: string[] = [];
 		const secondSent: Array<{ subject?: string; text?: string }> = [];
 		const { env: second } = envWithIndex([], true, {
@@ -483,6 +619,10 @@ describe("drain D1 steps", () => {
 		expect(secondSent).toEqual([]);
 		expect(secondCalls).toHaveLength(1);
 		expect(secondCalls[0]).toContain("fill_lease");
+		const still = await db
+			.prepare("SELECT owner, claimed_at FROM fill_lease WHERE id = 'fill'")
+			.first<{ owner: string; claimed_at: string }>();
+		expect(still).toEqual(held);
 		releaseSleep();
 		await first;
 		expect(sent).toEqual([]);

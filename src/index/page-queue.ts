@@ -1,7 +1,7 @@
 import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, isSystemId, type SystemId } from "../config/types.ts";
 import { admittedUrl, isStaticAsset, pageKey } from "../crawl/links.ts";
-import { d1Query, tickFrom, type D1QueryStep, type D1QueueOptions } from "./d1-step.ts";
+import { D1_STEP_RETRIES, d1MaxBackoffMs, d1Query, tickFrom, type D1QueryStep, type D1QueueOptions } from "./d1-step.ts";
 
 export const DRAIN_LIMIT = 100;
 export const MAX_ATTEMPTS = 5;
@@ -9,8 +9,29 @@ export const FRESHNESS_MS = 30 * 24 * 60 * 60 * 1000;
 /** Same hour as discover cap defer. A real exhausted failure waits this long, then claim() tries it again. */
 export const EXHAUSTED_RETRY_MS = 60 * 60 * 1000;
 const STALE_CLAIM_MS = 15 * 60 * 1000;
-export const FILL_LEASE_STALE_MS = STALE_CLAIM_MS;
 const FILL_LEASE_ID = "fill";
+
+/**
+ * A cron worker can run for 15 minutes. The fill lease used to expire at that same age, so a
+ * slow tick could lose the lease while it was still writing. The tick stops claiming new pages
+ * at tickDeadlineMs. The shared retry budget then allows one statement maxBackoffMs. marginMs
+ * keeps that whole tick inside the lease. ttlMs stays under the 5 minute cron, so a release
+ * that never lands is taken over about one tick later.
+ */
+const FILL_TICK_DEADLINE = 3 * 60 * 1000;
+const FILL_LEASE_MARGIN_MS = 30 * 1000;
+const FILL_LEASE_SLACK_MS = 5 * 1000;
+
+export const FILL_LEASE_WINDOW = {
+	tickDeadlineMs: FILL_TICK_DEADLINE,
+	maxBackoffMs: d1MaxBackoffMs(D1_STEP_RETRIES),
+	marginMs: FILL_LEASE_MARGIN_MS,
+	cronIntervalMs: 5 * 60 * 1000,
+	ttlMs: FILL_TICK_DEADLINE + d1MaxBackoffMs(D1_STEP_RETRIES) + FILL_LEASE_MARGIN_MS + FILL_LEASE_SLACK_MS,
+} as const;
+
+export const FILL_TICK_DEADLINE_MS = FILL_LEASE_WINDOW.tickDeadlineMs;
+export const FILL_LEASE_STALE_MS = FILL_LEASE_WINDOW.ttlMs;
 const CLAIM_EXPIRED = "claim expired";
 
 export type PageKind = "seed" | "reindex";
@@ -27,6 +48,7 @@ export type PageWorkItem = {
 	status: PageStatus;
 	itemKey: string | null;
 	claimedAt?: string;
+	claimToken?: string;
 };
 
 export type ClaimedPage = PageWorkItem & { claimedAt: string };
@@ -56,19 +78,19 @@ export type PageQueue = {
 	): Promise<void>;
 	claim(limit: number, now: string): Promise<ClaimedPage[]>;
 	complete(
-		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
+		item: Pick<PageWorkItem, "systemId" | "url" | "claimToken"> & { attempts?: number; claimedAt?: string },
 		timestamps: { lastCrawled: string; lastIndexed: string },
 		itemKey: string | null,
 		options?: { keepIndexedAt?: boolean },
 	): Promise<boolean>;
 	holdsFreshness(systemId: SystemId): Promise<boolean>;
 	fail(
-		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
+		item: Pick<PageWorkItem, "systemId" | "url" | "claimToken"> & { attempts?: number; claimedAt?: string },
 		error: string,
 	): Promise<boolean>;
-	owns(item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt">): Promise<boolean>;
+	owns(item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt" | "claimToken">): Promise<boolean>;
 	releaseForRetry(
-		item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt">,
+		item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt" | "claimToken">,
 		itemKey: string,
 	): Promise<boolean>;
 	depths(): Promise<QueueDepths>;
@@ -169,6 +191,11 @@ async function run(step: D1QueryStep, sql: string, ...params: unknown[]): Promis
 
 async function runOnce(step: D1QueryStep, sql: string, ...params: unknown[]): Promise<number> {
 	const result = await d1Query<{ meta?: { changes?: number } }>(step, false, "run", sql, params);
+	return result.meta?.changes ?? 0;
+}
+
+async function runBypass(step: D1QueryStep, sql: string, ...params: unknown[]): Promise<number> {
+	const result = await d1Query<{ meta?: { changes?: number } }>(step, false, "run", sql, params, true);
 	return result.meta?.changes ?? 0;
 }
 
@@ -302,6 +329,7 @@ export class D1PageQueue implements PageQueue {
 			MAX_ATTEMPTS,
 			limit,
 		);
+		const claimToken = crypto.randomUUID();
 		const claimed: ClaimedPage[] = [];
 		for (const row of rows) {
 			const item = toItem(row);
@@ -310,33 +338,36 @@ export class D1PageQueue implements PageQueue {
 			}
 			const changes = await run(
 				this.step,
-				`INSERT INTO page_work (
-				   system_id, url, kind, status, enqueued_at, attempts,
-				   last_crawled, last_indexed, claimed_at, error, item_key
-				 ) VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, NULL, ?)
-				 ON CONFLICT(system_id, url) DO UPDATE SET
-				   status = 'claimed',
-				   attempts = CASE
-				     WHEN page_work.status = 'claimed' AND page_work.claimed_at = excluded.claimed_at THEN page_work.attempts
-				     ELSE page_work.attempts + 1
-				   END,
-				   claimed_at = excluded.claimed_at,
-				   error = NULL
-				 WHERE page_work.status = 'pending'
-				    OR page_work.status = 'failed'
-				    OR (page_work.status = 'claimed' AND page_work.claimed_at = excluded.claimed_at)`,
+				`UPDATE page_work
+				 SET status = 'claimed',
+				     attempts = CASE
+				       WHEN page_work.status = 'claimed' AND page_work.claim_token = ? THEN page_work.attempts
+				       ELSE page_work.attempts + 1
+				     END,
+				     claimed_at = ?,
+				     claim_token = ?,
+				     error = NULL
+				 WHERE system_id = ? AND url = ?
+				   AND (
+				     page_work.status = 'pending'
+				     OR page_work.status = 'failed'
+				     OR (page_work.status = 'claimed' AND page_work.claim_token = ?)
+				   )`,
+				claimToken,
+				now,
+				claimToken,
 				item.systemId,
 				item.url,
-				item.kind,
-				item.enqueuedAt,
-				item.attempts,
-				row.last_crawled,
-				row.last_indexed,
-				now,
-				row.item_key,
+				claimToken,
 			);
 			if (changes === 1) {
-				claimed.push({ ...item, status: "claimed", attempts: item.attempts + 1, claimedAt: now });
+				claimed.push({
+					...item,
+					status: "claimed",
+					attempts: item.attempts + 1,
+					claimedAt: now,
+					claimToken,
+				});
 			}
 		}
 		return this.yieldHeldPages(claimed);
@@ -372,12 +403,13 @@ export class D1PageQueue implements PageQueue {
 			await run(
 				this.step,
 				`UPDATE page_work
-				 SET status = 'pending', attempts = attempts - 1
-				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
+				 SET status = 'pending', attempts = attempts - 1, claim_token = NULL
+				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
 				item.systemId,
 				item.url,
 				item.attempts,
 				item.claimedAt,
+				item.claimToken,
 			);
 			console.log(JSON.stringify({ event: "page_claim_yield", system: item.systemId, url: item.url }));
 		}
@@ -385,7 +417,7 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async complete(
-		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
+		item: Pick<PageWorkItem, "systemId" | "url" | "claimToken"> & { attempts?: number; claimedAt?: string },
 		timestamps: { lastCrawled: string; lastIndexed: string },
 		itemKey: string | null,
 		options?: { keepIndexedAt?: boolean },
@@ -396,13 +428,13 @@ export class D1PageQueue implements PageQueue {
 				this.step,
 				keepIndexedAt
 					? `UPDATE page_work
-					   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL
-					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`
+					   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL, claim_token = NULL
+					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`
 					: `UPDATE page_work
-					   SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
-					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
+					   SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL, claim_token = NULL
+					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
 				...(keepIndexedAt
-					? [timestamps.lastCrawled, itemKey, item.systemId, item.url, item.attempts, item.claimedAt]
+					? [timestamps.lastCrawled, itemKey, item.systemId, item.url, item.attempts, item.claimedAt, item.claimToken]
 					: [
 							timestamps.lastCrawled,
 							timestamps.lastIndexed,
@@ -411,6 +443,7 @@ export class D1PageQueue implements PageQueue {
 							item.url,
 							item.attempts,
 							item.claimedAt,
+							item.claimToken,
 						]),
 			);
 			return changes === 1;
@@ -437,20 +470,21 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async fail(
-		item: Pick<PageWorkItem, "systemId" | "url"> & { attempts?: number; claimedAt?: string },
+		item: Pick<PageWorkItem, "systemId" | "url" | "claimToken"> & { attempts?: number; claimedAt?: string },
 		error: string,
 	): Promise<boolean> {
 		if (item.claimedAt !== undefined && item.attempts !== undefined) {
 			const changes = await run(
 				this.step,
 				`UPDATE page_work
-				 SET status = 'failed', error = ?
-				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
+				 SET status = 'failed', error = ?, claim_token = NULL
+				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
 				error,
 				item.systemId,
 				item.url,
 				item.attempts,
 				item.claimedAt,
+				item.claimToken,
 			);
 			return changes === 1;
 		}
@@ -860,24 +894,25 @@ export class D1PageQueue implements PageQueue {
 		);
 	}
 
-	async owns(item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt">): Promise<boolean> {
-		if (item.claimedAt === undefined || item.attempts === undefined) {
+	async owns(item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt" | "claimToken">): Promise<boolean> {
+		if (item.claimedAt === undefined || item.attempts === undefined || !item.claimToken) {
 			return false;
 		}
 		const row = await first<{ ok: number }>(
 			this.step,
 			`SELECT 1 AS ok FROM page_work
-			 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ?`,
+			 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
 			item.systemId,
 			item.url,
 			item.attempts,
 			item.claimedAt,
+			item.claimToken,
 		);
 		return row !== null;
 	}
 
 	async releaseForRetry(
-		item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt">,
+		item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt" | "claimToken">,
 		itemKey: string,
 	): Promise<boolean> {
 		if (item.claimedAt === undefined || item.attempts === undefined) {
@@ -889,10 +924,11 @@ export class D1PageQueue implements PageQueue {
 			 SET status = 'pending',
 			     attempts = CASE WHEN attempts >= ? THEN ? ELSE attempts END,
 			     error = NULL,
-			     item_key = ?
+			     item_key = ?,
+			     claim_token = NULL
 			 WHERE system_id = ? AND url = ?
 			   AND (
-			     (status = 'claimed' AND attempts = ? AND claimed_at = ?)
+			     (status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?)
 			     OR (status = 'failed' AND attempts = ? AND claimed_at IS NULL AND error = ?)
 			   )`,
 			MAX_ATTEMPTS,
@@ -902,6 +938,7 @@ export class D1PageQueue implements PageQueue {
 			item.url,
 			item.attempts,
 			item.claimedAt,
+			item.claimToken,
 			item.attempts,
 			CLAIM_EXPIRED,
 		);
@@ -997,7 +1034,7 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async releaseFillLease(owner: string): Promise<void> {
-		await run(this.step, "DELETE FROM fill_lease WHERE id = ? AND owner = ?", FILL_LEASE_ID, owner);
+		await runBypass(this.step, "DELETE FROM fill_lease WHERE id = ? AND owner = ?", FILL_LEASE_ID, owner);
 	}
 }
 

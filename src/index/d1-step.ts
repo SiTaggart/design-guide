@@ -64,6 +64,15 @@ export function budgetError(budget: D1TickBudget): Error {
 	return new NonRetryableError("D1 retry budget exhausted");
 }
 
+export function d1MaxBackoffMs(retries: D1StepRetries = D1_STEP_RETRIES): number {
+	const base = delayMs(retries.delay);
+	let total = 0;
+	for (let attempt = 0; attempt < retries.limit; attempt += 1) {
+		total += backoffMs(base, attempt, retries.backoff);
+	}
+	return total;
+}
+
 function delayMs(delay: D1StepRetries["delay"]): number {
 	const match = /^(\d+)\s+seconds$/.exec(delay);
 	if (!match) {
@@ -139,8 +148,9 @@ export async function d1Query<T>(
 	method: Method,
 	sql: string,
 	params: readonly unknown[],
+	bypassBudget = false,
 ): Promise<T> {
-	if (step.tick?.budget.exhausted) {
+	if (step.tick?.budget.exhausted && !bypassBudget) {
 		throw budgetError(step.tick.budget);
 	}
 	const run = () => invoke(step.db, method, sql, params);
