@@ -202,9 +202,12 @@ async function runBypass(step: D1QueryStep, sql: string, ...params: unknown[]): 
 	return result.meta?.changes ?? 0;
 }
 
+type ClaimLanding = "done" | "failed" | "pending";
+
 async function holderFinished(
 	step: D1QueryStep,
 	item: { systemId: string; url: string; claimToken?: string },
+	landed: ClaimLanding,
 ): Promise<boolean> {
 	if (!item.claimToken) {
 		return false;
@@ -215,16 +218,17 @@ async function holderFinished(
 		item.systemId,
 		item.url,
 	);
-	return row?.status === "done" && row.claim_token === item.claimToken;
+	return row?.status === landed && row.claim_token === item.claimToken;
 }
 
 async function guardedChanges(
 	step: D1QueryStep,
 	op: string,
 	item: { systemId: string; url: string; claimToken?: string },
+	landed: ClaimLanding,
 	changes: number,
 ): Promise<boolean> {
-	const lost = changes !== 1 && !step.tick?.budget.deadline && !(await holderFinished(step, item));
+	const lost = changes !== 1 && !step.tick?.budget.deadline && !(await holderFinished(step, item, landed));
 	if (lost) {
 		console.log(JSON.stringify({ event: "page_claim_lost", op, system: item.systemId, url: item.url }));
 	}
@@ -265,6 +269,10 @@ export class D1PageQueue implements PageQueue {
 				   error = CASE
 				     WHEN page_work.status = 'claimed' THEN page_work.error
 				     ELSE NULL
+				   END,
+				   claim_token = CASE
+				     WHEN page_work.status = 'claimed' THEN page_work.claim_token
+				     ELSE NULL
 				   END`,
 				item.systemId,
 				item.url,
@@ -290,6 +298,7 @@ export class D1PageQueue implements PageQueue {
 			`UPDATE page_work
 			 SET status = 'pending',
 			     error = NULL,
+			     claim_token = NULL,
 			     attempts = CASE WHEN attempts >= ? THEN ? ELSE attempts END
 			 WHERE (status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?)
 			    OR (status = 'failed' AND error = ?)
@@ -438,7 +447,7 @@ export class D1PageQueue implements PageQueue {
 			const changes = await run(
 				this.step,
 				`UPDATE page_work
-				 SET status = 'pending', attempts = attempts - 1, claim_token = NULL
+				 SET status = 'pending', attempts = attempts - 1
 				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
 				item.systemId,
 				item.url,
@@ -449,7 +458,7 @@ export class D1PageQueue implements PageQueue {
 			if (changes === 1) {
 				console.log(JSON.stringify({ event: "page_claim_yield", system: item.systemId, url: item.url }));
 			} else {
-				await guardedChanges(this.step, "yield", item, changes);
+				await guardedChanges(this.step, "yield", item, "pending", changes);
 			}
 		}
 		return kept;
@@ -485,7 +494,7 @@ export class D1PageQueue implements PageQueue {
 							item.claimToken,
 						]),
 			);
-			return guardedChanges(this.step, "complete", item, changes);
+			return guardedChanges(this.step, "complete", item, "done", changes);
 		}
 		await run(
 			this.step,
@@ -516,7 +525,7 @@ export class D1PageQueue implements PageQueue {
 			const changes = await run(
 				this.step,
 				`UPDATE page_work
-				 SET status = 'failed', error = ?, claim_token = NULL
+				 SET status = 'failed', error = ?
 				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
 				error,
 				item.systemId,
@@ -525,7 +534,7 @@ export class D1PageQueue implements PageQueue {
 				item.claimedAt,
 				item.claimToken,
 			);
-			return guardedChanges(this.step, "fail", item, changes);
+			return guardedChanges(this.step, "fail", item, "failed", changes);
 		}
 		await run(
 			this.step,
@@ -963,8 +972,7 @@ export class D1PageQueue implements PageQueue {
 			 SET status = 'pending',
 			     attempts = CASE WHEN attempts >= ? THEN ? ELSE attempts END,
 			     error = NULL,
-			     item_key = ?,
-			     claim_token = NULL
+			     item_key = ?
 			 WHERE system_id = ? AND url = ?
 			   AND (
 			     (status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?)
@@ -981,7 +989,7 @@ export class D1PageQueue implements PageQueue {
 			item.attempts,
 			CLAIM_EXPIRED,
 		);
-		return guardedChanges(this.step, "releaseForRetry", item, changes);
+		return guardedChanges(this.step, "releaseForRetry", item, "pending", changes);
 	}
 
 	async recordSeedRefresh(systemId: SystemId, seedHash: string, enqueuedAt: string): Promise<void> {
