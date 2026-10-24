@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { NonRetryableError } from "cloudflare:workflows";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
+import { discoverTick } from "../src/index/discover.ts";
 import { createD1TickBudget, D1_STEP_RETRIES } from "../src/index/d1-step.ts";
 import { drainTick } from "../src/index/drain.ts";
 import { fillTick, noteIndexedSeeds } from "../src/index/fill.ts";
@@ -637,6 +638,90 @@ describe("drain D1 steps", () => {
 				.bind(PAGE)
 				.first<{ status: string; claim_token: string | null }>(),
 		).toEqual({ status: "done", claim_token: null });
+	});
+
+	it("logs page_claim_lost when another holder already finished the page", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const otherUrl = "https://primer.style/components/action-list";
+		const clearedUrl = "https://primer.style/components/blankslate";
+		await queue.enqueueUpsert(
+			[
+				{ systemId: "primer", url: otherUrl, kind: "reindex" },
+				{ systemId: "primer", url: clearedUrl, kind: "reindex" },
+			],
+			OLD,
+		);
+		const [otherItem, clearedItem] = await queue.claim(2, NOW);
+		await db
+			.prepare(
+				`UPDATE page_work
+				 SET status = 'done', claim_token = ?, claimed_at = NULL, item_key = ?
+				 WHERE url = ?`,
+			)
+			.bind("other-holder", "primer/page/other.md", otherUrl)
+			.run();
+		await db
+			.prepare(
+				`UPDATE page_work
+				 SET status = 'done', claim_token = NULL, claimed_at = NULL, item_key = ?
+				 WHERE url = ?`,
+			)
+			.bind("primer/page/cleared.md", clearedUrl)
+			.run();
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		const timestamps = { lastCrawled: NOW, lastIndexed: NOW };
+		expect(await queue.complete(otherItem!, timestamps, "primer/page/ours-other.md")).toBe(false);
+		expect(await queue.complete(clearedItem!, timestamps, "primer/page/ours-cleared.md")).toBe(false);
+		const lost = logs.filter((line) => line.includes("page_claim_lost"));
+		expect(lost).toHaveLength(2);
+		expect(lost.every((line) => line.includes('"op":"complete"'))).toBe(true);
+		expect(
+			await db
+				.prepare("SELECT status, claim_token, item_key FROM page_work WHERE url = ?")
+				.bind(otherUrl)
+				.first<{ status: string; claim_token: string | null; item_key: string | null }>(),
+		).toEqual({ status: "done", claim_token: "other-holder", item_key: "primer/page/other.md" });
+		expect(
+			await db
+				.prepare("SELECT status, claim_token, item_key FROM page_work WHERE url = ?")
+				.bind(clearedUrl)
+				.first<{ status: string; claim_token: string | null; item_key: string | null }>(),
+		).toEqual({ status: "done", claim_token: null, item_key: "primer/page/cleared.md" });
+	});
+
+	it("keeps the completing holder's claim token on the done row", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const keepUrl = "https://primer.style/components/avatar";
+		await queue.enqueueUpsert(
+			[
+				{ systemId: "primer", url: PAGE, kind: "reindex" },
+				{ systemId: "primer", url: keepUrl, kind: "reindex" },
+			],
+			OLD,
+		);
+		const claimed = await queue.claim(2, NOW);
+		const normal = claimed.find((item) => item.url === PAGE);
+		const kept = claimed.find((item) => item.url === keepUrl);
+		const timestamps = { lastCrawled: NOW, lastIndexed: NOW };
+		expect(await queue.complete(normal!, timestamps, "primer/page.md")).toBe(true);
+		expect(await queue.complete(kept!, timestamps, "primer/page/keep.md", { keepIndexedAt: true })).toBe(true);
+		expect(
+			await db
+				.prepare("SELECT status, claim_token FROM page_work WHERE url = ?")
+				.bind(PAGE)
+				.first<{ status: string; claim_token: string | null }>(),
+		).toEqual({ status: "done", claim_token: normal?.claimToken });
+		expect(
+			await db
+				.prepare("SELECT status, claim_token, last_indexed FROM page_work WHERE url = ?")
+				.bind(keepUrl)
+				.first<{ status: string; claim_token: string | null; last_indexed: string | null }>(),
+		).toEqual({ status: "done", claim_token: kept?.claimToken, last_indexed: null });
 	});
 
 	it("a tick that reaches the deadline mid-drain does no further D1 writes and releases the lease", async () => {
@@ -1290,6 +1375,58 @@ describe("drain D1 steps", () => {
 		);
 		await expect(noteIndexedSeeds(env, failing, new Date(NOW))).rejects.toThrow("discover mark failed");
 		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		expect(
+			await db
+				.prepare("SELECT last_discovered FROM system_mark WHERE system_id = ?")
+				.bind("primer")
+				.first<{ last_discovered: string }>(),
+		).toBeNull();
+	});
+
+	it("leaves both indexed hashes unset when finishDiscover cannot mark the system", async () => {
+		const db = memoryD1();
+		const kv = memoryKV();
+		for (const id of SYSTEM_IDS) {
+			await kv.put(seedHashKey(id), systemSeedHash(seedById(id)));
+		}
+		const puts: string[] = [];
+		const put = kv.put.bind(kv);
+		kv.put = (async (key: string, value: string) => {
+			puts.push(key);
+			await put(key, value);
+		}) as typeof kv.put;
+		const queue = new D1PageQueue(db);
+		await queue.insertRun({
+			systemId: "primer",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-stub",
+			startUrl: "https://primer.style/",
+			cursor: "done",
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: wrapStatement(db, async (sql, op) => {
+				if (/into system_mark/i.test(sql)) {
+					throw new Error("discover mark failed");
+				}
+				return op();
+			}),
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "completed", finished: 0 }),
+			page: async () => ({ records: [], cursor: null }),
+			cancel: async () => undefined,
+		});
+		expect(result).toMatchObject({ action: "failed", error: "discover mark failed" });
+		expect(puts).not.toContain(seedHashKey("primer"));
+		expect(puts).not.toContain(LAST_INDEXED_HASH_KEY);
+		expect(await kv.get(LAST_INDEXED_HASH_KEY)).toBeNull();
 		expect(
 			await db
 				.prepare("SELECT last_discovered FROM system_mark WHERE system_id = ?")
