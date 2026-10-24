@@ -202,28 +202,30 @@ async function runBypass(step: D1QueryStep, sql: string, ...params: unknown[]): 
 	return result.meta?.changes ?? 0;
 }
 
-async function claimLanded(
+async function holderFinished(
 	step: D1QueryStep,
-	item: { systemId: string; url: string },
-	status: PageStatus,
+	item: { systemId: string; url: string; claimToken?: string },
 ): Promise<boolean> {
+	if (!item.claimToken) {
+		return false;
+	}
 	const row = await first<{ status: string; claim_token: string | null }>(
 		step,
 		"SELECT status, claim_token FROM page_work WHERE system_id = ? AND url = ?",
 		item.systemId,
 		item.url,
 	);
-	return row !== null && row.status === status && row.claim_token === null;
+	return row?.status === "done" && row.claim_token === item.claimToken;
 }
 
 async function guardedChanges(
 	step: D1QueryStep,
 	op: string,
-	item: { systemId: string; url: string },
+	item: { systemId: string; url: string; claimToken?: string },
 	changes: number,
-	landedStatus: PageStatus,
 ): Promise<boolean> {
-	if (changes !== 1 && !step.tick?.budget.deadline && !(await claimLanded(step, item, landedStatus))) {
+	const lost = changes !== 1 && !step.tick?.budget.deadline && !(await holderFinished(step, item));
+	if (lost) {
 		console.log(JSON.stringify({ event: "page_claim_lost", op, system: item.systemId, url: item.url }));
 	}
 	return changes === 1;
@@ -447,7 +449,7 @@ export class D1PageQueue implements PageQueue {
 			if (changes === 1) {
 				console.log(JSON.stringify({ event: "page_claim_yield", system: item.systemId, url: item.url }));
 			} else {
-				await guardedChanges(this.step, "yield", item, changes, "pending");
+				await guardedChanges(this.step, "yield", item, changes);
 			}
 		}
 		return kept;
@@ -465,10 +467,10 @@ export class D1PageQueue implements PageQueue {
 				this.step,
 				keepIndexedAt
 					? `UPDATE page_work
-					   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL, claim_token = NULL
+					   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL
 					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`
 					: `UPDATE page_work
-					   SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL, claim_token = NULL
+					   SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
 					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
 				...(keepIndexedAt
 					? [timestamps.lastCrawled, itemKey, item.systemId, item.url, item.attempts, item.claimedAt, item.claimToken]
@@ -483,7 +485,7 @@ export class D1PageQueue implements PageQueue {
 							item.claimToken,
 						]),
 			);
-			return guardedChanges(this.step, "complete", item, changes, "done");
+			return guardedChanges(this.step, "complete", item, changes);
 		}
 		await run(
 			this.step,
@@ -523,7 +525,7 @@ export class D1PageQueue implements PageQueue {
 				item.claimedAt,
 				item.claimToken,
 			);
-			return guardedChanges(this.step, "fail", item, changes, "failed");
+			return guardedChanges(this.step, "fail", item, changes);
 		}
 		await run(
 			this.step,
@@ -979,7 +981,7 @@ export class D1PageQueue implements PageQueue {
 			item.attempts,
 			CLAIM_EXPIRED,
 		);
-		return guardedChanges(this.step, "releaseForRetry", item, changes, "pending");
+		return guardedChanges(this.step, "releaseForRetry", item, changes);
 	}
 
 	async recordSeedRefresh(systemId: SystemId, seedHash: string, enqueuedAt: string): Promise<void> {

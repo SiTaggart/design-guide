@@ -637,7 +637,7 @@ describe("drain D1 steps", () => {
 				.prepare("SELECT status, claim_token FROM page_work WHERE url = ?")
 				.bind(PAGE)
 				.first<{ status: string; claim_token: string | null }>(),
-		).toEqual({ status: "done", claim_token: null });
+		).toEqual({ status: "done", claim_token: item?.claimToken });
 	});
 
 	it("logs page_claim_lost when another holder already finished the page", async () => {
