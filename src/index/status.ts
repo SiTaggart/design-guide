@@ -238,7 +238,6 @@ export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 	}
 	try {
 		const queue = new D1PageQueue(env.PAGE_QUEUE);
-		await queue.ensure();
 		const [depths, freshness, run] = await Promise.all([
 			queue.depths(),
 			queue.freshness(),

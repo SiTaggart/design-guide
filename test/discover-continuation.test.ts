@@ -13,7 +13,6 @@ describe("discover continuation", () => {
 	it("starts another crawl from an unstaged frontier url when the job stops early", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -59,7 +58,6 @@ describe("discover continuation", () => {
 	it("marks an early stop with no frontier incomplete and does not record a seed refresh", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -109,7 +107,6 @@ describe("discover continuation", () => {
 	it("keeps crawling when a follow-up job finishes with other frontier urls still unstaged", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -168,7 +165,6 @@ describe("discover continuation", () => {
 	it("starts two capped jobs in a row from different urls", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -227,7 +223,6 @@ describe("discover continuation", () => {
 	it("does not prune or record a refresh when a capped chain's follow-up completes", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const sitemapOnly = "https://paste-dsys.com/sitemap-only";
 		await pageQueue.enqueueUpsert([{ systemId: "paste", url: sitemapOnly, kind: "seed" }], NOW);
 		await pageQueue.complete(
@@ -315,7 +310,6 @@ describe("discover continuation", () => {
 	it("retries a failed follow-up start, then skips that url and keeps staged pages", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -369,7 +363,6 @@ describe("discover continuation", () => {
 	it("keeps staged pages when a poll error follows repeated follow-up start failures", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -420,7 +413,6 @@ describe("discover continuation", () => {
 	it("does not record a seed refresh when the run hits the page ceiling", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await db.exec(`WITH RECURSIVE n(i) AS (
 			SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000
 		) INSERT INTO discover_indexable (system_id, url)
@@ -466,7 +458,6 @@ describe("discover continuation", () => {
 	it("keeps staged pages when the crawl deadline passes and does not record a refresh", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const startedAt = new Date(Date.parse(NOW) - CRAWL_POLL_DEADLINE_MS - 60_000).toISOString();
 		const kept = "https://paste-dsys.com/components/form";
 		const also = "https://paste-dsys.com/components/input";
@@ -527,7 +518,6 @@ describe("discover continuation", () => {
 	it("ends a run that cannot start any frontier url within a bounded number of ticks", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kept = "https://paste-dsys.com/components/form";
 		const also = "https://paste-dsys.com/components/input";
 		await pageQueue.insertRun({
@@ -592,7 +582,6 @@ describe("discover continuation", () => {
 	it("ends a 401 follow-up start in that tick and keeps the staged pages", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kept = "https://paste-dsys.com/components/form";
 		const also = "https://paste-dsys.com/components/input";
 		await pageQueue.insertRun({
@@ -663,7 +652,6 @@ describe("discover continuation", () => {
 	it("keeps staged pages when a follow-up job errors and does not record a refresh", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kept = "https://paste-dsys.com/components/form";
 		const also = "https://paste-dsys.com/components/input";
 		const removed = "https://paste-dsys.com/components/removed";
@@ -721,7 +709,6 @@ describe("discover continuation", () => {
 	it("keeps staged pages when poll errors exhaust the retry budget", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kept = "https://paste-dsys.com/components/form";
 		const also = "https://paste-dsys.com/components/input";
 		await pageQueue.insertRun({
@@ -779,7 +766,6 @@ describe("discover continuation", () => {
 	it("keeps staged pages when paging errors exhaust the retry budget", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kept = "https://paste-dsys.com/components/form";
 		const also = "https://paste-dsys.com/components/input";
 		await pageQueue.insertRun({
@@ -835,7 +821,6 @@ describe("discover continuation", () => {
 	it("retries a 429 for a path that contains 403", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -874,7 +859,6 @@ describe("discover continuation", () => {
 	it("ends a follow-up when the start error carries HTTP 401 and the message does not", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kept = "https://paste-dsys.com/components/form";
 		const also = "https://paste-dsys.com/components/input";
 		await pageQueue.insertRun({

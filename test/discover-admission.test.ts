@@ -37,7 +37,6 @@ describe("discovered records stay inside the seed", () => {
 	it("drops records outside the seed, collapses query variants, and does not fetch or upload the rest", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "backpack",
 			kind: "seed",
@@ -102,7 +101,6 @@ describe("discovered records stay inside the seed", () => {
 	it("fails a queued row outside the seed instead of fetching it", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const allowed = "https://www.skyscanner.design/latest/welcome-to-backpack-Mtf5OEo4";
 		await pageQueue.enqueueUpsert(
 			[
@@ -136,7 +134,6 @@ describe("discovered records stay inside the seed", () => {
 	it("fetches a queued row when its canonical form is inside the seed", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const slash = "https://www.skyscanner.design/latest/real/";
 		const query = "https://www.skyscanner.design/latest/real?view=1";
 		const outside = "https://www.skyscanner.design/account/billing";
@@ -178,7 +175,6 @@ describe("discovered records stay inside the seed", () => {
 	it("stores the admitted canonical url once when slash and query rows are queued", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const slash = `${CANONICAL}/`;
 		const query = `${CANONICAL}?view=1`;
 		const outside = "https://www.skyscanner.design/account/billing";
@@ -225,7 +221,6 @@ describe("discovered records stay inside the seed", () => {
 	it("queues a contents page from the fallback project and drops the rest of the project", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "gitlab-pajamas",
 			kind: "seed",

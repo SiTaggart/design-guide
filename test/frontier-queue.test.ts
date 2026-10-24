@@ -22,7 +22,6 @@ describe("discover frontier writes", () => {
 		const db = memoryD1();
 		const counter = countingFrontierInserts(db);
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const nav = Array.from({ length: 40 }, (_value, index) => `https://paste-dsys.com/components/nav-${index}`);
 		for (let page = 0; page < 25; page += 1) {
 			await pageQueue.addFrontier("paste", [...nav, nav[0] ?? ""]);
@@ -39,7 +38,6 @@ describe("discover frontier writes", () => {
 		const inside = "https://www.skyscanner.design/latest/other";
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "backpack",
 			kind: "seed",
@@ -94,7 +92,6 @@ describe("discover frontier writes", () => {
 		const inside = "https://www.skyscanner.design/latest/other";
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.addFrontier("backpack", [...outside, inside]);
 		let deletes = 0;
 		const prepare = db.prepare.bind(db);

@@ -6,6 +6,7 @@ import {
 	countsFrom,
 	errorsFromResults,
 	readStatus,
+	readStoredStatus,
 	runStateFrom,
 	type ReindexParams,
 } from "./status.ts";
@@ -138,8 +139,9 @@ export async function sendFinishIndexMail(
 	params: Pick<ReindexParams, "trigger" | "workflowId">,
 	results: readonly SystemReindexResult[],
 	runError?: string,
+	options?: { readQueue?: boolean },
 ): Promise<{ messageId: string } | { skipped: "unbound" }> {
-	const status = await readStatus(env);
+	const status = options?.readQueue === false ? await readStoredStatus(env) : await readStatus(env);
 	return sendIndexMail(env, finishIndexMail(params, results, status.parks, runError, status.unparked));
 }
 

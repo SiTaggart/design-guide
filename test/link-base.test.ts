@@ -17,7 +17,6 @@ describe("relative links use the fetched page", () => {
 	it("resolves a relative link against the page url and a base href", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "vanilla",
 			kind: "seed",
@@ -114,7 +113,6 @@ async function frontierUrls(
 ): Promise<string[]> {
 	const db = memoryD1();
 	const pageQueue = new D1PageQueue(db);
-	await pageQueue.ensure();
 	await pageQueue.insertRun({
 		systemId,
 		kind: "seed",

@@ -1,4 +1,7 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 
 type Bound = {
 	all<T>(): Promise<{ results: T[] }>;
@@ -6,8 +9,19 @@ type Bound = {
 	first<T>(): Promise<T | null>;
 };
 
+export function applyMigrations(db: DatabaseSync): void {
+	const dir = join(dirname(fileURLToPath(import.meta.url)), "../../migrations");
+	const files = readdirSync(dir)
+		.filter((name) => name.endsWith(".sql"))
+		.sort();
+	for (const name of files) {
+		db.exec(readFileSync(join(dir, name), "utf8"));
+	}
+}
+
 export function memoryD1(): D1Database {
 	const db = new DatabaseSync(":memory:");
+	applyMigrations(db);
 	const prepare = (sql: string) => {
 		const stmt = db.prepare(sql);
 		const bound = (...params: unknown[]): Bound => {

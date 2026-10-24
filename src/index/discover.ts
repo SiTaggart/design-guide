@@ -19,6 +19,7 @@ import { parkedSystemIds, readParks, writePark, type Parks } from "./parks.ts";
 import { isStubGeneration, fitsItem } from "./reindex.ts";
 import { driftedSystems, systemSeedHash } from "./seed-hash.ts";
 import { isRecoveryCron } from "./trigger.ts";
+import { isTickDeadlineStop, type D1QueueOptions } from "./d1-step.ts";
 import {
 	D1PageQueue,
 	isDue,
@@ -277,10 +278,14 @@ export async function discoverTick(
 	cron: string,
 	now = new Date(),
 	deps: Partial<DiscoverDeps> = {},
+	queueOptions?: D1QueueOptions,
 ): Promise<DiscoverTickResult> {
 	try {
-		return await runDiscover(env, cron, now, { ...defaultDeps, ...deps });
+		return await runDiscover(env, cron, now, { ...defaultDeps, ...deps }, queueOptions);
 	} catch (error) {
+		if (isTickDeadlineStop(error)) {
+			return { action: "skip", reason: "deadline" };
+		}
 		return { action: "failed", error: error instanceof Error ? error.message : String(error) };
 	}
 }
@@ -290,6 +295,7 @@ async function runDiscover(
 	cron: string,
 	now: Date,
 	deps: DiscoverDeps,
+	queueOptions?: D1QueueOptions,
 ): Promise<DiscoverTickResult> {
 	if (!env.PAGE_QUEUE) {
 		return { action: "skip", reason: "unbound" };
@@ -302,8 +308,7 @@ async function runDiscover(
 	if (parksRead.kind === "unread") {
 		return { action: "skip", reason: "unread-parks" };
 	}
-	const queue = new D1PageQueue(env.PAGE_QUEUE);
-	await queue.ensure();
+	const queue = new D1PageQueue(env.PAGE_QUEUE, queueOptions);
 	const running = await queue.running();
 	if (running) {
 		return continueDiscover(env, queue, auth, running, now, deps);
@@ -442,6 +447,9 @@ async function continueDiscover(
 				await queue.saveCursor(run.systemId, cursor, iso);
 			}
 		} catch (error) {
+			if (isTickDeadlineStop(error)) {
+				throw error;
+			}
 			const failures = await queue.notePollFailure(run.systemId, iso);
 			if (failures >= MAX_POLL_FAILURES) {
 				return failOrFinish(env, queue, auth, run, deps, iso, startFailureMessage(error));
@@ -462,6 +470,9 @@ async function continueDiscover(
 				await queue.replaceJob(run.systemId, started.jobId, started.startUrl, iso);
 				return { action: "continued", systemId: run.systemId, accepted };
 			} catch (error) {
+				if (isTickDeadlineStop(error)) {
+					throw error;
+				}
 				const message = startFailureMessage(error);
 				console.log(
 					JSON.stringify({
