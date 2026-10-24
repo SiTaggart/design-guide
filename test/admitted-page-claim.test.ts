@@ -73,7 +73,6 @@ describe("an admitted page has one live claim", () => {
 	it("keeps one catalog item when two drains admit one page", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.enqueueUpsert(
 			[
 				{ systemId: "backpack", url: SLASH, kind: "seed" },
@@ -159,7 +158,6 @@ describe("an admitted page has one live claim", () => {
 	it("returns the second spelling to pending while the first claim is live", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.enqueueUpsert(
 			[
 				{ systemId: "backpack", url: SLASH, kind: "seed" },
@@ -185,7 +183,6 @@ describe("an admitted page has one live claim", () => {
 	it("keeps one catalog item when a repeated-slash row admits the same page", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const repeated = `${CANONICAL}${"/".repeat(16)}`;
 		await pageQueue.enqueueUpsert(
 			[
@@ -244,7 +241,6 @@ describe("an admitted page has one live claim", () => {
 	it("returns the canonical row to pending while a multi-slash row is claimed", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const multi = `${CANONICAL}//`;
 		await pageQueue.enqueueUpsert(
 			[
@@ -266,7 +262,6 @@ describe("an admitted page has one live claim", () => {
 	it("keeps the later drain's item when the first claim has expired", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.enqueueUpsert(
 			[
 				{ systemId: "backpack", url: SLASH, kind: "seed" },

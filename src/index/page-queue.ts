@@ -1,6 +1,7 @@
 import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, isSystemId, type SystemId } from "../config/types.ts";
 import { admittedUrl, isStaticAsset, pageKey } from "../crawl/links.ts";
+import { retryingDatabase, type D1QueueOptions } from "./d1-step.ts";
 
 export const DRAIN_LIMIT = 100;
 export const MAX_ATTEMPTS = 5;
@@ -9,86 +10,6 @@ export const FRESHNESS_MS = 30 * 24 * 60 * 60 * 1000;
 export const EXHAUSTED_RETRY_MS = 60 * 60 * 1000;
 const STALE_CLAIM_MS = 15 * 60 * 1000;
 const CLAIM_EXPIRED = "claim expired";
-
-export const PAGE_QUEUE_SCHEMA = `
-CREATE TABLE IF NOT EXISTS page_work (
-  system_id TEXT NOT NULL,
-  url TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  status TEXT NOT NULL,
-  enqueued_at TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  last_crawled TEXT,
-  last_indexed TEXT,
-  claimed_at TEXT,
-  error TEXT,
-  item_key TEXT,
-  PRIMARY KEY (system_id, url)
-);
-
-CREATE TABLE IF NOT EXISTS discover_run (
-  system_id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  trigger_name TEXT NOT NULL,
-  job_id TEXT NOT NULL,
-  start_url TEXT NOT NULL,
-  state TEXT NOT NULL,
-  cursor TEXT,
-  poll_failures INTEGER NOT NULL DEFAULT 0,
-  start_failures INTEGER NOT NULL DEFAULT 0,
-  capped_any INTEGER NOT NULL DEFAULT 0,
-  skipped_any INTEGER NOT NULL DEFAULT 0,
-  error TEXT,
-  started_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS discover_url (
-  system_id TEXT NOT NULL,
-  url TEXT NOT NULL,
-  PRIMARY KEY (system_id, url)
-);
-
-CREATE TABLE IF NOT EXISTS system_mark (
-  system_id TEXT PRIMARY KEY,
-  last_discovered TEXT
-);
-
-CREATE TABLE IF NOT EXISTS discover_indexable (
-  system_id TEXT NOT NULL,
-  url TEXT NOT NULL,
-  PRIMARY KEY (system_id, url)
-);
-
-CREATE TABLE IF NOT EXISTS recovery_attempt (
-  system_id TEXT PRIMARY KEY,
-  attempted_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS seed_refresh (
-  system_id TEXT PRIMARY KEY,
-  seed_hash TEXT NOT NULL,
-  enqueued_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS cap_defer (
-  system_id TEXT PRIMARY KEY,
-  deferred_at TEXT NOT NULL,
-  streak INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS discover_frontier (
-  system_id TEXT NOT NULL,
-  url TEXT NOT NULL,
-  PRIMARY KEY (system_id, url)
-);
-
-CREATE TABLE IF NOT EXISTS discover_attempt (
-  system_id TEXT NOT NULL,
-  url TEXT NOT NULL,
-  PRIMARY KEY (system_id, url)
-);
-`;
 
 export type PageKind = "seed" | "reindex";
 export type PageStatus = "pending" | "claimed" | "failed" | "done";
@@ -190,36 +111,8 @@ type RunRow = {
 	started_at: string;
 };
 
-const ready = new WeakMap<D1Database, Promise<void>>();
-
 export function emptyDepths(): QueueDepths {
 	return { pending: 0, claimed: 0, failed: 0, done: 0 };
-}
-
-export function schemaStatements(schema = PAGE_QUEUE_SCHEMA): string[] {
-	return schema
-		.split(";")
-		.map((sql) => sql.trim())
-		.filter((sql) => sql.length > 0);
-}
-
-export function ensurePageQueue(db: D1Database): Promise<void> {
-	let pending = ready.get(db);
-	if (!pending) {
-		pending = applySchema(db).catch((error: unknown) => {
-			ready.delete(db);
-			throw error;
-		});
-		ready.set(db, pending);
-	}
-	return pending;
-}
-
-async function applySchema(db: D1Database): Promise<void> {
-	// D1 exec() uses the first line only and rejects more than one statement.
-	for (const sql of schemaStatements()) {
-		await db.exec(sql.replace(/\s+/g, " ").trim());
-	}
 }
 
 function asKind(value: string): PageKind {
@@ -273,10 +166,10 @@ async function run(db: D1Database, sql: string, ...params: unknown[]): Promise<n
 }
 
 export class D1PageQueue implements PageQueue {
-	constructor(private readonly db: D1Database) {}
+	private readonly db: D1Database;
 
-	ensure(): Promise<void> {
-		return ensurePageQueue(this.db);
+	constructor(db: D1Database, options?: D1QueueOptions) {
+		this.db = options?.retries ? retryingDatabase(db, options.retries, options.sleep) : db;
 	}
 
 	async enqueueUpsert(
@@ -408,12 +301,30 @@ export class D1PageQueue implements PageQueue {
 			}
 			const changes = await run(
 				this.db,
-				`UPDATE page_work
-				 SET status = 'claimed', attempts = attempts + 1, claimed_at = ?, error = NULL
-				 WHERE system_id = ? AND url = ? AND (status = 'pending' OR status = 'failed')`,
-				now,
+				`INSERT INTO page_work (
+				   system_id, url, kind, status, enqueued_at, attempts,
+				   last_crawled, last_indexed, claimed_at, error, item_key
+				 ) VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, NULL, ?)
+				 ON CONFLICT(system_id, url) DO UPDATE SET
+				   status = 'claimed',
+				   attempts = CASE
+				     WHEN page_work.status = 'claimed' AND page_work.claimed_at = excluded.claimed_at THEN page_work.attempts
+				     ELSE page_work.attempts + 1
+				   END,
+				   claimed_at = excluded.claimed_at,
+				   error = NULL
+				 WHERE page_work.status = 'pending'
+				    OR page_work.status = 'failed'
+				    OR (page_work.status = 'claimed' AND page_work.claimed_at = excluded.claimed_at)`,
 				item.systemId,
 				item.url,
+				item.kind,
+				item.enqueuedAt,
+				item.attempts,
+				row.last_crawled,
+				row.last_indexed,
+				now,
+				row.item_key,
 			);
 			if (changes === 1) {
 				claimed.push({ ...item, status: "claimed", attempts: item.attempts + 1, claimedAt: now });

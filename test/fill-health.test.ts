@@ -822,7 +822,6 @@ async function fleetEnv(now: string, skip: readonly SystemId[] = []): Promise<Fl
 	const kv = memoryKV();
 	const db = memoryD1();
 	const queue = new D1PageQueue(db);
-	await queue.ensure();
 	const skipSet = new Set(skip);
 	const items = SYSTEM_IDS.filter((systemId) => !skipSet.has(systemId)).map((systemId) => ({
 		systemId,

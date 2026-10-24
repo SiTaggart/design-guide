@@ -36,7 +36,6 @@ function json(status: number, body: unknown): Response {
 
 async function queue(): Promise<D1PageQueue> {
 	const pageQueue = new D1PageQueue(memoryD1());
-	await pageQueue.ensure();
 	return pageQueue;
 }
 
@@ -586,7 +585,6 @@ describe("orphan prune", () => {
 	it("does not prune when a running discover fails before the crawl completes", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const orphan = "https://primer.style/still-there";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url: orphan, kind: "reindex" }], NOW);
 		await pageQueue.insertRun({
@@ -627,7 +625,6 @@ describe("drain wipe bar", () => {
 	it("leaves the previous page in place when indexing throws", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const url = "https://primer.style/components/select";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
 		await pageQueue.complete(
@@ -683,7 +680,6 @@ describe("held index clock", () => {
 			batch: raw.batch.bind(raw),
 		} as D1Database;
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const old = "2026-01-02T00:00:00.000Z";
 		const urls = [
 			"https://paste-dsys.com/components/button",
@@ -853,7 +849,6 @@ describe("continuous fill", () => {
 	it("indexes a batch while older pages stay queued and does not send fail mail", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kv = memoryKV();
 		const sent: Array<{ subject?: string }> = [];
 		const { env } = envWithIndex(fixtureChunks, true, {
@@ -1418,7 +1413,6 @@ describe("live map prune", () => {
 	it("does not delete a still-live doc when this crawl could not replace it", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const blurry = "https://primer.style/blurry";
 		const gone = "https://primer.style/gone";
 		await pageQueue.enqueueUpsert(
@@ -1531,7 +1525,6 @@ describe("park stickiness", () => {
 	it("does not unpark a stub because older done rows are still in the queue", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: kv,
@@ -1608,7 +1601,6 @@ describe("indexed seed hash", () => {
 	it("writes the seed hash only after the current refresh is fully indexed", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: kv,
@@ -1663,7 +1655,6 @@ describe("indexed seed hash", () => {
 	it("leaves the hash stale when discover for the new seed fails", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: kv,
@@ -1708,7 +1699,6 @@ describe("exhausted failures", () => {
 	it("marks status failed when every remaining page has exhausted retries", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kv = memoryKV();
 		const sent: Array<{ subject?: string }> = [];
 		const { env } = envWithIndex(fixtureChunks, true, {
@@ -1810,7 +1800,6 @@ describe("page cap recovery", () => {
 			return exec(sql);
 		}) as D1Database["exec"];
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await expect(pageQueue.capDefers()).resolves.toEqual({});
 		await expect(pageQueue.seedRefreshes()).resolves.toEqual({});
 		await expect(pageQueue.recoveryAttempts()).resolves.toEqual({});
@@ -1819,7 +1808,6 @@ describe("page cap recovery", () => {
 	it("enqueues pages from a capped crawl and does not prune the previous url", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const previous = "https://paste-dsys.com/old";
 		await pageQueue.enqueueUpsert([{ systemId: "paste", url: previous, kind: "reindex" }], "2020-01-01T00:00:00.000Z");
 		await pageQueue.complete(
@@ -1885,7 +1873,6 @@ describe("page cap recovery", () => {
 	it("defers a capped seed with no usable pages so the next tick discovers another drifted seed", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -1938,7 +1925,6 @@ describe("page cap recovery", () => {
 	it("fails an errored crawl even when finished is past the page cap", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -1983,7 +1969,6 @@ describe("page cap recovery", () => {
 	it("saves a capped cursor after each page and resumes there on the next tick", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -2054,7 +2039,6 @@ describe("page cap recovery", () => {
 	it("keeps a capped discover run when the page budget is spent before the cursor is done", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -2131,7 +2115,6 @@ describe("page cap recovery", () => {
 	it("clears a page-limit fail by queueing capped pages and discovering the next seed", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: kv,

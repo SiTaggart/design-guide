@@ -68,7 +68,6 @@ describe("GET /status", () => {
 		const kv = memoryKV();
 		const db = memoryD1();
 		const queue = new D1PageQueue(db);
-		await queue.ensure();
 		await queue.enqueueUpsert(
 			[
 				{ systemId: "primer", url: "https://primer.style/a", kind: "reindex" },
@@ -216,7 +215,6 @@ describe("GET /status", () => {
 	it("rejects writes on /status and /v1/index-status", async () => {
 		const kv = memoryKV();
 		const db = memoryD1();
-		await new D1PageQueue(db).ensure();
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });
 		await writeStatus(env, { ...emptyStatus(false), state: "ok", trigger: "recrawl" });
 		const before = kv.store.get("status");

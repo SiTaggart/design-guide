@@ -8,7 +8,8 @@ import {
 	sendStartIndexMail,
 } from "./mail.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
-import { D1PageQueue, type QueueDepths } from "./page-queue.ts";
+import { D1_STEP_RETRIES, type D1QueueOptions } from "./d1-step.ts";
+import { D1PageQueue, emptyDepths, type QueueDepths } from "./page-queue.ts";
 import { systemSeedHash } from "./seed-hash.ts";
 import { clearPark, readParks } from "./parks.ts";
 import { clearRetrievalHold } from "./retrieval-hold.ts";
@@ -41,6 +42,7 @@ export async function fillTick(
 	cron: string,
 	now = new Date(),
 	discoverDeps: Partial<DiscoverDeps> = {},
+	options?: Pick<D1QueueOptions, "sleep">,
 ): Promise<void> {
 	if (!env.INDEX || !env.PAGE_QUEUE) {
 		console.log(JSON.stringify({ event: "index_cron_skip", cron, reason: "unbound" }));
@@ -61,23 +63,33 @@ export async function fillTick(
 		return;
 	}
 
-	const discover = await discoverTick(env, cron, now, discoverDeps);
+	const queueOptions: D1QueueOptions = {
+		retries: D1_STEP_RETRIES,
+		...(options?.sleep ? { sleep: options.sleep } : {}),
+	};
+	const discover = await discoverTick(env, cron, now, discoverDeps, queueOptions);
 	let drain: DrainCounts = { claimed: 0, indexed: 0, failed: 0 };
 	let drainError: string | undefined;
 	try {
 		drain = await drainTick({
-			queue: new D1PageQueue(env.PAGE_QUEUE),
+			queue: new D1PageQueue(env.PAGE_QUEUE, queueOptions),
 			auth,
 			now: now.toISOString(),
 		});
 	} catch (error) {
 		drainError = errorMessage(error);
 	}
-	const queue = new D1PageQueue(env.PAGE_QUEUE);
-	await queue.ensure();
-	await unparkFilled(env, queue, discover.action === "parked" ? discover.systemId : undefined);
-	await noteIndexedSeeds(env, queue, now);
-	const depths = await queue.depths();
+	let depths = emptyDepths();
+	try {
+		const pageQueue = new D1PageQueue(env.PAGE_QUEUE, queueOptions);
+		await unparkFilled(env, pageQueue, discover.action === "parked" ? discover.systemId : undefined);
+		if (discover.action !== "failed" && !drainError) {
+			await noteIndexedSeeds(env, pageQueue, now);
+		}
+		depths = await pageQueue.depths();
+	} catch (error) {
+		drainError = drainError ?? errorMessage(error);
+	}
 	await noteFill(env, discover, drain, depths, drainError, now);
 	await mailFill(env, discover, drain, depths, drainError, now);
 	console.log(

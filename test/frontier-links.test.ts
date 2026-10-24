@@ -39,7 +39,6 @@ describe("frontierLinks", () => {
 	it("does not pick a query-string variant when the path was already staged", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.stageUrl("cloudscape", "https://cloudscape.design/components/alert");
 		await pageQueue.addFrontier("cloudscape", [
 			"https://cloudscape.design/components/alert?tabId=1",
@@ -64,7 +63,6 @@ describe("frontierLinks", () => {
 		const links = frontierLinks(markdown, "https://paste-dsys.com/components/alert", seedById("paste"));
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
-		await pageQueue.ensure();
 		await pageQueue.addFrontier("paste", links);
 		const stored = await db
 			.prepare("SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC")

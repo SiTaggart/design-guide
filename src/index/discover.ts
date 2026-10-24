@@ -19,6 +19,7 @@ import { parkedSystemIds, readParks, writePark, type Parks } from "./parks.ts";
 import { isStubGeneration, fitsItem } from "./reindex.ts";
 import { driftedSystems, systemSeedHash } from "./seed-hash.ts";
 import { isRecoveryCron } from "./trigger.ts";
+import type { D1QueueOptions } from "./d1-step.ts";
 import {
 	D1PageQueue,
 	isDue,
@@ -277,9 +278,10 @@ export async function discoverTick(
 	cron: string,
 	now = new Date(),
 	deps: Partial<DiscoverDeps> = {},
+	queueOptions?: D1QueueOptions,
 ): Promise<DiscoverTickResult> {
 	try {
-		return await runDiscover(env, cron, now, { ...defaultDeps, ...deps });
+		return await runDiscover(env, cron, now, { ...defaultDeps, ...deps }, queueOptions);
 	} catch (error) {
 		return { action: "failed", error: error instanceof Error ? error.message : String(error) };
 	}
@@ -290,6 +292,7 @@ async function runDiscover(
 	cron: string,
 	now: Date,
 	deps: DiscoverDeps,
+	queueOptions?: D1QueueOptions,
 ): Promise<DiscoverTickResult> {
 	if (!env.PAGE_QUEUE) {
 		return { action: "skip", reason: "unbound" };
@@ -302,8 +305,7 @@ async function runDiscover(
 	if (parksRead.kind === "unread") {
 		return { action: "skip", reason: "unread-parks" };
 	}
-	const queue = new D1PageQueue(env.PAGE_QUEUE);
-	await queue.ensure();
+	const queue = new D1PageQueue(env.PAGE_QUEUE, queueOptions);
 	const running = await queue.running();
 	if (running) {
 		return continueDiscover(env, queue, auth, running, now, deps);

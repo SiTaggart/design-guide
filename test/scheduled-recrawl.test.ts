@@ -88,7 +88,6 @@ describe("scheduled recrawl", () => {
 	it("re-enqueues every page a completed recrawl fetches, then drain writes a new index time", async () => {
 		const db = memoryD1();
 		const queue = new D1PageQueue(db);
-		await queue.ensure();
 		const keep = "https://paste-dsys.com/components/button";
 		const removed = "https://paste-dsys.com/components/removed";
 		const added = "https://paste-dsys.com/components/alert";
@@ -189,7 +188,6 @@ describe("scheduled recrawl", () => {
 	it("starts a permanently capped system at most four times in seven days and still discovers another drifted system", async () => {
 		const db = memoryD1();
 		const queue = new D1PageQueue(db);
-		await queue.ensure();
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: kv,
@@ -257,7 +255,6 @@ describe("scheduled recrawl", () => {
 	it("starts a system whose follow-up always errors at most four times in seven days", async () => {
 		const db = memoryD1();
 		const queue = new D1PageQueue(db);
-		await queue.ensure();
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: kv,
@@ -329,7 +326,6 @@ describe("scheduled recrawl", () => {
 	it("clears the backoff streak on a complete run so the next incomplete waits one hour", async () => {
 		const db = memoryD1();
 		const queue = new D1PageQueue(db);
-		await queue.ensure();
 		const { env } = envWithIndex(fixtureChunks, true, {
 			INDEX: memoryKV(),
 			PAGE_QUEUE: db,
@@ -405,7 +401,6 @@ describe("scheduled recrawl", () => {
 async function catalog(input: { pasteDays: number }): Promise<{ env: ReturnType<typeof envWithIndex>["env"]; queue: D1PageQueue }> {
 	const db = memoryD1();
 	const queue = new D1PageQueue(db);
-	await queue.ensure();
 	const kv = memoryKV();
 	const { env } = envWithIndex(fixtureChunks, true, {
 		INDEX: kv,
@@ -428,7 +423,6 @@ async function catalog(input: { pasteDays: number }): Promise<{ env: ReturnType<
 async function cappedRecrawlClock(): Promise<void> {
 	const db = memoryD1();
 	const queue = new D1PageQueue(db);
-	await queue.ensure();
 	const old = ago(31);
 	const keep = "https://paste-dsys.com/components/button";
 	const removed = "https://paste-dsys.com/components/removed";
@@ -529,7 +523,6 @@ async function cappedRecrawlClock(): Promise<void> {
 async function ceilingRecrawl(): Promise<void> {
 	const db = memoryD1();
 	const queue = new D1PageQueue(db);
-	await queue.ensure();
 	await db.exec(`WITH RECURSIVE n(i) AS (
 		SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ${CRAWL_RUNAWAY_PAGES}
 	) INSERT INTO discover_indexable (system_id, url)
@@ -581,7 +574,6 @@ async function ceilingRecrawl(): Promise<void> {
 async function failedFollowUpRecrawl(): Promise<void> {
 	const db = memoryD1();
 	const queue = new D1PageQueue(db);
-	await queue.ensure();
 	const old = ago(31);
 	const removed = "https://paste-dsys.com/components/removed";
 	const good = "https://paste-dsys.com/components/good";

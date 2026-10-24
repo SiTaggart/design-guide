@@ -97,7 +97,6 @@ async function readCapDefers(env: WorkerEnv): Promise<Record<string, CapDeferMar
 	}
 	try {
 		const queue = new D1PageQueue(env.PAGE_QUEUE);
-		await queue.ensure();
 		return await queue.capDeferMarks();
 	} catch (error) {
 		console.log(
