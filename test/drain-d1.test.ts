@@ -5,8 +5,7 @@ import { SYSTEM_IDS } from "../src/config/types.ts";
 import { D1_STEP_RETRIES } from "../src/index/d1-step.ts";
 import { fillTick } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
-import { drainTick } from "../src/index/drain.ts";
-import { D1PageQueue, FILL_LEASE_STALE_MS, FILL_LEASE_WINDOW, type PageQueue } from "../src/index/page-queue.ts";
+import { D1PageQueue, FILL_LEASE_STALE_MS, FILL_LEASE_WINDOW, FILL_TICK_DEADLINE_MS } from "../src/index/page-queue.ts";
 import { systemSeedHash } from "../src/index/seed-hash.ts";
 import { LAST_INDEXED_HASH_KEY, STATUS_KEY } from "../src/index/status.ts";
 import { DRIFT_CRON } from "../src/index/trigger.ts";
@@ -479,22 +478,131 @@ describe("drain D1 steps", () => {
 	it("keeps the fill lease past a full tick and inside the next cron", () => {
 		const window = FILL_LEASE_WINDOW;
 		expect(window.tickDeadlineMs + window.maxBackoffMs + window.marginMs).toBeLessThan(window.ttlMs);
+		expect(window.ttlMs).toBeLessThan(5 * 60 * 1000);
 		expect(window.ttlMs).toBe(FILL_LEASE_STALE_MS);
 		expect(window.ttlMs).toBeLessThan(window.cronIntervalMs);
+		expect(window.maxBackoffMs).toBe(40_000);
 	});
 
-	it("stops claiming new pages after the tick deadline", async () => {
-		const claim = vi.fn(async () => {
-			throw new Error("claimed after the deadline");
+	it("a tick that reaches the deadline mid-drain does no further D1 writes and releases the lease", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const kv = memoryKV();
+		await kv.put(LAST_INDEXED_HASH_KEY, "keep-me");
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
 		});
-		const counts = await drainTick({
-			queue: { claim } as unknown as PageQueue,
-			auth: { accountId: "acct", apiToken: "token" },
-			now: NOW,
-			claimDeadlineMs: Date.now() - 1,
+		await settle(env, queue);
+		await queue.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		const { sent } = mockIndex();
+		env.EMAIL = {
+			send: async (message) => {
+				sent.push(message as { subject?: string; text?: string });
+				return { messageId: "m" };
+			},
+		};
+		let clock = Date.now();
+		const started = clock;
+		vi.spyOn(Date, "now").mockImplementation(() => clock);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				clock = started + FILL_TICK_DEADLINE_MS;
+				return json({ result: "# button" });
+			}),
+		);
+		const calls: string[] = [];
+		const lateWrites: string[] = [];
+		const sleeps: number[] = [];
+		env.PAGE_QUEUE = wrapStatement(db, async (sql, op) => {
+			calls.push(sql);
+			const writing = /^\s*(insert|update|delete)\b/i.test(sql);
+			if (writing && clock >= started + FILL_TICK_DEADLINE_MS && !/delete\s+from\s+fill_lease/i.test(sql)) {
+				lateWrites.push(sql);
+				throw new Error(TRANSIENT);
+			}
+			return op();
 		});
-		expect(counts).toEqual({ claimed: 0, indexed: 0, failed: 0 });
-		expect(claim).not.toHaveBeenCalled();
+		await fillTick(env, DRIFT_CRON, new Date(NOW), {}, {
+			sleep: async (ms) => {
+				sleeps.push(ms);
+			},
+		});
+		expect(lateWrites).toEqual([]);
+		expect(sleeps).toEqual([]);
+		expect(calls.filter((sql) => /delete\s+from\s+fill_lease/i.test(sql))).toHaveLength(1);
+		expect(sent).toEqual([]);
+		const row = await db
+			.prepare("SELECT status FROM page_work WHERE url = ?")
+			.bind(PAGE)
+			.first<{ status: string }>();
+		expect(row).toEqual({ status: "claimed" });
+		expect((await db.prepare("SELECT COUNT(*) AS n FROM fill_lease").first<{ n: number }>())?.n).toBe(0);
+		expect(await new D1PageQueue(db).claimFillLease(crypto.randomUUID(), NOW)).toBe(true);
+	});
+
+	it("a late tick cannot change a page or lease held by the next owner", async () => {
+		const db = memoryD1();
+		const ownerA = crypto.randomUUID();
+		const first = new D1PageQueue(db);
+		expect(await first.claimFillLease(ownerA, NOW)).toBe(true);
+		await first.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		const claimed = await first.claim(10, NOW);
+		const item = claimed[0];
+		expect(item?.claimToken).toBeTruthy();
+
+		const takeover = new Date(Date.parse(NOW) + 15 * 60 * 1000 + 1000).toISOString();
+		const ownerB = crypto.randomUUID();
+		const second = new D1PageQueue(db);
+		expect(await second.claimFillLease(ownerB, takeover)).toBe(true);
+		const reclaimed = await second.claim(10, takeover);
+		expect(reclaimed[0]?.claimToken).toBeTruthy();
+		expect(reclaimed[0]?.claimToken).not.toBe(item?.claimToken);
+
+		const effects: Array<{ sql: string; changes: number }> = [];
+		const late = new D1PageQueue(
+			wrapStatement(db, async (sql, op) => {
+				const result = (await op()) as { meta?: { changes?: number } };
+				if (result?.meta?.changes !== undefined) {
+					effects.push({ sql, changes: result.meta.changes });
+				}
+				return result;
+			}),
+		);
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		expect(await late.complete(item!, { lastCrawled: NOW, lastIndexed: NOW }, "primer/page/late.md")).toBe(false);
+		expect(await late.fail(item!, "late")).toBe(false);
+		expect(await late.releaseForRetry(item!, "primer/page/late.md")).toBe(false);
+		await late.releaseFillLease(ownerA);
+
+		expect(effects.length).toBeGreaterThanOrEqual(4);
+		expect(effects.every((effect) => effect.changes === 0)).toBe(true);
+		expect(effects.some((effect) => /claim_token/i.test(effect.sql))).toBe(true);
+		expect(effects.some((effect) => /delete\s+from\s+fill_lease/i.test(effect.sql) && /owner/i.test(effect.sql))).toBe(
+			true,
+		);
+		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(true);
+		expect(logs.some((line) => line.includes('"event":"index_mail_failed"'))).toBe(false);
+
+		const row = await db
+			.prepare("SELECT status, attempts, claim_token FROM page_work WHERE url = ?")
+			.bind(PAGE)
+			.first<{ status: string; attempts: number; claim_token: string }>();
+		expect(row).toEqual({
+			status: "claimed",
+			attempts: reclaimed[0]?.attempts,
+			claim_token: reclaimed[0]?.claimToken,
+		});
+		const lease = await db
+			.prepare("SELECT owner, claimed_at FROM fill_lease WHERE id = 'fill'")
+			.first<{ owner: string; claimed_at: string }>();
+		expect(lease).toEqual({ owner: ownerB, claimed_at: takeover });
 	});
 
 	it("releases the fill lease after the retry budget is exhausted so the next tick can claim it", async () => {

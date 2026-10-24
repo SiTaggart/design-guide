@@ -13,10 +13,10 @@ const FILL_LEASE_ID = "fill";
 
 /**
  * A cron worker can run for 15 minutes. The fill lease used to expire at that same age, so a
- * slow tick could lose the lease while it was still writing. The tick stops claiming new pages
- * at tickDeadlineMs. The shared retry budget then allows one statement maxBackoffMs. marginMs
- * keeps that whole tick inside the lease. ttlMs stays under the 5 minute cron, so a release
- * that never lands is taken over about one tick later.
+ * slow tick could lose the lease while it was still writing. The queue stops starting D1 writes
+ * and retry sleeps at tickDeadlineMs. maxBackoffMs is the longest sleep that can still start
+ * before that deadline. marginMs is the room for one page operation already in flight. ttlMs
+ * stays under the 5 minute cron, so a release that never lands is taken over about one tick later.
  */
 const FILL_TICK_DEADLINE = 3 * 60 * 1000;
 const FILL_LEASE_MARGIN_MS = 30 * 1000;
@@ -197,6 +197,18 @@ async function runOnce(step: D1QueryStep, sql: string, ...params: unknown[]): Pr
 async function runBypass(step: D1QueryStep, sql: string, ...params: unknown[]): Promise<number> {
 	const result = await d1Query<{ meta?: { changes?: number } }>(step, false, "run", sql, params, true);
 	return result.meta?.changes ?? 0;
+}
+
+function logLostClaim(
+	step: D1QueryStep,
+	op: string,
+	item: { systemId: string; url: string },
+	changes: number,
+): void {
+	if (changes === 1 || step.tick?.budget.deadline) {
+		return;
+	}
+	console.log(JSON.stringify({ event: "page_claim_lost", op, system: item.systemId, url: item.url }));
 }
 
 export class D1PageQueue implements PageQueue {
@@ -400,7 +412,7 @@ export class D1PageQueue implements PageQueue {
 				kept.push(item);
 				continue;
 			}
-			await run(
+			const changes = await run(
 				this.step,
 				`UPDATE page_work
 				 SET status = 'pending', attempts = attempts - 1, claim_token = NULL
@@ -411,7 +423,11 @@ export class D1PageQueue implements PageQueue {
 				item.claimedAt,
 				item.claimToken,
 			);
-			console.log(JSON.stringify({ event: "page_claim_yield", system: item.systemId, url: item.url }));
+			if (changes === 1) {
+				console.log(JSON.stringify({ event: "page_claim_yield", system: item.systemId, url: item.url }));
+			} else {
+				logLostClaim(this.step, "yield", item, changes);
+			}
 		}
 		return kept;
 	}
@@ -446,6 +462,7 @@ export class D1PageQueue implements PageQueue {
 							item.claimToken,
 						]),
 			);
+			logLostClaim(this.step, "complete", item, changes);
 			return changes === 1;
 		}
 		await run(
@@ -486,6 +503,7 @@ export class D1PageQueue implements PageQueue {
 				item.claimedAt,
 				item.claimToken,
 			);
+			logLostClaim(this.step, "fail", item, changes);
 			return changes === 1;
 		}
 		await run(
@@ -942,6 +960,7 @@ export class D1PageQueue implements PageQueue {
 			item.attempts,
 			CLAIM_EXPIRED,
 		);
+		logLostClaim(this.step, "releaseForRetry", item, changes);
 		return changes === 1;
 	}
 
@@ -1034,7 +1053,15 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async releaseFillLease(owner: string): Promise<void> {
-		await runBypass(this.step, "DELETE FROM fill_lease WHERE id = ? AND owner = ?", FILL_LEASE_ID, owner);
+		const changes = await runBypass(
+			this.step,
+			"DELETE FROM fill_lease WHERE id = ? AND owner = ?",
+			FILL_LEASE_ID,
+			owner,
+		);
+		if (changes === 0) {
+			console.log(JSON.stringify({ event: "fill_lease_release_missed", owner }));
+		}
 	}
 }
 

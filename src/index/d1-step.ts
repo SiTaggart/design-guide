@@ -11,18 +11,23 @@ export type D1StepRetries = typeof D1_STEP_RETRIES;
 export type D1TickBudget = {
 	exhausted: boolean;
 	error?: unknown;
+	/** Set once the tick deadline has refused a write or a retry sleep. */
+	deadline: boolean;
 };
 
 export type D1Tick = {
 	retries: D1StepRetries;
 	sleep?: (ms: number) => Promise<void>;
 	budget: D1TickBudget;
+	/** Wall time after which this tick starts no D1 write and no retry sleep. */
+	deadlineMs?: number;
 };
 
 export type D1QueueOptions = {
 	retries?: D1StepRetries;
 	sleep?: (ms: number) => Promise<void>;
 	budget?: D1TickBudget;
+	deadlineMs?: number;
 };
 
 export type D1QueryStep = {
@@ -31,7 +36,7 @@ export type D1QueryStep = {
 };
 
 export function createD1TickBudget(): D1TickBudget {
-	return { exhausted: false };
+	return { exhausted: false, deadline: false };
 }
 
 export function tickFrom(options?: D1QueueOptions): D1Tick | undefined {
@@ -41,6 +46,7 @@ export function tickFrom(options?: D1QueueOptions): D1Tick | undefined {
 	return {
 		retries: options.retries,
 		...(options.sleep ? { sleep: options.sleep } : {}),
+		...(options.deadlineMs !== undefined ? { deadlineMs: options.deadlineMs } : {}),
 		budget: options.budget ?? createD1TickBudget(),
 	};
 }
@@ -64,13 +70,17 @@ export function budgetError(budget: D1TickBudget): Error {
 	return new NonRetryableError("D1 retry budget exhausted");
 }
 
+/**
+ * Longest single retry sleep. A sleep starts only while the tick is still before its deadline,
+ * so the backoff that can run past the deadline is one sleep, not the whole schedule.
+ */
 export function d1MaxBackoffMs(retries: D1StepRetries = D1_STEP_RETRIES): number {
 	const base = delayMs(retries.delay);
-	let total = 0;
+	let max = 0;
 	for (let attempt = 0; attempt < retries.limit; attempt += 1) {
-		total += backoffMs(base, attempt, retries.backoff);
+		max = Math.max(max, backoffMs(base, attempt, retries.backoff));
 	}
-	return total;
+	return max;
 }
 
 function delayMs(delay: D1StepRetries["delay"]): number {
@@ -94,6 +104,25 @@ function defaultSleep(ms: number): Promise<void> {
 	});
 }
 
+class TickDeadlineStop extends Error {
+	constructor() {
+		super("D1 tick deadline");
+		this.name = "TickDeadlineStop";
+	}
+}
+
+export function pastTickDeadline(tick: D1Tick | undefined): boolean {
+	return tick?.deadlineMs !== undefined && Date.now() >= tick.deadlineMs;
+}
+
+function stopForDeadline(tick: D1Tick): never {
+	if (!tick.budget.deadline) {
+		tick.budget.deadline = true;
+		console.log(JSON.stringify({ event: "d1_tick_deadline", deadlineMs: tick.deadlineMs }));
+	}
+	throw new TickDeadlineStop();
+}
+
 export async function d1Step<T>(name: string, tick: D1Tick, run: () => Promise<T>): Promise<T> {
 	if (tick.budget.exhausted) {
 		throw budgetError(tick.budget);
@@ -102,9 +131,15 @@ export async function d1Step<T>(name: string, tick: D1Tick, run: () => Promise<T
 	const base = delayMs(tick.retries.delay);
 	let last: unknown;
 	for (let attempt = 0; attempt <= tick.retries.limit; attempt += 1) {
+		if (pastTickDeadline(tick)) {
+			stopForDeadline(tick);
+		}
 		try {
 			return await run();
 		} catch (error) {
+			if (error instanceof TickDeadlineStop) {
+				throw error;
+			}
 			if (error instanceof NonRetryableError || !isTransientD1Error(error)) {
 				throw error instanceof NonRetryableError ? error : new NonRetryableError(errorMessage(error));
 			}
@@ -113,6 +148,9 @@ export async function d1Step<T>(name: string, tick: D1Tick, run: () => Promise<T
 				tick.budget.exhausted = true;
 				tick.budget.error = error;
 				break;
+			}
+			if (pastTickDeadline(tick)) {
+				stopForDeadline(tick);
 			}
 			const wait = backoffMs(base, attempt, tick.retries.backoff);
 			console.log(JSON.stringify({ event: "d1_step_retry", step: name, attempt: attempt + 1, delayMs: wait }));
@@ -153,10 +191,35 @@ export async function d1Query<T>(
 	if (step.tick?.budget.exhausted && !bypassBudget) {
 		throw budgetError(step.tick.budget);
 	}
+	// One deadline for the whole tick. Past it, no new write starts. Reads still run.
+	// Lease release passes bypassBudget so it can run from finally.
+	if (!bypassBudget && method === "run" && step.tick && pastTickDeadline(step.tick)) {
+		try {
+			stopForDeadline(step.tick);
+		} catch (error) {
+			if (error instanceof TickDeadlineStop) {
+				return { meta: { changes: 0 } } as T;
+			}
+			throw error;
+		}
+	}
 	const run = () => invoke(step.db, method, sql, params);
 	if (!retry || !step.tick) {
 		return run() as Promise<T>;
 	}
 	const name = sql.trim().split(/\s+/, 1)[0]?.toLowerCase() || "d1";
-	return d1Step(name, step.tick, run) as Promise<T>;
+	try {
+		return (await d1Step(name, step.tick, run)) as T;
+	} catch (error) {
+		if (!(error instanceof TickDeadlineStop)) {
+			throw error;
+		}
+		if (method === "run") {
+			return { meta: { changes: 0 } } as T;
+		}
+		if (method === "all") {
+			return { results: [] } as T;
+		}
+		return null as T;
+	}
 }

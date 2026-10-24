@@ -175,13 +175,9 @@ export async function drainTick(input: {
 	auth: CrawlAuth;
 	now: string;
 	limit?: number;
-	claimDeadlineMs?: number;
 	fetchMarkdown?: (url: string) => Promise<string>;
 	indexPage?: typeof indexQueuedPage;
 }): Promise<DrainCounts> {
-	if (input.claimDeadlineMs !== undefined && Date.now() >= input.claimDeadlineMs) {
-		return { claimed: 0, indexed: 0, failed: 0 };
-	}
 	const itemsAuth: ItemsAuth = { ...input.auth, instanceId: INSTANCE_ID };
 	const claimed = await input.queue.claim(input.limit ?? DRAIN_LIMIT, input.now);
 	if (claimed.length === 0) {

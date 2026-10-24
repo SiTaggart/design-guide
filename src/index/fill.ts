@@ -64,14 +64,15 @@ export async function fillTick(
 	}
 
 	const budget = createD1TickBudget();
+	const deadlineMs = Date.now() + FILL_TICK_DEADLINE_MS;
 	const queueOptions: D1QueueOptions = {
 		retries: D1_STEP_RETRIES,
 		budget,
+		deadlineMs,
 		...(options?.sleep ? { sleep: options.sleep } : {}),
 	};
 	const queue = new D1PageQueue(env.PAGE_QUEUE, queueOptions);
 	const owner = crypto.randomUUID();
-	const claimDeadlineMs = Date.now() + FILL_TICK_DEADLINE_MS;
 	let held = false;
 	try {
 		try {
@@ -97,7 +98,6 @@ export async function fillTick(
 				queue: new D1PageQueue(env.PAGE_QUEUE, queueOptions),
 				auth,
 				now: now.toISOString(),
-				claimDeadlineMs,
 			});
 		} catch (error) {
 			drainError = errorMessage(error);
