@@ -10,7 +10,7 @@ import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import { D1PageQueue, FILL_LEASE_STALE_MS, FILL_LEASE_WINDOW, FILL_TICK_DEADLINE_MS } from "../src/index/page-queue.ts";
 import { seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
 import { PARKS_KEY } from "../src/index/parks.ts";
-import { LAST_INDEXED_HASH_KEY, STATUS_KEY } from "../src/index/status.ts";
+import { LAST_INDEXED_HASH_KEY, readStatus, STATUS_KEY } from "../src/index/status.ts";
 import { DRIFT_CRON } from "../src/index/trigger.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
 import { memoryD1 } from "./helpers/d1.ts";
@@ -722,6 +722,188 @@ describe("drain D1 steps", () => {
 				.bind(keepUrl)
 				.first<{ status: string; claim_token: string | null; last_indexed: string | null }>(),
 		).toEqual({ status: "done", claim_token: kept?.claimToken, last_indexed: null });
+	});
+
+	it("a done row that still has a claim token is not an open claim", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const doneUrl = "https://primer.style/components/done-token";
+		const token = "done-holder";
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, claimed_at, claim_token, last_indexed)
+				 VALUES ('primer', ?, 'reindex', 'done', ?, 1, ?, ?, ?)`,
+			)
+			.bind(doneUrl, OLD, OLD, token, OLD)
+			.run();
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, { INDEX: kv, PAGE_QUEUE: db });
+
+		expect(await queue.claim(10, NOW)).toEqual([]);
+		await queue.releaseOpenClaims(token);
+		await queue.releaseOpenClaims("someone-else");
+
+		expect(
+			await db
+				.prepare("SELECT status, claim_token, claimed_at FROM page_work WHERE url = ?")
+				.bind(doneUrl)
+				.first<{ status: string; claim_token: string | null; claimed_at: string | null }>(),
+		).toEqual({ status: "done", claim_token: token, claimed_at: OLD });
+		expect(await queue.depths()).toEqual({ pending: 0, claimed: 0, failed: 0, done: 1 });
+		expect((await queue.freshness()).find((row) => row.system === "primer")).toMatchObject({
+			pending: 0,
+			claimed: 0,
+			failed: 0,
+			done: 1,
+		});
+		const status = await readStatus(env);
+		expect(status.queue).toEqual({ pending: 0, claimed: 0, failed: 0, done: 1 });
+		expect(status.freshness.find((row) => row.system === "primer")).toMatchObject({ claimed: 0, done: 1 });
+	});
+
+	it("a re-enqueued pending row with a leftover token is not our finished release", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const token = "done-holder";
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, claimed_at, claim_token)
+				 VALUES ('primer', ?, 'reindex', 'done', ?, 1, ?, ?)`,
+			)
+			.bind(PAGE, OLD, NOW, token)
+			.run();
+		await queue.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], NOW);
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		expect(
+			await queue.releaseForRetry(
+				{ systemId: "primer", url: PAGE, attempts: 1, claimedAt: NOW, claimToken: token },
+				"primer/page/retry.md",
+			),
+		).toBe(false);
+		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(true);
+		expect(
+			await db
+				.prepare("SELECT status FROM page_work WHERE url = ?")
+				.bind(PAGE)
+				.first<{ status: string }>(),
+		).toEqual({ status: "pending" });
+		const [claimed] = await queue.claim(1, NOW);
+		expect(claimed?.url).toBe(PAGE);
+		expect(claimed?.claimToken).toBeTruthy();
+		expect(claimed?.claimToken).not.toBe(token);
+	});
+
+	it("does not log a lost claim when a fail commits and then reports a transient error", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		await queue.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		const [item] = await queue.claim(1, NOW);
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		const wrapped = new D1PageQueue(commitThenThrow(db, /set status = 'failed'/i), {
+			retries: D1_STEP_RETRIES,
+			sleep: async () => undefined,
+		});
+		expect(await wrapped.fail(item!, "render failed")).toBe(false);
+		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(false);
+		expect(
+			await db
+				.prepare("SELECT status, claim_token, error FROM page_work WHERE url = ?")
+				.bind(PAGE)
+				.first<{ status: string; claim_token: string | null; error: string | null }>(),
+		).toEqual({ status: "failed", claim_token: item?.claimToken, error: "render failed" });
+	});
+
+	it("does not log a lost claim when a yield commits and then reports a transient error", async () => {
+		const db = memoryD1();
+		const setup = new D1PageQueue(db);
+		const holdUrl = `${PAGE}/`;
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, claimed_at, claim_token)
+				 VALUES ('primer', ?, 'reindex', 'claimed', ?, 1, ?, 'other-holder')`,
+			)
+			.bind(holdUrl, OLD, NOW)
+			.run();
+		await setup.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		let token: string | null = null;
+		let left = 1;
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		const queue = new D1PageQueue(
+			wrapStatement(db, async (sql, op) => {
+				if (left > 0 && /attempts = attempts - 1/i.test(sql)) {
+					left -= 1;
+					const row = await db
+						.prepare("SELECT claim_token FROM page_work WHERE url = ?")
+						.bind(PAGE)
+						.first<{ claim_token: string | null }>();
+					token = row?.claim_token ?? null;
+					await op();
+					throw new Error(TRANSIENT);
+				}
+				return op();
+			}),
+			{ retries: D1_STEP_RETRIES, sleep: async () => undefined },
+		);
+		const claimed = await queue.claim(10, NOW);
+		expect(claimed.map((item) => item.url)).not.toContain(PAGE);
+		expect(token).toBeTruthy();
+		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(false);
+		expect(
+			await db
+				.prepare("SELECT status, attempts, claim_token FROM page_work WHERE url = ?")
+				.bind(PAGE)
+				.first<{ status: string; attempts: number; claim_token: string | null }>(),
+		).toEqual({ status: "pending", attempts: 0, claim_token: token });
+		expect(
+			await db
+				.prepare("SELECT status, claim_token FROM page_work WHERE url = ?")
+				.bind(holdUrl)
+				.first<{ status: string; claim_token: string | null }>(),
+		).toEqual({ status: "claimed", claim_token: "other-holder" });
+	});
+
+	it("does not log a lost claim when a releaseForRetry commits and then reports a transient error", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		await queue.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		const [item] = await queue.claim(1, NOW);
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		const wrapped = new D1PageQueue(commitThenThrow(db, /item_key = \?/i), {
+			retries: D1_STEP_RETRIES,
+			sleep: async () => undefined,
+		});
+		expect(await wrapped.releaseForRetry(item!, "primer/page/retry.md")).toBe(false);
+		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(false);
+		expect(
+			await db
+				.prepare("SELECT status, attempts, claim_token, item_key, error FROM page_work WHERE url = ?")
+				.bind(PAGE)
+				.first<{
+					status: string;
+					attempts: number;
+					claim_token: string | null;
+					item_key: string | null;
+					error: string | null;
+				}>(),
+		).toEqual({
+			status: "pending",
+			attempts: 1,
+			claim_token: item?.claimToken,
+			item_key: "primer/page/retry.md",
+			error: null,
+		});
 	});
 
 	it("a tick that reaches the deadline mid-drain does no further D1 writes and releases the lease", async () => {
