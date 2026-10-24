@@ -16,7 +16,10 @@ const FILL_LEASE_ID = "fill";
  * slow tick could lose the lease while it was still writing. The queue stops starting D1 writes
  * and retry sleeps at tickDeadlineMs. maxBackoffMs is the longest sleep that can still start
  * before that deadline. marginMs is the room for one page operation already in flight. ttlMs
- * stays under the 5 minute cron, so a release that never lands is taken over about one tick later.
+ * is that deadline plus the longest sleep, the margin, and slack, which is 255 seconds and
+ * stays under the 5 minute cron. A release that never lands is taken over about one tick later.
+ * Pages still claimed by this tick are handed back with one bypass write in that same final
+ * path, before the lease delete, so the hand-back adds no retry sleep.
  */
 const FILL_TICK_DEADLINE = 3 * 60 * 1000;
 const FILL_LEASE_MARGIN_MS = 30 * 1000;
@@ -199,16 +202,38 @@ async function runBypass(step: D1QueryStep, sql: string, ...params: unknown[]): 
 	return result.meta?.changes ?? 0;
 }
 
-function logLostClaim(
+async function claimLanded(
+	step: D1QueryStep,
+	item: { systemId: string; url: string },
+	status: PageStatus,
+): Promise<boolean> {
+	const row = await first<{ status: string; claim_token: string | null }>(
+		step,
+		"SELECT status, claim_token FROM page_work WHERE system_id = ? AND url = ?",
+		item.systemId,
+		item.url,
+	);
+	return row !== null && row.status === status && row.claim_token === null;
+}
+
+async function guardedChanges(
 	step: D1QueryStep,
 	op: string,
 	item: { systemId: string; url: string },
 	changes: number,
-): void {
-	if (changes === 1 || step.tick?.budget.deadline) {
-		return;
+	landedStatus: PageStatus,
+): Promise<boolean> {
+	if (changes === 1) {
+		return true;
+	}
+	if (step.tick?.budget.deadline) {
+		return false;
+	}
+	if (await claimLanded(step, item, landedStatus)) {
+		return true;
 	}
 	console.log(JSON.stringify({ event: "page_claim_lost", op, system: item.systemId, url: item.url }));
+	return false;
 }
 
 export class D1PageQueue implements PageQueue {
@@ -342,6 +367,9 @@ export class D1PageQueue implements PageQueue {
 			limit,
 		);
 		const claimToken = crypto.randomUUID();
+		if (this.step.tick) {
+			this.step.tick.budget.openClaimToken = claimToken;
+		}
 		const claimed: ClaimedPage[] = [];
 		for (const row of rows) {
 			const item = toItem(row);
@@ -426,7 +454,7 @@ export class D1PageQueue implements PageQueue {
 			if (changes === 1) {
 				console.log(JSON.stringify({ event: "page_claim_yield", system: item.systemId, url: item.url }));
 			} else {
-				logLostClaim(this.step, "yield", item, changes);
+				await guardedChanges(this.step, "yield", item, changes, "pending");
 			}
 		}
 		return kept;
@@ -462,8 +490,7 @@ export class D1PageQueue implements PageQueue {
 							item.claimToken,
 						]),
 			);
-			logLostClaim(this.step, "complete", item, changes);
-			return changes === 1;
+			return guardedChanges(this.step, "complete", item, changes, "done");
 		}
 		await run(
 			this.step,
@@ -503,8 +530,7 @@ export class D1PageQueue implements PageQueue {
 				item.claimedAt,
 				item.claimToken,
 			);
-			logLostClaim(this.step, "fail", item, changes);
-			return changes === 1;
+			return guardedChanges(this.step, "fail", item, changes, "failed");
 		}
 		await run(
 			this.step,
@@ -960,8 +986,7 @@ export class D1PageQueue implements PageQueue {
 			item.attempts,
 			CLAIM_EXPIRED,
 		);
-		logLostClaim(this.step, "releaseForRetry", item, changes);
-		return changes === 1;
+		return guardedChanges(this.step, "releaseForRetry", item, changes, "pending");
 	}
 
 	async recordSeedRefresh(systemId: SystemId, seedHash: string, enqueuedAt: string): Promise<void> {
@@ -1050,6 +1075,20 @@ export class D1PageQueue implements PageQueue {
 			staleBefore,
 		);
 		return changes === 1;
+	}
+
+	async releaseOpenClaims(claimToken: string): Promise<void> {
+		await runBypass(
+			this.step,
+			`UPDATE page_work
+			 SET status = 'pending',
+			     attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+			     claimed_at = NULL,
+			     claim_token = NULL,
+			     error = NULL
+			 WHERE status = 'claimed' AND claim_token = ?`,
+			claimToken,
+		);
 	}
 
 	async releaseFillLease(owner: string): Promise<void> {

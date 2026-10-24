@@ -159,6 +159,15 @@ export async function fillTick(
 		);
 	} finally {
 		if (held || budget.exhausted) {
+			if (budget.openClaimToken) {
+				try {
+					await queue.releaseOpenClaims(budget.openClaimToken);
+				} catch (error) {
+					console.log(
+						JSON.stringify({ event: "fill_claim_release_failed", error: errorMessage(error) }),
+					);
+				}
+			}
 			try {
 				await queue.releaseFillLease(owner);
 			} catch (error) {

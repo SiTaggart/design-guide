@@ -15,6 +15,8 @@ export type D1TickBudget = {
 	deadline: boolean;
 	/** Retry sleeps already taken by any statement in this tick. */
 	retriesUsed: number;
+	/** Token for pages this tick claimed and has not finished. */
+	openClaimToken?: string;
 };
 
 export type D1Tick = {
@@ -201,7 +203,7 @@ export async function d1Query<T>(
 		throw budgetError(step.tick.budget);
 	}
 	// One deadline for the whole tick. Past it, no new write or read starts.
-	// Lease release passes bypassBudget so it can run from finally.
+	// Lease release and the open-claim release pass bypassBudget so they can run from finally.
 	// A stop throws. Callers must not treat it as an empty result.
 	if (!bypassBudget && step.tick && pastTickDeadline(step.tick)) {
 		stopForDeadline(step.tick);
