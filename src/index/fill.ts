@@ -8,7 +8,13 @@ import {
 	sendStartIndexMail,
 } from "./mail.ts";
 import { readIndexedHashes, writeIndexedHash, writeLastIndexedHashIfComplete } from "./indexed-hashes.ts";
-import { createD1TickBudget, D1_STEP_RETRIES, type D1QueueOptions } from "./d1-step.ts";
+import {
+	createD1TickBudget,
+	D1_STEP_RETRIES,
+	isTickDeadlineStop,
+	type D1QueueOptions,
+	type D1TickBudget,
+} from "./d1-step.ts";
 import { D1PageQueue, FILL_TICK_DEADLINE_MS, emptyDepths, type QueueDepths } from "./page-queue.ts";
 import { systemSeedHash } from "./seed-hash.ts";
 import { clearPark, readParks } from "./parks.ts";
@@ -29,6 +35,10 @@ const FAIL_MAIL_GAP_MS = 6 * 60 * 60 * 1000;
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function deadlineStopped(budget: D1TickBudget, error?: unknown): boolean {
+	return budget.deadline || isTickDeadlineStop(error);
 }
 
 function emptyCounts(): Crawlish {
@@ -78,6 +88,9 @@ export async function fillTick(
 		try {
 			held = await queue.claimFillLease(owner, now.toISOString());
 		} catch (error) {
+			if (deadlineStopped(budget, error)) {
+				return;
+			}
 			await stopTick(env, errorMessage(error), now);
 			return;
 		}
@@ -86,7 +99,7 @@ export async function fillTick(
 			return;
 		}
 		const discover = await discoverTick(env, cron, now, discoverDeps, queueOptions);
-		if (budget.deadline) {
+		if (deadlineStopped(budget)) {
 			return;
 		}
 		if (budget.exhausted) {
@@ -103,12 +116,12 @@ export async function fillTick(
 				now: now.toISOString(),
 			});
 		} catch (error) {
-			if (budget.deadline) {
+			if (deadlineStopped(budget, error)) {
 				return;
 			}
 			drainError = errorMessage(error);
 		}
-		if (budget.deadline) {
+		if (deadlineStopped(budget)) {
 			return;
 		}
 		if (budget.exhausted) {
@@ -125,6 +138,9 @@ export async function fillTick(
 			}
 			depths = await pageQueue.depths();
 		} catch (error) {
+			if (deadlineStopped(budget, error)) {
+				return;
+			}
 			drainError = drainError ?? errorMessage(error);
 		}
 		await noteFill(env, discover, drain, depths, drainError, now);
