@@ -2,11 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { NonRetryableError } from "cloudflare:workflows";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
-import { D1_STEP_RETRIES } from "../src/index/d1-step.ts";
+import { createD1TickBudget, D1_STEP_RETRIES } from "../src/index/d1-step.ts";
 import { fillTick } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import { D1PageQueue, FILL_LEASE_STALE_MS, FILL_LEASE_WINDOW, FILL_TICK_DEADLINE_MS } from "../src/index/page-queue.ts";
 import { systemSeedHash } from "../src/index/seed-hash.ts";
+import { PARKS_KEY } from "../src/index/parks.ts";
 import { LAST_INDEXED_HASH_KEY, STATUS_KEY } from "../src/index/status.ts";
 import { DRIFT_CRON } from "../src/index/trigger.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
@@ -448,6 +449,32 @@ describe("drain D1 steps", () => {
 		expect((await db.prepare("SELECT COUNT(*) AS n FROM page_work").first<{ n: number }>())?.n).toBe(0);
 	});
 
+	it("spends one retry schedule across statements", async () => {
+		const db = memoryD1();
+		const sleeps: number[] = [];
+		let failNext = true;
+		const queue = new D1PageQueue(
+			wrapStatement(db, async (sql, op) => {
+				if (failNext && /^\s*select\b/i.test(sql)) {
+					failNext = false;
+					throw new Error(TRANSIENT);
+				}
+				return op();
+			}),
+			{
+				retries: D1_STEP_RETRIES,
+				budget: createD1TickBudget(),
+				sleep: async (ms) => {
+					sleeps.push(ms);
+				},
+			},
+		);
+		await queue.depths();
+		failNext = true;
+		await queue.depths();
+		expect(sleeps).toEqual([10_000, 20_000]);
+	});
+
 	it("does not retry a poll-failure counter after the write commits", async () => {
 		const db = memoryD1();
 		const setup = new D1PageQueue(db);
@@ -542,6 +569,151 @@ describe("drain D1 steps", () => {
 		expect(row).toEqual({ status: "claimed" });
 		expect((await db.prepare("SELECT COUNT(*) AS n FROM fill_lease").first<{ n: number }>())?.n).toBe(0);
 		expect(await new D1PageQueue(db).claimFillLease(crypto.randomUUID(), NOW)).toBe(true);
+	});
+
+	it("a tick that hits the deadline leaves a healthy system unchanged", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const kv = memoryKV();
+		const status = JSON.stringify({ state: "ok", systems: [], parks: {} });
+		await kv.put(STATUS_KEY, status);
+		await kv.put(LAST_INDEXED_HASH_KEY, "keep-me");
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await settle(env, queue);
+		await queue.insertRun({
+			systemId: "primer",
+			kind: "reindex",
+			trigger: "recrawl",
+			jobId: "job-healthy",
+			startUrl: PAGE,
+			cursor: "done",
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await queue.stageUrl("primer", PAGE);
+		await queue.stageIndexable("primer", PAGE);
+		await queue.stageIndexable("primer", "https://primer.style/components/action-list");
+		const before = new Map(kv.store);
+		const { sent } = mockIndex();
+		env.EMAIL = {
+			send: async (message) => {
+				sent.push(message as { subject?: string; text?: string });
+				return { messageId: "m" };
+			},
+		};
+		let clock = Date.now();
+		const started = clock;
+		let sawRun = false;
+		vi.spyOn(Date, "now").mockImplementation(() => clock);
+		env.PAGE_QUEUE = wrapStatement(db, async (sql, op) => {
+			if (/from discover_run/i.test(sql) && /^\s*select\b/i.test(sql)) {
+				sawRun = true;
+			} else if (sawRun && /^\s*select\b/i.test(sql)) {
+				clock = started + FILL_TICK_DEADLINE_MS;
+			}
+			return op();
+		});
+		await fillTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => {
+				clock = started + FILL_TICK_DEADLINE_MS;
+				return { status: "completed", finished: 2, total: 2 };
+			},
+			page: async () => ({ records: [], cursor: null }),
+			start: async () => {
+				throw new Error("started after the deadline");
+			},
+			cancel: async () => undefined,
+		});
+		expect(sawRun).toBe(true);
+		expect(sent).toEqual([]);
+		expect(kv.store.get(STATUS_KEY)).toBe(before.get(STATUS_KEY));
+		expect(kv.store.get(LAST_INDEXED_HASH_KEY)).toBe("keep-me");
+		expect(kv.store.get(PARKS_KEY) ?? null).toBe(before.get(PARKS_KEY) ?? null);
+		const run = await db
+			.prepare("SELECT job_id FROM discover_run WHERE system_id = 'primer'")
+			.first<{ job_id: string }>();
+		expect(run).toEqual({ job_id: "job-healthy" });
+		const pages = await db
+			.prepare("SELECT COUNT(*) AS n FROM discover_indexable WHERE system_id = 'primer'")
+			.first<{ n: number }>();
+		expect(pages?.n).toBe(2);
+	});
+
+	it("an exhausted tick does not read D1 while sending mail", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const kv = memoryKV();
+		await kv.put(LAST_INDEXED_HASH_KEY, "keep-me");
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await settle(env, queue);
+		await queue.insertRun({
+			systemId: "primer",
+			kind: "reindex",
+			trigger: "recrawl",
+			jobId: "job-mail",
+			startUrl: PAGE,
+			cursor: "done",
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await queue.stageUrl("primer", PAGE);
+		await queue.stageIndexable("primer", PAGE);
+		await queue.stageIndexable("primer", "https://primer.style/components/action-list");
+		const { sent } = mockIndex();
+		env.EMAIL = {
+			send: async (message) => {
+				sent.push(message as { subject?: string; text?: string });
+				return { messageId: "m" };
+			},
+		};
+		let armed = false;
+		let failures = 0;
+		const readsAfterExhaust: string[] = [];
+		env.PAGE_QUEUE = wrapStatement(db, async (sql, op) => {
+			if (/delete from discover_run/i.test(sql)) {
+				const result = await op();
+				armed = true;
+				return result;
+			}
+			const writing = /^\s*(insert|update|delete)\b/i.test(sql);
+			if (armed && writing && !/delete\s+from\s+fill_lease/i.test(sql)) {
+				failures += 1;
+				throw new Error(TRANSIENT);
+			}
+			if (failures >= 4 && /^\s*select\b/i.test(sql)) {
+				readsAfterExhaust.push(sql);
+			}
+			return op();
+		});
+		const sleeps: number[] = [];
+		await fillTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "completed", finished: 2, total: 2 }),
+			page: async () => ({ records: [], cursor: null }),
+			start: async () => {
+				throw new Error("started during mail");
+			},
+			cancel: async () => undefined,
+		}, {
+			sleep: async (ms) => {
+				sleeps.push(ms);
+			},
+		});
+		expect(failures).toBe(4);
+		expect(sleeps).toEqual([10_000, 20_000, 40_000]);
+		expect(readsAfterExhaust).toEqual([]);
+		expect(sent.some((message) => message.text?.includes(TRANSIENT))).toBe(true);
 	});
 
 	it("a late tick cannot change a page or lease held by the next owner", async () => {
