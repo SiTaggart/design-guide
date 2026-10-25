@@ -2,13 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { NonRetryableError } from "cloudflare:workflows";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
+import { discoverTick } from "../src/index/discover.ts";
 import { createD1TickBudget, D1_STEP_RETRIES } from "../src/index/d1-step.ts";
-import { fillTick } from "../src/index/fill.ts";
+import { drainTick } from "../src/index/drain.ts";
+import { fillTick, noteIndexedSeeds } from "../src/index/fill.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import { D1PageQueue, FILL_LEASE_STALE_MS, FILL_LEASE_WINDOW, FILL_TICK_DEADLINE_MS } from "../src/index/page-queue.ts";
-import { systemSeedHash } from "../src/index/seed-hash.ts";
+import { seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
 import { PARKS_KEY } from "../src/index/parks.ts";
-import { LAST_INDEXED_HASH_KEY, STATUS_KEY } from "../src/index/status.ts";
+import { LAST_INDEXED_HASH_KEY, readStatus, STATUS_KEY } from "../src/index/status.ts";
 import { DRIFT_CRON } from "../src/index/trigger.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
 import { memoryD1 } from "./helpers/d1.ts";
@@ -615,7 +617,7 @@ describe("drain D1 steps", () => {
 		});
 	});
 
-	it("counts a complete that commits and then reports a transient error", async () => {
+	it("does not log a lost claim when a complete commits and then reports a transient error", async () => {
 		const db = memoryD1();
 		const queue = new D1PageQueue(db);
 		await queue.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
@@ -628,14 +630,280 @@ describe("drain D1 steps", () => {
 			retries: D1_STEP_RETRIES,
 			sleep: async () => undefined,
 		});
-		expect(await wrapped.complete(item!, { lastCrawled: NOW, lastIndexed: NOW }, "primer/page.md")).toBe(true);
+		expect(await wrapped.complete(item!, { lastCrawled: NOW, lastIndexed: NOW }, "primer/page.md")).toBe(false);
 		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(false);
 		expect(
 			await db
 				.prepare("SELECT status, claim_token FROM page_work WHERE url = ?")
 				.bind(PAGE)
 				.first<{ status: string; claim_token: string | null }>(),
-		).toEqual({ status: "done", claim_token: null });
+		).toEqual({ status: "done", claim_token: item?.claimToken });
+	});
+
+	it("logs page_claim_lost when another holder already finished the page", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const otherUrl = "https://primer.style/components/action-list";
+		const clearedUrl = "https://primer.style/components/blankslate";
+		await queue.enqueueUpsert(
+			[
+				{ systemId: "primer", url: otherUrl, kind: "reindex" },
+				{ systemId: "primer", url: clearedUrl, kind: "reindex" },
+			],
+			OLD,
+		);
+		const [otherItem, clearedItem] = await queue.claim(2, NOW);
+		await db
+			.prepare(
+				`UPDATE page_work
+				 SET status = 'done', claim_token = ?, claimed_at = NULL, item_key = ?
+				 WHERE url = ?`,
+			)
+			.bind("other-holder", "primer/page/other.md", otherUrl)
+			.run();
+		await db
+			.prepare(
+				`UPDATE page_work
+				 SET status = 'done', claim_token = NULL, claimed_at = NULL, item_key = ?
+				 WHERE url = ?`,
+			)
+			.bind("primer/page/cleared.md", clearedUrl)
+			.run();
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		const timestamps = { lastCrawled: NOW, lastIndexed: NOW };
+		expect(await queue.complete(otherItem!, timestamps, "primer/page/ours-other.md")).toBe(false);
+		expect(await queue.complete(clearedItem!, timestamps, "primer/page/ours-cleared.md")).toBe(false);
+		const lost = logs.filter((line) => line.includes("page_claim_lost"));
+		expect(lost).toHaveLength(2);
+		expect(lost.every((line) => line.includes('"op":"complete"'))).toBe(true);
+		expect(
+			await db
+				.prepare("SELECT status, claim_token, item_key FROM page_work WHERE url = ?")
+				.bind(otherUrl)
+				.first<{ status: string; claim_token: string | null; item_key: string | null }>(),
+		).toEqual({ status: "done", claim_token: "other-holder", item_key: "primer/page/other.md" });
+		expect(
+			await db
+				.prepare("SELECT status, claim_token, item_key FROM page_work WHERE url = ?")
+				.bind(clearedUrl)
+				.first<{ status: string; claim_token: string | null; item_key: string | null }>(),
+		).toEqual({ status: "done", claim_token: null, item_key: "primer/page/cleared.md" });
+	});
+
+	it("keeps the completing holder's claim token on the done row", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const keepUrl = "https://primer.style/components/avatar";
+		await queue.enqueueUpsert(
+			[
+				{ systemId: "primer", url: PAGE, kind: "reindex" },
+				{ systemId: "primer", url: keepUrl, kind: "reindex" },
+			],
+			OLD,
+		);
+		const claimed = await queue.claim(2, NOW);
+		const normal = claimed.find((item) => item.url === PAGE);
+		const kept = claimed.find((item) => item.url === keepUrl);
+		const timestamps = { lastCrawled: NOW, lastIndexed: NOW };
+		expect(await queue.complete(normal!, timestamps, "primer/page.md")).toBe(true);
+		expect(await queue.complete(kept!, timestamps, "primer/page/keep.md", { keepIndexedAt: true })).toBe(true);
+		expect(
+			await db
+				.prepare("SELECT status, claim_token FROM page_work WHERE url = ?")
+				.bind(PAGE)
+				.first<{ status: string; claim_token: string | null }>(),
+		).toEqual({ status: "done", claim_token: normal?.claimToken });
+		expect(
+			await db
+				.prepare("SELECT status, claim_token, last_indexed FROM page_work WHERE url = ?")
+				.bind(keepUrl)
+				.first<{ status: string; claim_token: string | null; last_indexed: string | null }>(),
+		).toEqual({ status: "done", claim_token: kept?.claimToken, last_indexed: null });
+	});
+
+	it("a done row that still has a claim token is not an open claim", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const doneUrl = "https://primer.style/components/done-token";
+		const token = "done-holder";
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, claimed_at, claim_token, last_indexed)
+				 VALUES ('primer', ?, 'reindex', 'done', ?, 1, ?, ?, ?)`,
+			)
+			.bind(doneUrl, OLD, OLD, token, OLD)
+			.run();
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, { INDEX: kv, PAGE_QUEUE: db });
+
+		expect(await queue.claim(10, NOW)).toEqual([]);
+		await queue.releaseOpenClaims(token);
+		await queue.releaseOpenClaims("someone-else");
+
+		expect(
+			await db
+				.prepare("SELECT status, claim_token, claimed_at FROM page_work WHERE url = ?")
+				.bind(doneUrl)
+				.first<{ status: string; claim_token: string | null; claimed_at: string | null }>(),
+		).toEqual({ status: "done", claim_token: token, claimed_at: OLD });
+		expect(await queue.depths()).toEqual({ pending: 0, claimed: 0, failed: 0, done: 1 });
+		expect((await queue.freshness()).find((row) => row.system === "primer")).toMatchObject({
+			pending: 0,
+			claimed: 0,
+			failed: 0,
+			done: 1,
+		});
+		const status = await readStatus(env);
+		expect(status.queue).toEqual({ pending: 0, claimed: 0, failed: 0, done: 1 });
+		expect(status.freshness.find((row) => row.system === "primer")).toMatchObject({ claimed: 0, done: 1 });
+	});
+
+	it("a re-enqueued pending row with a leftover token is not our finished release", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const token = "done-holder";
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, claimed_at, claim_token)
+				 VALUES ('primer', ?, 'reindex', 'done', ?, 1, ?, ?)`,
+			)
+			.bind(PAGE, OLD, NOW, token)
+			.run();
+		await queue.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], NOW);
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		expect(
+			await queue.releaseForRetry(
+				{ systemId: "primer", url: PAGE, attempts: 1, claimedAt: NOW, claimToken: token },
+				"primer/page/retry.md",
+			),
+		).toBe(false);
+		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(true);
+		expect(
+			await db
+				.prepare("SELECT status FROM page_work WHERE url = ?")
+				.bind(PAGE)
+				.first<{ status: string }>(),
+		).toEqual({ status: "pending" });
+		const [claimed] = await queue.claim(1, NOW);
+		expect(claimed?.url).toBe(PAGE);
+		expect(claimed?.claimToken).toBeTruthy();
+		expect(claimed?.claimToken).not.toBe(token);
+	});
+
+	it("does not log a lost claim when a fail commits and then reports a transient error", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		await queue.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		const [item] = await queue.claim(1, NOW);
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		const wrapped = new D1PageQueue(commitThenThrow(db, /set status = 'failed'/i), {
+			retries: D1_STEP_RETRIES,
+			sleep: async () => undefined,
+		});
+		expect(await wrapped.fail(item!, "render failed")).toBe(false);
+		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(false);
+		expect(
+			await db
+				.prepare("SELECT status, claim_token, error FROM page_work WHERE url = ?")
+				.bind(PAGE)
+				.first<{ status: string; claim_token: string | null; error: string | null }>(),
+		).toEqual({ status: "failed", claim_token: item?.claimToken, error: "render failed" });
+	});
+
+	it("does not log a lost claim when a yield commits and then reports a transient error", async () => {
+		const db = memoryD1();
+		const setup = new D1PageQueue(db);
+		const holdUrl = `${PAGE}/`;
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, claimed_at, claim_token)
+				 VALUES ('primer', ?, 'reindex', 'claimed', ?, 1, ?, 'other-holder')`,
+			)
+			.bind(holdUrl, OLD, NOW)
+			.run();
+		await setup.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		let token: string | null = null;
+		let left = 1;
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		const queue = new D1PageQueue(
+			wrapStatement(db, async (sql, op) => {
+				if (left > 0 && /attempts = attempts - 1/i.test(sql)) {
+					left -= 1;
+					const row = await db
+						.prepare("SELECT claim_token FROM page_work WHERE url = ?")
+						.bind(PAGE)
+						.first<{ claim_token: string | null }>();
+					token = row?.claim_token ?? null;
+					await op();
+					throw new Error(TRANSIENT);
+				}
+				return op();
+			}),
+			{ retries: D1_STEP_RETRIES, sleep: async () => undefined },
+		);
+		const claimed = await queue.claim(10, NOW);
+		expect(claimed.map((item) => item.url)).not.toContain(PAGE);
+		expect(token).toBeTruthy();
+		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(false);
+		expect(
+			await db
+				.prepare("SELECT status, attempts, claim_token FROM page_work WHERE url = ?")
+				.bind(PAGE)
+				.first<{ status: string; attempts: number; claim_token: string | null }>(),
+		).toEqual({ status: "pending", attempts: 0, claim_token: token });
+		expect(
+			await db
+				.prepare("SELECT status, claim_token FROM page_work WHERE url = ?")
+				.bind(holdUrl)
+				.first<{ status: string; claim_token: string | null }>(),
+		).toEqual({ status: "claimed", claim_token: "other-holder" });
+	});
+
+	it("does not log a lost claim when a releaseForRetry commits and then reports a transient error", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		await queue.enqueueUpsert([{ systemId: "primer", url: PAGE, kind: "reindex" }], OLD);
+		const [item] = await queue.claim(1, NOW);
+		const logs: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((message) => {
+			logs.push(String(message));
+		});
+		const wrapped = new D1PageQueue(commitThenThrow(db, /item_key = \?/i), {
+			retries: D1_STEP_RETRIES,
+			sleep: async () => undefined,
+		});
+		expect(await wrapped.releaseForRetry(item!, "primer/page/retry.md")).toBe(false);
+		expect(logs.some((line) => line.includes("page_claim_lost"))).toBe(false);
+		expect(
+			await db
+				.prepare("SELECT status, attempts, claim_token, item_key, error FROM page_work WHERE url = ?")
+				.bind(PAGE)
+				.first<{
+					status: string;
+					attempts: number;
+					claim_token: string | null;
+					item_key: string | null;
+					error: string | null;
+				}>(),
+		).toEqual({
+			status: "pending",
+			attempts: 1,
+			claim_token: item?.claimToken,
+			item_key: "primer/page/retry.md",
+			error: null,
+		});
 	});
 
 	it("a tick that reaches the deadline mid-drain does no further D1 writes and releases the lease", async () => {
@@ -1194,5 +1462,158 @@ describe("drain D1 steps", () => {
 			.bind(PAGE)
 			.first<{ status: string; attempts: number }>();
 		expect(row).toEqual({ status: "done", attempts: 1 });
+	});
+
+	it("does not count a page another holder already finished", async () => {
+		const db = memoryD1();
+		const queue = new D1PageQueue(db);
+		const doneUrl = "https://primer.style/components/action-list";
+		const failUrl = "https://primer.style/components/blankslate";
+		await queue.enqueueUpsert(
+			[
+				{ systemId: "primer", url: doneUrl, kind: "reindex" },
+				{ systemId: "primer", url: failUrl, kind: "reindex" },
+			],
+			OLD,
+		);
+		const otherKey = "primer/page/other.md";
+		const otherError = "other holder";
+		const racing = new D1PageQueue(
+			wrapStatement(db, async (sql, op) => {
+				if (/set status = 'done'/i.test(sql)) {
+					await db
+						.prepare(
+							`UPDATE page_work
+							 SET status = 'done', claim_token = NULL, claimed_at = NULL, item_key = ?, error = NULL
+							 WHERE url = ?`,
+						)
+						.bind(otherKey, doneUrl)
+						.run();
+				}
+				if (/set status = 'failed'/i.test(sql)) {
+					await db
+						.prepare(
+							`UPDATE page_work
+							 SET status = 'failed', claim_token = NULL, claimed_at = NULL, error = ?
+							 WHERE url = ?`,
+						)
+						.bind(otherError, failUrl)
+						.run();
+				}
+				return op();
+			}),
+		);
+		mockIndex();
+		const counts = await drainTick({
+			queue: racing,
+			auth: { accountId: "acct", apiToken: "token" },
+			now: NOW,
+			fetchMarkdown: async (url) => {
+				if (url === failUrl) {
+					throw new Error("render failed");
+				}
+				return "# action list";
+			},
+		});
+		expect(counts).toEqual({ claimed: 2, indexed: 0, failed: 0 });
+		expect(
+			await db
+				.prepare("SELECT status, item_key, error FROM page_work WHERE url = ?")
+				.bind(doneUrl)
+				.first<{ status: string; item_key: string | null; error: string | null }>(),
+		).toEqual({ status: "done", item_key: otherKey, error: null });
+		expect(
+			await db
+				.prepare("SELECT status, error FROM page_work WHERE url = ?")
+				.bind(failUrl)
+				.first<{ status: string; error: string | null }>(),
+		).toEqual({ status: "failed", error: otherError });
+	});
+
+	it("leaves no indexed hash when markDiscovered fails", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+		});
+		const hash = systemSeedHash(seedById("primer"));
+		const url = "https://primer.style/components";
+		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], OLD);
+		await pageQueue.complete(
+			{ systemId: "primer", url },
+			{ lastCrawled: NOW, lastIndexed: NOW },
+			"primer/page/components.md",
+		);
+		await pageQueue.recordSeedRefresh("primer", hash, OLD);
+		const failing = new D1PageQueue(
+			wrapStatement(db, async (sql, op) => {
+				if (/into system_mark/i.test(sql)) {
+					throw new Error("discover mark failed");
+				}
+				return op();
+			}),
+		);
+		await expect(noteIndexedSeeds(env, failing, new Date(NOW))).rejects.toThrow("discover mark failed");
+		expect(await kv.get(seedHashKey("primer"))).toBeNull();
+		expect(
+			await db
+				.prepare("SELECT last_discovered FROM system_mark WHERE system_id = ?")
+				.bind("primer")
+				.first<{ last_discovered: string }>(),
+		).toBeNull();
+	});
+
+	it("leaves both indexed hashes unset when finishDiscover cannot mark the system", async () => {
+		const db = memoryD1();
+		const kv = memoryKV();
+		for (const id of SYSTEM_IDS) {
+			await kv.put(seedHashKey(id), systemSeedHash(seedById(id)));
+		}
+		const puts: string[] = [];
+		const put = kv.put.bind(kv);
+		kv.put = (async (key: string, value: string) => {
+			puts.push(key);
+			await put(key, value);
+		}) as typeof kv.put;
+		const queue = new D1PageQueue(db);
+		await queue.insertRun({
+			systemId: "primer",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-stub",
+			startUrl: "https://primer.style/",
+			cursor: "done",
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: wrapStatement(db, async (sql, op) => {
+				if (/into system_mark/i.test(sql)) {
+					throw new Error("discover mark failed");
+				}
+				return op();
+			}),
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "completed", finished: 0 }),
+			page: async () => ({ records: [], cursor: null }),
+			cancel: async () => undefined,
+		});
+		expect(result).toMatchObject({ action: "failed", error: "discover mark failed" });
+		expect(puts).not.toContain(seedHashKey("primer"));
+		expect(puts).not.toContain(LAST_INDEXED_HASH_KEY);
+		expect(await kv.get(LAST_INDEXED_HASH_KEY)).toBeNull();
+		expect(
+			await db
+				.prepare("SELECT last_discovered FROM system_mark WHERE system_id = ?")
+				.bind("primer")
+				.first<{ last_discovered: string }>(),
+		).toBeNull();
 	});
 });

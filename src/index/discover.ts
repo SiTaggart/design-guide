@@ -520,9 +520,9 @@ async function finishDiscover(
 	const indexable = await queue.indexableUrls(run.systemId);
 	if (!incomplete && isStubGeneration(indexable.length)) {
 		await writePark(env, run.systemId, indexable.length, iso);
+		await queue.markDiscovered(run.systemId, iso);
 		await writeIndexedHash(env, run.systemId, systemSeedHash(seed));
 		await writeLastIndexedHashIfComplete(env);
-		await queue.markDiscovered(run.systemId, iso);
 		await queue.clearWork(run.systemId);
 		await queue.clearRun(run.systemId);
 		return { action: "parked", systemId: run.systemId, trigger: run.trigger, usable: indexable.length };
