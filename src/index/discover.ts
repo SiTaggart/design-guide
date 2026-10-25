@@ -740,6 +740,7 @@ async function failOrFinish(
 	iso: string,
 	error: string,
 ): Promise<DiscoverTickResult> {
+	// A later slice yields on a poll error and on a crawl that ended with a non-success status.
 	if (await queue.discoverResume(run.systemId)) {
 		await queue.noteAttempt(run.systemId, run.startUrl);
 		await cancelJob(auth, run, deps);

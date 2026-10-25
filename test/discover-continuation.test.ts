@@ -4,6 +4,7 @@ import { SYSTEM_IDS } from "../src/config/types.ts";
 import { CRAWL_POLL_DEADLINE_MS } from "../src/crawl/browser-run.ts";
 import { CAP_RETRY_MS, discoverTick } from "../src/index/discover.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
+import { readParks } from "../src/index/parks.ts";
 import { D1PageQueue, FRESHNESS_MS } from "../src/index/page-queue.ts";
 import { systemSeedHash } from "../src/index/seed-hash.ts";
 import { memoryD1 } from "./helpers/d1.ts";
@@ -1957,7 +1958,7 @@ describe("discover continuation", () => {
 		expect(await urls(db, "discover_url")).toEqual([kept]);
 		expect(await urls(db, "discover_indexable")).toEqual([kept]);
 		expect(await urls(db, "discover_frontier")).toEqual([button]);
-		expect((await urls(db, "discover_attempt")).length).toBeGreaterThan(0);
+		expect(await urls(db, "discover_attempt")).toContain("yield:incomplete");
 		const runs = await db.prepare("SELECT system_id FROM discover_run").all<{ system_id: string }>();
 		expect(runs.results).toEqual([]);
 		const parked = await db
@@ -1966,6 +1967,103 @@ describe("discover continuation", () => {
 		expect(parked.results).toEqual([{ seed_hash: systemSeedHash(seedById("paste")), yielded_at: NOW }]);
 		expect(await pageQueue.capDefers()).toEqual({ paste: NOW });
 		expect(await urls(db, "page_work")).toContain(kept);
+	});
+
+	it("finishes a cooled resume incomplete after a later-slice poll failure", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		const kept = "https://paste-dsys.com/components/form";
+		const button = "https://paste-dsys.com/components/button";
+		const removed = "https://paste-dsys.com/components/removed";
+		await pageQueue.addFrontier("paste", [button]);
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-later-poll",
+			startUrl: "https://paste-dsys.com/",
+			cursor: "done",
+			pollFailures: 0,
+			startedAt: NOW,
+			now: NOW,
+		});
+		await pageQueue.stageUrl("paste", kept);
+		await pageQueue.stageIndexable("paste", kept);
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "paste", url: kept, kind: "seed" },
+				{ systemId: "paste", url: removed, kind: "seed" },
+			],
+			NOW,
+		);
+		await db
+			.prepare("INSERT INTO discover_resume (system_id, seed_hash, yielded_at) VALUES ('paste', ?, ?)")
+			.bind(systemSeedHash(seedById("paste")), NOW)
+			.run();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const failing = {
+			poll: async () => {
+				throw new Error("crawl poll failed 500: temporary");
+			},
+			page: async () => {
+				throw new Error("poll failures must not page");
+			},
+			deleteDocs: async () => {
+				throw new Error("a later slice must not prune");
+			},
+			cancel: async () => undefined,
+		};
+		let yielded: Awaited<ReturnType<typeof discoverTick>> = { action: "continued", systemId: "paste", accepted: 0 };
+		for (let tick = 0; tick < 5; tick += 1) {
+			yielded = await discoverTick(env, DRIFT_CRON, new Date(NOW), failing);
+		}
+		expect(yielded).toMatchObject({ action: "enqueued", systemId: "paste", incomplete: true, pruned: [] });
+		expect(await urls(db, "discover_frontier")).toEqual([button]);
+		await db.prepare("UPDATE page_work SET status = 'done' WHERE system_id = 'paste'").run();
+		const cooled = new Date(Date.parse(NOW) + CAP_RETRY_MS + 1000);
+		const started: string[] = [];
+		const resumed = await discoverTick(env, DRIFT_CRON, cooled, {
+			start: async (_auth, _seed, startUrl) => {
+				started.push(startUrl ?? "");
+				return { startUrl: startUrl ?? "", jobId: "job-again" };
+			},
+			deleteDocs: async () => {
+				throw new Error("a cooled resume must not prune");
+			},
+			cancel: async () => undefined,
+		});
+		expect(started).toEqual([button]);
+		expect(resumed).toMatchObject({ action: "started", systemId: "paste" });
+		const pruned: string[] = [];
+		const finished = await discoverTick(env, DRIFT_CRON, cooled, {
+			poll: async () => ({ status: "completed", finished: 1, total: 1 }),
+			page: async () => ({ records: [], cursor: null }),
+			start: async () => {
+				throw new Error("an empty frontier must not start another crawl");
+			},
+			deleteDocs: async (_auth, _systemId, dropped) => {
+				pruned.push(...dropped.map((row) => row.url));
+			},
+			cancel: async () => undefined,
+		});
+		expect(finished).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			incomplete: true,
+			pruned: [],
+		});
+		expect(pruned).toEqual([]);
+		expect(await urls(db, "discover_frontier")).toEqual([]);
+		expect(await urls(db, "page_work")).toEqual([kept, removed]);
+		const parks = await readParks(env);
+		expect(parks).toEqual({ kind: "ok", parks: {} });
+		const refreshes = await db.prepare("SELECT system_id FROM seed_refresh").all<{ system_id: string }>();
+		expect(refreshes.results).toEqual([]);
 	});
 
 	it("treats a legacy slice with a null baseline as no progress when it yields", async () => {

@@ -1243,6 +1243,7 @@ export function isDue(input: {
 	now: number;
 	hasResume?: boolean;
 }): boolean {
+	// A resume skips pending and busy. One slot, cap_defer spaces re-picks, and a claim keeps its token.
 	if (input.hasResume) {
 		return true;
 	}
