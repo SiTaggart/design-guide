@@ -1588,6 +1588,105 @@ describe("discover continuation", () => {
 		expect(parked.results).toEqual([{ seed_hash: systemSeedHash(seedById("paste")), yielded_at: NOW }]);
 	});
 
+	it("does not prune or record a refresh when a 7 day deadline yields and the resume finishes", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		const startedAt = new Date(Date.parse(NOW) - CRAWL_POLL_DEADLINE_MS - 60_000).toISOString();
+		const form = "https://paste-dsys.com/components/form";
+		const input = "https://paste-dsys.com/components/input";
+		const button = "https://paste-dsys.com/components/button";
+		const removed = "https://paste-dsys.com/components/removed";
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-week",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt,
+			now: startedAt,
+		});
+		await pageQueue.stageUrl("paste", form);
+		await pageQueue.stageUrl("paste", input);
+		await pageQueue.stageIndexable("paste", form);
+		await pageQueue.stageIndexable("paste", input);
+		await pageQueue.addFrontier("paste", [button]);
+		await pageQueue.enqueueUpsert(
+			[
+				{ systemId: "paste", url: form, kind: "seed" },
+				{ systemId: "paste", url: input, kind: "seed" },
+				{ systemId: "paste", url: removed, kind: "seed" },
+			],
+			startedAt,
+		);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const cancelled: string[] = [];
+		const yielded = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => {
+				throw new Error("a deadline must not poll");
+			},
+			page: async () => {
+				throw new Error("a deadline must not page");
+			},
+			start: async () => {
+				throw new Error("a deadline must not start another crawl");
+			},
+			deleteDocs: async () => {
+				throw new Error("a deadline yield must not prune");
+			},
+			cancel: async (_auth, jobId) => {
+				cancelled.push(jobId);
+			},
+		});
+		expect(cancelled).toEqual(["job-week"]);
+		expect(yielded).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			incomplete: true,
+			pruned: [],
+		});
+		await db.prepare("DELETE FROM cap_defer WHERE system_id = 'paste'").run();
+		await db.prepare("UPDATE page_work SET status = 'done' WHERE system_id = 'paste'").run();
+		const started: string[] = [];
+		const resumed = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			start: async (_auth, _seed, startUrl) => {
+				started.push(startUrl ?? "");
+				return { startUrl: startUrl ?? "", jobId: "job-again" };
+			},
+			cancel: async () => undefined,
+		});
+		expect(started).toEqual([button]);
+		expect(resumed).toMatchObject({ action: "started", systemId: "paste" });
+		const pruned: string[] = [];
+		const finished = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "completed", finished: 1, total: 1 }),
+			page: async () => ({
+				records: [{ url: button, status: "completed", markdown: "# button" }],
+				cursor: null,
+			}),
+			deleteDocs: async (_auth, _systemId, dropped) => {
+				pruned.push(...dropped.map((row) => row.url));
+			},
+			cancel: async () => undefined,
+		});
+		expect(finished).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			incomplete: true,
+			pruned: [],
+		});
+		expect(pruned).toEqual([]);
+		expect(await urls(db, "page_work")).toContain(removed);
+		const refreshes = await db.prepare("SELECT system_id FROM seed_refresh").all<{ system_id: string }>();
+		expect(refreshes.results).toEqual([]);
+	});
+
 	it("frees the slot and escalates cap_defer when a resume start throws", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
