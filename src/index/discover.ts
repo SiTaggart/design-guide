@@ -30,6 +30,7 @@ import {
 
 export const DISCOVER_URLS_PER_TICK = 25;
 export const CAP_RETRY_MS = 60 * 60 * 1000;
+export const DISCOVER_SLOT_BUDGET_MS = 24 * 60 * 60 * 1000;
 
 export type CapDeferMark = string | { at: string; streak: number };
 
@@ -190,6 +191,7 @@ export async function commitDiscoveredUrls(input: {
 	liveUrls?: readonly string[];
 	ok: boolean;
 	prune?: boolean;
+	keepDone?: boolean;
 	now: string;
 	deleteDocs: (dropped: readonly DroppedPage[]) => Promise<void>;
 }): Promise<{ pruned: DroppedPage[] }> {
@@ -202,6 +204,7 @@ export async function commitDiscoveredUrls(input: {
 		await input.queue.enqueueUpsert(
 			enqueue.map((url) => ({ systemId: input.systemId, url, kind: input.kind })),
 			input.now,
+			input.keepDone ? { keepDone: true } : undefined,
 		);
 	}
 	if (input.prune === false) {
@@ -333,6 +336,9 @@ async function runDiscover(
 	if (pick.trigger === "recovery") {
 		await queue.noteRecoveryAttempt(pick.systemId, iso);
 	}
+	if (await queue.hasFrontier(pick.systemId)) {
+		return resumeDiscover(env, queue, auth, pick, deps, iso);
+	}
 	let started: { startUrl: string; jobId: string };
 	try {
 		started = await deps.start(auth, seed);
@@ -460,6 +466,13 @@ async function continueDiscover(
 	if (cursor !== "done") {
 		return { action: "continued", systemId: run.systemId, accepted };
 	}
+	if (!runaway && slotBudgetSpent(run.startedAt, now.getTime())) {
+		const seen = new Set(await queue.stagedUrls(run.systemId));
+		const next = await queue.nextFrontier(run.systemId, seen);
+		if (next) {
+			return yieldDiscoverSlot(env, queue, auth, run, deps, iso);
+		}
+	}
 	if (!runaway) {
 		const seen = new Set(await queue.stagedUrls(run.systemId));
 		let next = await queue.nextFrontier(run.systemId, seen);
@@ -506,6 +519,116 @@ async function continueDiscover(
 	return finishDiscover(env, queue, auth, run, deps, iso, incomplete);
 }
 
+function slotBudgetSpent(startedAt: string, nowMs: number): boolean {
+	return Date.parse(startedAt) + DISCOVER_SLOT_BUDGET_MS < nowMs;
+}
+
+function discoveredLive(staged: readonly string[], indexable: readonly string[]): string[] {
+	return [...new Set([...staged, ...indexable])];
+}
+
+async function resumeDiscover(
+	env: WorkerEnv,
+	queue: D1PageQueue,
+	auth: CrawlAuth,
+	pick: DiscoverPick,
+	deps: DiscoverDeps,
+	iso: string,
+): Promise<DiscoverTickResult> {
+	const seed = seedById(pick.systemId);
+	const seen = new Set(await queue.stagedUrls(pick.systemId));
+	const next = await queue.nextFrontier(pick.systemId, seen);
+	if (!next) {
+		const incomplete = await queue.takeSliceIncomplete(pick.systemId);
+		return finishDiscover(
+			env,
+			queue,
+			auth,
+			{
+				systemId: pick.systemId,
+				kind: pick.kind,
+				trigger: pick.trigger,
+				jobId: "",
+				startUrl: seed.startUrl,
+				cursor: "done",
+				pollFailures: 0,
+				startedAt: iso,
+			},
+			deps,
+			iso,
+			incomplete,
+		);
+	}
+	let started: { startUrl: string; jobId: string };
+	try {
+		started = await deps.start(auth, seed, next);
+	} catch (error) {
+		return {
+			action: "failed",
+			systemId: pick.systemId,
+			trigger: pick.trigger,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+	await queue.insertRun({
+		systemId: pick.systemId,
+		kind: pick.kind,
+		trigger: pick.trigger,
+		jobId: started.jobId,
+		startUrl: started.startUrl,
+		cursor: null,
+		pollFailures: 0,
+		startedAt: iso,
+		now: iso,
+	});
+	if (await queue.takeSliceIncomplete(pick.systemId)) {
+		await queue.noteCapped(pick.systemId, iso);
+	}
+	return { action: "started", systemId: pick.systemId, kind: pick.kind, trigger: pick.trigger };
+}
+
+async function yieldDiscoverSlot(
+	env: WorkerEnv,
+	queue: D1PageQueue,
+	auth: CrawlAuth,
+	run: DiscoverRun,
+	deps: DiscoverDeps,
+	iso: string,
+): Promise<DiscoverTickResult> {
+	const staged = await queue.stagedUrls(run.systemId);
+	const indexable = await queue.indexableUrls(run.systemId);
+	const live = discoveredLive(staged, indexable);
+	const itemsAuth = itemsAuthFrom(env, auth);
+	const committed =
+		indexable.length === 0
+			? { pruned: [] as DroppedPage[] }
+			: await commitDiscoveredUrls({
+					queue,
+					systemId: run.systemId,
+					kind: run.kind,
+					urls: indexable,
+					liveUrls: live,
+					ok: true,
+					prune: false,
+					keepDone: true,
+					now: iso,
+					deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
+				});
+	await queue.rememberSliceIncomplete(run.systemId);
+	await queue.noteCapDefer(run.systemId, iso);
+	await queue.releaseSlot(run.systemId);
+	return {
+		action: "enqueued",
+		systemId: run.systemId,
+		kind: run.kind,
+		trigger: run.trigger,
+		urls: indexable.length,
+		pruned: committed.pruned.map((row) => row.url),
+		hitLimit: false,
+		incomplete: true,
+	};
+}
+
 async function finishDiscover(
 	env: WorkerEnv,
 	queue: D1PageQueue,
@@ -516,8 +639,9 @@ async function finishDiscover(
 	incomplete: boolean,
 ): Promise<DiscoverTickResult> {
 	const seed = seedById(run.systemId);
-	const live = await queue.stagedUrls(run.systemId);
+	const staged = await queue.stagedUrls(run.systemId);
 	const indexable = await queue.indexableUrls(run.systemId);
+	const live = discoveredLive(staged, indexable);
 	if (!incomplete && isStubGeneration(indexable.length)) {
 		await writePark(env, run.systemId, indexable.length, iso);
 		await queue.markDiscovered(run.systemId, iso);

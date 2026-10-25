@@ -10,6 +10,8 @@ export const FRESHNESS_MS = 30 * 24 * 60 * 60 * 1000;
 export const EXHAUSTED_RETRY_MS = 60 * 60 * 1000;
 const STALE_CLAIM_MS = 15 * 60 * 1000;
 const FILL_LEASE_ID = "fill";
+// Not a page url. A yielded slice that was capped or skipped leaves this row so a later full pass does not prune.
+const INCOMPLETE_SLICE = "yield:incomplete";
 
 /**
  * A cron worker can run for 15 minutes. The fill lease used to expire at that same age, so a
@@ -78,6 +80,7 @@ export type PageQueue = {
 	enqueueUpsert(
 		items: ReadonlyArray<{ systemId: SystemId; url: string; kind: PageKind }>,
 		now: string,
+		options?: { keepDone?: boolean },
 	): Promise<void>;
 	claim(limit: number, now: string): Promise<ClaimedPage[]>;
 	complete(
@@ -247,7 +250,12 @@ export class D1PageQueue implements PageQueue {
 	async enqueueUpsert(
 		items: ReadonlyArray<{ systemId: SystemId; url: string; kind: PageKind }>,
 		now: string,
+		options?: { keepDone?: boolean },
 	): Promise<void> {
+		const held =
+			options?.keepDone === true
+				? "page_work.status = 'done' OR page_work.status = 'claimed'"
+				: "page_work.status = 'claimed'";
 		for (const item of items) {
 			await run(
 				this.step,
@@ -259,19 +267,19 @@ export class D1PageQueue implements PageQueue {
 				     ELSE excluded.kind
 				   END,
 				   status = CASE
-				     WHEN page_work.status = 'claimed' THEN page_work.status
+				     WHEN ${held} THEN page_work.status
 				     ELSE 'pending'
 				   END,
 				   attempts = CASE
-				     WHEN page_work.status = 'claimed' THEN page_work.attempts
+				     WHEN ${held} THEN page_work.attempts
 				     ELSE 0
 				   END,
 				   error = CASE
-				     WHEN page_work.status = 'claimed' THEN page_work.error
+				     WHEN ${held} THEN page_work.error
 				     ELSE NULL
 				   END,
 				   claim_token = CASE
-				     WHEN page_work.status = 'claimed' THEN page_work.claim_token
+				     WHEN ${held} THEN page_work.claim_token
 				     ELSE NULL
 				   END`,
 				item.systemId,
@@ -774,6 +782,39 @@ export class D1PageQueue implements PageQueue {
 			systemId,
 		);
 		return row?.poll_failures ?? 0;
+	}
+
+	async rememberSliceIncomplete(systemId: SystemId): Promise<void> {
+		if ((await this.cappedAny(systemId)) || (await this.skippedAny(systemId))) {
+			await this.noteAttempt(systemId, INCOMPLETE_SLICE);
+		}
+	}
+
+	async takeSliceIncomplete(systemId: SystemId): Promise<boolean> {
+		const row = await first<{ url: string }>(
+			this.step,
+			"SELECT url FROM discover_attempt WHERE system_id = ? AND url = ?",
+			systemId,
+			INCOMPLETE_SLICE,
+		);
+		if (!row) {
+			return false;
+		}
+		await run(this.step, "DELETE FROM discover_attempt WHERE system_id = ? AND url = ?", systemId, INCOMPLETE_SLICE);
+		return true;
+	}
+
+	async hasFrontier(systemId: SystemId): Promise<boolean> {
+		const row = await first<{ n: number }>(
+			this.step,
+			"SELECT COUNT(*) AS n FROM discover_frontier WHERE system_id = ?",
+			systemId,
+		);
+		return Number(row?.n ?? 0) > 0;
+	}
+
+	async releaseSlot(systemId: SystemId): Promise<void> {
+		await run(this.step, "DELETE FROM discover_run WHERE system_id = ?", systemId);
 	}
 
 	async clearRun(systemId: SystemId): Promise<void> {
