@@ -336,8 +336,14 @@ async function runDiscover(
 	if (pick.trigger === "recovery") {
 		await queue.noteRecoveryAttempt(pick.systemId, iso);
 	}
-	if (await queue.hasFrontier(pick.systemId)) {
-		return resumeDiscover(env, queue, auth, pick, deps, iso);
+	// discover_resume is the parked slice. A different seed hash drops that map and starts over.
+	const parked = await queue.discoverResume(pick.systemId);
+	if (parked) {
+		if (parked.seedHash !== systemSeedHash(seed)) {
+			await queue.clearRun(pick.systemId);
+		} else {
+			return resumeDiscover(env, queue, auth, pick, deps, iso);
+		}
 	}
 	let started: { startUrl: string; jobId: string };
 	try {
@@ -374,13 +380,9 @@ async function continueDiscover(
 ): Promise<DiscoverTickResult> {
 	const iso = now.toISOString();
 	if (Date.parse(run.startedAt) + CRAWL_POLL_DEADLINE_MS < now.getTime()) {
-		const indexable = await queue.indexableCount(run.systemId);
-		const staged = await queue.stagedUrls(run.systemId);
-		if (indexable === 0 && staged.length === 0) {
-			return failDiscover(queue, auth, run, deps, iso, "discover timed out");
-		}
+		await queue.noteAttempt(run.systemId, run.startUrl);
 		await cancelJob(auth, run, deps);
-		return finishDiscover(env, queue, auth, run, deps, iso, true);
+		return yieldDiscoverSlot(env, queue, auth, run, deps, iso);
 	}
 	let snapshot: { status: string; finished: number };
 	try {
@@ -453,6 +455,9 @@ async function continueDiscover(
 				await queue.saveCursor(run.systemId, cursor, iso);
 			}
 		} catch (error) {
+			if (accepted > 0) {
+				await queue.noteSliceAccepted(run.systemId);
+			}
 			if (isTickDeadlineStop(error)) {
 				throw error;
 			}
@@ -462,6 +467,9 @@ async function continueDiscover(
 			}
 			return { action: "continued", systemId: run.systemId, accepted };
 		}
+	}
+	if (accepted > 0) {
+		await queue.noteSliceAccepted(run.systemId);
 	}
 	if (cursor !== "done") {
 		return { action: "continued", systemId: run.systemId, accepted };
@@ -536,6 +544,7 @@ async function resumeDiscover(
 	iso: string,
 ): Promise<DiscoverTickResult> {
 	const seed = seedById(pick.systemId);
+	const frontierAtStart = await queue.frontierCount(pick.systemId);
 	const seen = new Set(await queue.stagedUrls(pick.systemId));
 	const next = await queue.nextFrontier(pick.systemId, seen);
 	if (!next) {
@@ -581,6 +590,7 @@ async function resumeDiscover(
 		startedAt: iso,
 		now: iso,
 	});
+	await queue.noteSliceBaseline(pick.systemId, frontierAtStart);
 	if (await queue.takeSliceIncomplete(pick.systemId)) {
 		await queue.noteCapped(pick.systemId, iso);
 	}
@@ -615,7 +625,12 @@ async function yieldDiscoverSlot(
 					deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
 				});
 	await queue.rememberSliceIncomplete(run.systemId);
-	await queue.noteCapDefer(run.systemId, iso);
+	if (await queue.sliceMadeProgress(run.systemId)) {
+		await queue.noteCapDeferBase(run.systemId, iso);
+	} else {
+		await queue.noteCapDefer(run.systemId, iso);
+	}
+	await queue.recordDiscoverResume(run.systemId, systemSeedHash(seedById(run.systemId)), iso);
 	await queue.releaseSlot(run.systemId);
 	return {
 		action: "enqueued",

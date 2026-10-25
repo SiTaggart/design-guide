@@ -12,6 +12,9 @@ const STALE_CLAIM_MS = 15 * 60 * 1000;
 const FILL_LEASE_ID = "fill";
 // Not a page url. A yielded slice that was capped or skipped leaves this row so a later full pass does not prune.
 const INCOMPLETE_SLICE = "yield:incomplete";
+// Slice progress on discover_run.error, which otherwise stays unused.
+// slice:<0|1>:<frontier rows at slice start>. 1 means the slice accepted a url.
+const SLICE_MARK = /^slice:([01]):(\d+)$/;
 
 /**
  * A cron worker can run for 15 minutes. The fill lease used to expire at that same age, so a
@@ -682,6 +685,7 @@ export class D1PageQueue implements PageQueue {
 			run.now,
 		);
 		await this.noteAttempt(run.systemId, run.startUrl);
+		await this.noteSliceBaseline(run.systemId, await this.frontierCount(run.systemId));
 	}
 
 	async saveCursor(systemId: SystemId, cursor: string | null, now: string): Promise<void> {
@@ -804,13 +808,76 @@ export class D1PageQueue implements PageQueue {
 		return true;
 	}
 
-	async hasFrontier(systemId: SystemId): Promise<boolean> {
+	async frontierCount(systemId: SystemId): Promise<number> {
 		const row = await first<{ n: number }>(
 			this.step,
 			"SELECT COUNT(*) AS n FROM discover_frontier WHERE system_id = ?",
 			systemId,
 		);
-		return Number(row?.n ?? 0) > 0;
+		return Number(row?.n ?? 0);
+	}
+
+	async noteSliceBaseline(systemId: SystemId, frontier: number): Promise<void> {
+		await run(
+			this.step,
+			"UPDATE discover_run SET error = ? WHERE system_id = ?",
+			sliceMark(false, frontier),
+			systemId,
+		);
+	}
+
+	async noteSliceAccepted(systemId: SystemId): Promise<void> {
+		const row = await first<{ error: string | null }>(
+			this.step,
+			"SELECT error FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		const mark = parseSliceMark(row?.error ?? null);
+		const frontier = mark?.frontier ?? (await this.frontierCount(systemId));
+		await run(
+			this.step,
+			"UPDATE discover_run SET error = ? WHERE system_id = ?",
+			sliceMark(true, frontier),
+			systemId,
+		);
+	}
+
+	async sliceMadeProgress(systemId: SystemId): Promise<boolean> {
+		const row = await first<{ error: string | null }>(
+			this.step,
+			"SELECT error FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		const mark = parseSliceMark(row?.error ?? null);
+		if (!mark) {
+			return false;
+		}
+		return mark.accepted || (await this.frontierCount(systemId)) < mark.frontier;
+	}
+
+	async recordDiscoverResume(systemId: SystemId, seedHash: string, yieldedAt: string): Promise<void> {
+		await run(
+			this.step,
+			`INSERT INTO discover_resume (system_id, seed_hash, yielded_at) VALUES (?, ?, ?)
+			 ON CONFLICT(system_id) DO UPDATE SET
+			   seed_hash = excluded.seed_hash,
+			   yielded_at = excluded.yielded_at`,
+			systemId,
+			seedHash,
+			yieldedAt,
+		);
+	}
+
+	async discoverResume(systemId: SystemId): Promise<{ seedHash: string; yieldedAt: string } | null> {
+		const row = await first<{ seed_hash: string; yielded_at: string }>(
+			this.step,
+			"SELECT seed_hash, yielded_at FROM discover_resume WHERE system_id = ?",
+			systemId,
+		);
+		if (!row) {
+			return null;
+		}
+		return { seedHash: row.seed_hash, yieldedAt: row.yielded_at };
 	}
 
 	async releaseSlot(systemId: SystemId): Promise<void> {
@@ -822,6 +889,7 @@ export class D1PageQueue implements PageQueue {
 		await run(this.step, "DELETE FROM discover_url WHERE system_id = ?", systemId);
 		await run(this.step, "DELETE FROM discover_frontier WHERE system_id = ?", systemId);
 		await run(this.step, "DELETE FROM discover_attempt WHERE system_id = ?", systemId);
+		await run(this.step, "DELETE FROM discover_resume WHERE system_id = ?", systemId);
 		await run(this.step, "DELETE FROM discover_run WHERE system_id = ?", systemId);
 	}
 
@@ -1074,6 +1142,18 @@ export class D1PageQueue implements PageQueue {
 		);
 	}
 
+	async noteCapDeferBase(systemId: SystemId, now: string): Promise<void> {
+		await runOnce(
+			this.step,
+			`INSERT INTO cap_defer (system_id, deferred_at, streak) VALUES (?, ?, 1)
+			 ON CONFLICT(system_id) DO UPDATE SET
+			   deferred_at = excluded.deferred_at,
+			   streak = 1`,
+			systemId,
+			now,
+		);
+	}
+
 	async clearCapDefer(systemId: SystemId): Promise<void> {
 		await run(this.step, "DELETE FROM cap_defer WHERE system_id = ?", systemId);
 	}
@@ -1146,6 +1226,18 @@ export class D1PageQueue implements PageQueue {
 			console.log(JSON.stringify({ event: "fill_lease_release_missed", owner }));
 		}
 	}
+}
+
+function parseSliceMark(error: string | null): { accepted: boolean; frontier: number } | null {
+	const match = SLICE_MARK.exec(error ?? "");
+	if (!match) {
+		return null;
+	}
+	return { accepted: match[1] === "1", frontier: Number(match[2]) };
+}
+
+function sliceMark(accepted: boolean, frontier: number): string {
+	return `slice:${accepted ? "1" : "0"}:${frontier}`;
 }
 
 function pageLease(systemId: SystemId, url: string): string | null {
