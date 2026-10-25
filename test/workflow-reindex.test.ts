@@ -65,6 +65,7 @@ describe("workflow crawl poll", () => {
 	});
 
 	it("fails a crawl that is still running at the poll deadline", async () => {
+		expect(CRAWL_POLL_DEADLINE_MS).toBe(7 * 24 * 60 * 60 * 1000);
 		expect(WORKFLOW_POLL_MAX).toBe(Math.ceil(CRAWL_POLL_DEADLINE_MS / (2 * 60 * 1000)));
 		const sleeps: Array<string | number> = [];
 		const step: WorkflowSleepStep = {
