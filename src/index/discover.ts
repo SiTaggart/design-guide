@@ -384,7 +384,7 @@ async function continueDiscover(
 	if (Date.parse(run.startedAt) + CRAWL_POLL_DEADLINE_MS < now.getTime()) {
 		await queue.noteAttempt(run.systemId, run.startUrl);
 		await cancelJob(auth, run, deps);
-		return yieldDiscoverSlot(env, queue, auth, run, deps, iso);
+		return yieldDiscoverSlot(env, queue, auth, run, deps, iso, true);
 	}
 	if (run.jobId === AWAITING_FRONTIER_JOB) {
 		return followFrontier(env, queue, auth, run, deps, iso, 0);
@@ -625,6 +625,7 @@ async function yieldDiscoverSlot(
 	run: DiscoverRun,
 	deps: DiscoverDeps,
 	iso: string,
+	markIncomplete = false,
 ): Promise<DiscoverTickResult> {
 	const staged = await queue.stagedUrls(run.systemId);
 	const indexable = await queue.indexableUrls(run.systemId);
@@ -645,7 +646,7 @@ async function yieldDiscoverSlot(
 					now: iso,
 					deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
 				});
-	await queue.rememberSliceIncomplete(run.systemId);
+	await queue.rememberSliceIncomplete(run.systemId, markIncomplete);
 	if (await queue.sliceMadeProgress(run.systemId)) {
 		await queue.noteCapDeferBase(run.systemId, iso);
 	} else {

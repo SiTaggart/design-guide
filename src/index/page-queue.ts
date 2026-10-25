@@ -10,7 +10,7 @@ export const FRESHNESS_MS = 30 * 24 * 60 * 60 * 1000;
 export const EXHAUSTED_RETRY_MS = 60 * 60 * 1000;
 const STALE_CLAIM_MS = 15 * 60 * 1000;
 const FILL_LEASE_ID = "fill";
-// Not a page url. A yielded slice that was capped or skipped leaves this row so a later full pass does not prune.
+// Not a page url. A yielded slice that was capped, skipped, or cancelled at the poll deadline leaves this row so a later full pass does not prune.
 const INCOMPLETE_SLICE = "yield:incomplete";
 
 /**
@@ -785,8 +785,8 @@ export class D1PageQueue implements PageQueue {
 		return row?.poll_failures ?? 0;
 	}
 
-	async rememberSliceIncomplete(systemId: SystemId): Promise<void> {
-		if ((await this.cappedAny(systemId)) || (await this.skippedAny(systemId))) {
+	async rememberSliceIncomplete(systemId: SystemId, forced = false): Promise<void> {
+		if (forced || (await this.cappedAny(systemId)) || (await this.skippedAny(systemId))) {
 			await this.noteAttempt(systemId, INCOMPLETE_SLICE);
 		}
 	}
