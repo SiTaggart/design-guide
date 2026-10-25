@@ -515,6 +515,90 @@ describe("discover continuation", () => {
 		expect(queued.results?.map((row) => row.url)).toEqual([kept, also, removed]);
 	});
 
+	it("cancels a discover run older than 24 hours that still has staged urls and starts a different system on the next tick", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		const dayMs = 24 * 60 * 60 * 1000;
+		const startedAt = new Date(Date.parse(NOW) - dayMs - 60_000).toISOString();
+		const kept = "https://paste-dsys.com/components/form";
+		const also = "https://paste-dsys.com/components/input";
+		const removed = "https://paste-dsys.com/components/removed";
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-day",
+			startUrl: "https://paste-dsys.com/",
+			cursor: "12",
+			pollFailures: 0,
+			startedAt,
+			now: startedAt,
+		});
+		await pageQueue.stageUrl("paste", kept);
+		await pageQueue.stageUrl("paste", also);
+		await pageQueue.stageIndexable("paste", kept);
+		await pageQueue.stageIndexable("paste", also);
+		await pageQueue.enqueueUpsert([{ systemId: "paste", url: removed, kind: "seed" }], startedAt);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const cancelled: string[] = [];
+		const timedOut = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => {
+				throw new Error("a deadline must not poll");
+			},
+			page: async () => {
+				throw new Error("a deadline must not page");
+			},
+			start: async () => {
+				throw new Error("a deadline must not start another crawl");
+			},
+			deleteDocs: async () => {
+				throw new Error("a deadline must not prune");
+			},
+			cancel: async (_auth, jobId) => {
+				cancelled.push(jobId);
+			},
+		});
+		expect(timedOut).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			incomplete: true,
+			pruned: [],
+			urls: 2,
+		});
+		expect(cancelled).toEqual(["job-day"]);
+		const runs = await db.prepare("SELECT system_id FROM discover_run").all<{ system_id: string }>();
+		expect(runs.results).toEqual([]);
+		const deferred = await db
+			.prepare("SELECT system_id, deferred_at, streak FROM cap_defer")
+			.all<{ system_id: string; deferred_at: string; streak: number }>();
+		expect(deferred.results).toEqual([{ system_id: "paste", deferred_at: NOW, streak: 1 }]);
+		const refreshes = await db.prepare("SELECT system_id FROM seed_refresh").all<{ system_id: string }>();
+		expect(refreshes.results).toEqual([]);
+		const queued = await db
+			.prepare("SELECT url FROM page_work WHERE system_id = ? ORDER BY url ASC")
+			.bind("paste")
+			.all<{ url: string }>();
+		expect(queued.results?.map((row) => row.url)).toEqual([kept, also, removed]);
+		const started: string[] = [];
+		const next = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			start: async (_auth, seed) => {
+				started.push(seed.id);
+				return { startUrl: seed.startUrl, jobId: `job-${seed.id}` };
+			},
+			poll: async () => ({ status: "running" }),
+			cancel: async () => undefined,
+		});
+		expect(started).toEqual(["primer"]);
+		expect(next).toMatchObject({ action: "started", systemId: "primer", trigger: "deploy-drift" });
+		const open = await db.prepare("SELECT system_id FROM discover_run").all<{ system_id: string }>();
+		expect(open.results).toEqual([{ system_id: "primer" }]);
+	});
+
 	it("ends a run that cannot start any frontier url within a bounded number of ticks", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
