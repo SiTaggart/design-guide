@@ -37,6 +37,7 @@ const MIGRATIONS = [
 	"0011_page_work.sql",
 	"0012_fill_lease.sql",
 	"0013_claim_token.sql",
+	"0014_discover_resume.sql",
 ];
 
 function filesUnder(dir: string): string[] {
@@ -74,6 +75,20 @@ describe("page queue migrations", () => {
 		expect(columns.results.map((column) => column.name)).toEqual(PAGE_WORK_COLUMNS_NOW);
 		const lease = await db.prepare("PRAGMA table_info(fill_lease)").all<{ name: string }>();
 		expect(lease.results.map((column) => column.name)).toEqual(["id", "owner", "claimed_at"]);
+		const resume = await db.prepare("PRAGMA table_info(discover_resume)").all<{ name: string }>();
+		expect(resume.results.map((column) => column.name)).toEqual(["system_id", "seed_hash", "yielded_at"]);
+		const discoverRun = await db.prepare("PRAGMA table_info(discover_run)").all<{ name: string }>();
+		const discoverNames = discoverRun.results.map((column) => column.name);
+		expect(discoverNames).toContain("slice_frontier_start");
+		expect(discoverNames).toContain("slice_accepted");
+		expect(discoverNames).toContain("error");
+	});
+
+	it("adds slice progress columns in the discover_resume migration", () => {
+		const sql = readFileSync(join(root, "migrations/0014_discover_resume.sql"), "utf8");
+		expect(sql).toContain("CREATE TABLE IF NOT EXISTS discover_resume");
+		expect(sql).toContain("ALTER TABLE discover_run ADD COLUMN slice_frontier_start INTEGER");
+		expect(sql).toContain("ALTER TABLE discover_run ADD COLUMN slice_accepted INTEGER NOT NULL DEFAULT 0");
 	});
 
 	it("adds claim_token in its own migration", () => {

@@ -10,6 +10,8 @@ export const FRESHNESS_MS = 30 * 24 * 60 * 60 * 1000;
 export const EXHAUSTED_RETRY_MS = 60 * 60 * 1000;
 const STALE_CLAIM_MS = 15 * 60 * 1000;
 const FILL_LEASE_ID = "fill";
+// Not a page url. A yielded slice that was capped, skipped, or cancelled at the poll deadline leaves this row so a later full pass does not prune.
+const INCOMPLETE_SLICE = "yield:incomplete";
 
 /**
  * A cron worker can run for 15 minutes. The fill lease used to expire at that same age, so a
@@ -78,6 +80,7 @@ export type PageQueue = {
 	enqueueUpsert(
 		items: ReadonlyArray<{ systemId: SystemId; url: string; kind: PageKind }>,
 		now: string,
+		options?: { keepDone?: boolean },
 	): Promise<void>;
 	claim(limit: number, now: string): Promise<ClaimedPage[]>;
 	complete(
@@ -247,7 +250,12 @@ export class D1PageQueue implements PageQueue {
 	async enqueueUpsert(
 		items: ReadonlyArray<{ systemId: SystemId; url: string; kind: PageKind }>,
 		now: string,
+		options?: { keepDone?: boolean },
 	): Promise<void> {
+		const held =
+			options?.keepDone === true
+				? "page_work.status = 'done' OR page_work.status = 'claimed'"
+				: "page_work.status = 'claimed'";
 		for (const item of items) {
 			await run(
 				this.step,
@@ -259,19 +267,19 @@ export class D1PageQueue implements PageQueue {
 				     ELSE excluded.kind
 				   END,
 				   status = CASE
-				     WHEN page_work.status = 'claimed' THEN page_work.status
+				     WHEN ${held} THEN page_work.status
 				     ELSE 'pending'
 				   END,
 				   attempts = CASE
-				     WHEN page_work.status = 'claimed' THEN page_work.attempts
+				     WHEN ${held} THEN page_work.attempts
 				     ELSE 0
 				   END,
 				   error = CASE
-				     WHEN page_work.status = 'claimed' THEN page_work.error
+				     WHEN ${held} THEN page_work.error
 				     ELSE NULL
 				   END,
 				   claim_token = CASE
-				     WHEN page_work.status = 'claimed' THEN page_work.claim_token
+				     WHEN ${held} THEN page_work.claim_token
 				     ELSE NULL
 				   END`,
 				item.systemId,
@@ -674,6 +682,7 @@ export class D1PageQueue implements PageQueue {
 			run.now,
 		);
 		await this.noteAttempt(run.systemId, run.startUrl);
+		await this.noteSliceBaseline(run.systemId, await this.frontierCount(run.systemId));
 	}
 
 	async saveCursor(systemId: SystemId, cursor: string | null, now: string): Promise<void> {
@@ -776,16 +785,106 @@ export class D1PageQueue implements PageQueue {
 		return row?.poll_failures ?? 0;
 	}
 
+	async rememberSliceIncomplete(systemId: SystemId, forced = false): Promise<void> {
+		if (forced || (await this.cappedAny(systemId)) || (await this.skippedAny(systemId))) {
+			await this.noteAttempt(systemId, INCOMPLETE_SLICE);
+		}
+	}
+
+	async takeSliceIncomplete(systemId: SystemId): Promise<boolean> {
+		const row = await first<{ url: string }>(
+			this.step,
+			"SELECT url FROM discover_attempt WHERE system_id = ? AND url = ?",
+			systemId,
+			INCOMPLETE_SLICE,
+		);
+		if (!row) {
+			return false;
+		}
+		await run(this.step, "DELETE FROM discover_attempt WHERE system_id = ? AND url = ?", systemId, INCOMPLETE_SLICE);
+		return true;
+	}
+
+	async frontierCount(systemId: SystemId): Promise<number> {
+		const row = await first<{ n: number }>(
+			this.step,
+			"SELECT COUNT(*) AS n FROM discover_frontier WHERE system_id = ?",
+			systemId,
+		);
+		return Number(row?.n ?? 0);
+	}
+
+	async noteSliceBaseline(systemId: SystemId, frontier: number): Promise<void> {
+		await run(
+			this.step,
+			"UPDATE discover_run SET slice_frontier_start = ?, slice_accepted = 0 WHERE system_id = ?",
+			frontier,
+			systemId,
+		);
+	}
+
+	async noteSliceAccepted(systemId: SystemId): Promise<void> {
+		await run(this.step, "UPDATE discover_run SET slice_accepted = 1 WHERE system_id = ?", systemId);
+	}
+
+	async sliceMadeProgress(systemId: SystemId): Promise<boolean> {
+		const row = await first<{ slice_accepted: number; slice_frontier_start: number | null }>(
+			this.step,
+			"SELECT slice_accepted, slice_frontier_start FROM discover_run WHERE system_id = ?",
+			systemId,
+		);
+		if (!row) {
+			return false;
+		}
+		if (row.slice_accepted > 0) {
+			return true;
+		}
+		if (row.slice_frontier_start === null) {
+			return false;
+		}
+		return (await this.frontierCount(systemId)) < row.slice_frontier_start;
+	}
+
+	async recordDiscoverResume(systemId: SystemId, seedHash: string, yieldedAt: string): Promise<void> {
+		await run(
+			this.step,
+			`INSERT INTO discover_resume (system_id, seed_hash, yielded_at) VALUES (?, ?, ?)
+			 ON CONFLICT(system_id) DO UPDATE SET
+			   seed_hash = excluded.seed_hash,
+			   yielded_at = excluded.yielded_at`,
+			systemId,
+			seedHash,
+			yieldedAt,
+		);
+	}
+
+	async discoverResume(systemId: SystemId): Promise<{ seedHash: string; yieldedAt: string } | null> {
+		const row = await first<{ seed_hash: string; yielded_at: string }>(
+			this.step,
+			"SELECT seed_hash, yielded_at FROM discover_resume WHERE system_id = ?",
+			systemId,
+		);
+		if (!row) {
+			return null;
+		}
+		return { seedHash: row.seed_hash, yieldedAt: row.yielded_at };
+	}
+
+	async releaseSlot(systemId: SystemId): Promise<void> {
+		await run(this.step, "DELETE FROM discover_run WHERE system_id = ?", systemId);
+	}
+
 	async clearRun(systemId: SystemId): Promise<void> {
 		await run(this.step, "DELETE FROM discover_indexable WHERE system_id = ?", systemId);
 		await run(this.step, "DELETE FROM discover_url WHERE system_id = ?", systemId);
 		await run(this.step, "DELETE FROM discover_frontier WHERE system_id = ?", systemId);
 		await run(this.step, "DELETE FROM discover_attempt WHERE system_id = ?", systemId);
+		await run(this.step, "DELETE FROM discover_resume WHERE system_id = ?", systemId);
 		await run(this.step, "DELETE FROM discover_run WHERE system_id = ?", systemId);
 	}
 
 	async replaceJob(systemId: SystemId, jobId: string, startUrl: string, now: string): Promise<void> {
-		// started_at stays put. The 7-day deadline covers the whole follow-up chain.
+		// started_at stays put so the poll deadline covers the whole follow-up chain.
 		await run(
 			this.step,
 			`UPDATE discover_run
@@ -1028,6 +1127,18 @@ export class D1PageQueue implements PageQueue {
 			 ON CONFLICT(system_id) DO UPDATE SET
 			   deferred_at = excluded.deferred_at,
 			   streak = cap_defer.streak + 1`,
+			systemId,
+			now,
+		);
+	}
+
+	async noteCapDeferBase(systemId: SystemId, now: string): Promise<void> {
+		await runOnce(
+			this.step,
+			`INSERT INTO cap_defer (system_id, deferred_at, streak) VALUES (?, ?, 1)
+			 ON CONFLICT(system_id) DO UPDATE SET
+			   deferred_at = excluded.deferred_at,
+			   streak = 1`,
 			systemId,
 			now,
 		);
