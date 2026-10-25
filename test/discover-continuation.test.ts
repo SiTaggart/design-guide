@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { seedById } from "../src/config/seed.ts";
 import { CRAWL_POLL_DEADLINE_MS } from "../src/crawl/browser-run.ts";
 import { discoverTick } from "../src/index/discover.ts";
 import { D1PageQueue } from "../src/index/page-queue.ts";
+import { systemSeedHash } from "../src/index/seed-hash.ts";
 import { memoryD1 } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
@@ -686,6 +688,10 @@ describe("discover continuation", () => {
 		await pageQueue.stageIndexable("paste", form);
 		await pageQueue.stageIndexable("paste", input);
 		await pageQueue.addFrontier("paste", [button]);
+		await db
+			.prepare("INSERT INTO discover_resume (system_id, seed_hash, yielded_at) VALUES ('paste', ?, ?)")
+			.bind(systemSeedHash(seedById("paste")), NOW)
+			.run();
 		await pageQueue.enqueueUpsert(
 			[
 				{ systemId: "paste", url: form, kind: "seed" },
@@ -866,16 +872,17 @@ describe("discover continuation", () => {
 		expect(refreshes.results).toEqual([]);
 	});
 
-	it("fails a discover run that is past the 7 day poll deadline with nothing staged", async () => {
+	it("yields a discover run that is past the 7 day poll deadline with nothing staged", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
 		const startedAt = new Date(Date.parse(NOW) - CRAWL_POLL_DEADLINE_MS - 60_000).toISOString();
+		const startUrl = "https://paste-dsys.com/";
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
 			trigger: "deploy-drift",
 			jobId: "job-empty-week",
-			startUrl: "https://paste-dsys.com/",
+			startUrl,
 			cursor: null,
 			pollFailures: 0,
 			startedAt,
@@ -887,20 +894,31 @@ describe("discover continuation", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
+		const cancelled: string[] = [];
 		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
 			poll: async () => {
 				throw new Error("a deadline must not poll");
 			},
-			cancel: async () => undefined,
+			cancel: async (_auth, jobId) => {
+				cancelled.push(jobId);
+			},
 		});
-		expect(result).toEqual({
-			action: "failed",
+		expect(cancelled).toEqual(["job-empty-week"]);
+		expect(result).toMatchObject({
+			action: "enqueued",
 			systemId: "paste",
 			trigger: "deploy-drift",
-			error: "discover timed out",
+			urls: 0,
+			pruned: [],
+			incomplete: true,
 		});
 		const runs = await db.prepare("SELECT system_id FROM discover_run").all<{ system_id: string }>();
 		expect(runs.results).toEqual([]);
+		expect(await urls(db, "discover_attempt")).toContain(startUrl);
+		const parked = await db
+			.prepare("SELECT seed_hash, yielded_at FROM discover_resume WHERE system_id = 'paste'")
+			.all<{ seed_hash: string; yielded_at: string }>();
+		expect(parked.results).toEqual([{ seed_hash: systemSeedHash(seedById("paste")), yielded_at: NOW }]);
 	});
 
 	it("does not time out a discover run that is 25 hours old with nothing staged", async () => {
@@ -1331,5 +1349,224 @@ describe("discover continuation", () => {
 			.bind("paste")
 			.all<{ url: string }>();
 		expect(queued.results?.map((row) => row.url)).toEqual([kept, also]);
+	});
+
+	it("keeps cap_defer streak at 1 across two progress yields and escalates a slice with no progress", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		const aged = new Date(Date.parse(NOW) - DAY_MS - 60_000).toISOString();
+		const cooled = new Date(Date.parse(NOW) - 8 * DAY_MS).toISOString();
+		const button = "https://paste-dsys.com/components/button";
+		const dialog = "https://paste-dsys.com/components/dialog";
+		const empty = "https://paste-dsys.com/components/empty";
+		const form = "https://paste-dsys.com/components/form";
+		await pageQueue.addFrontier("paste", [button, dialog]);
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-progress-1",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: aged,
+			now: aged,
+		});
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const started: string[] = [];
+		const deps = {
+			poll: async () => ({ status: "completed" as const, finished: 1, total: 1 }),
+			page: async () => ({
+				records: [{ url: form, status: "completed" as const, markdown: "# form" }],
+				cursor: null,
+			}),
+			start: async (_auth: unknown, seed: { startUrl: string }, startUrl?: string) => {
+				const url = startUrl ?? seed.startUrl;
+				started.push(url);
+				return { startUrl: url, jobId: `job-${started.length}` };
+			},
+			deleteDocs: async () => {
+				throw new Error("a yield must not prune");
+			},
+			cancel: async () => {
+				throw new Error("a budget yield must not cancel");
+			},
+		};
+		const accepted = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		expect(accepted).toMatchObject({ action: "enqueued", systemId: "paste" });
+		expect(started).toEqual([]);
+		await db.prepare("UPDATE cap_defer SET deferred_at = ? WHERE system_id = 'paste'").bind(cooled).run();
+		await db.prepare("UPDATE page_work SET status = 'done' WHERE system_id = 'paste'").run();
+		const resumed = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		expect(resumed).toMatchObject({ action: "started", systemId: "paste" });
+		expect(started).toEqual([button]);
+		await db.prepare("UPDATE discover_run SET started_at = ? WHERE system_id = 'paste'").bind(aged).run();
+		const acceptedAgain = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		expect(acceptedAgain).toMatchObject({ action: "enqueued", systemId: "paste" });
+		const progressed = await db
+			.prepare("SELECT streak FROM cap_defer WHERE system_id = 'paste'")
+			.all<{ streak: number }>();
+		expect(progressed.results).toEqual([{ streak: 1 }]);
+		await pageQueue.addFrontier("paste", [empty, "https://example.com/nope"]);
+		await db.prepare("UPDATE cap_defer SET deferred_at = ? WHERE system_id = 'paste'").bind(cooled).run();
+		await db.prepare("UPDATE page_work SET status = 'done' WHERE system_id = 'paste'").run();
+		const shorter = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		expect(shorter).toMatchObject({ action: "started", systemId: "paste" });
+		expect(started).toEqual([button, dialog]);
+		await db
+			.prepare("UPDATE discover_run SET cursor = 'done', started_at = ? WHERE system_id = 'paste'")
+			.bind(aged)
+			.run();
+		const shortened = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		expect(shortened).toMatchObject({ action: "enqueued", systemId: "paste" });
+		const stillBase = await db
+			.prepare("SELECT streak FROM cap_defer WHERE system_id = 'paste'")
+			.all<{ streak: number }>();
+		expect(stillBase.results).toEqual([{ streak: 1 }]);
+		await pageQueue.addFrontier("paste", ["https://paste-dsys.com/components/tail"]);
+		await db.prepare("UPDATE cap_defer SET deferred_at = ? WHERE system_id = 'paste'").bind(cooled).run();
+		await db.prepare("UPDATE page_work SET status = 'done' WHERE system_id = 'paste'").run();
+		const again = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		expect(again).toMatchObject({ action: "started", systemId: "paste" });
+		expect(started).toEqual([button, dialog, empty]);
+		await db
+			.prepare("UPDATE discover_run SET cursor = 'done', started_at = ? WHERE system_id = 'paste'")
+			.bind(aged)
+			.run();
+		const stalled = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		expect(stalled).toMatchObject({ action: "enqueued", systemId: "paste" });
+		const escalated = await db
+			.prepare("SELECT streak FROM cap_defer WHERE system_id = 'paste'")
+			.all<{ streak: number }>();
+		expect(escalated.results).toEqual([{ streak: 2 }]);
+	});
+
+	it("restarts from the seed when the parked seed hash changes", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		const aged = new Date(Date.parse(NOW) - DAY_MS - 60_000).toISOString();
+		const button = "https://paste-dsys.com/components/button";
+		const kept = "https://paste-dsys.com/components/form";
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-parked",
+			startUrl: "https://paste-dsys.com/",
+			cursor: null,
+			pollFailures: 0,
+			startedAt: aged,
+			now: aged,
+		});
+		await pageQueue.saveCursor("paste", "done", aged);
+		await pageQueue.stageUrl("paste", kept);
+		await pageQueue.stageIndexable("paste", kept);
+		await pageQueue.addFrontier("paste", [button]);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => ({ status: "completed", finished: 1, total: 1 }),
+			cancel: async () => {
+				throw new Error("a budget yield must not cancel");
+			},
+			deleteDocs: async () => {
+				throw new Error("a yield must not prune");
+			},
+		});
+		const parked = await db
+			.prepare("SELECT seed_hash, yielded_at FROM discover_resume WHERE system_id = 'paste'")
+			.all<{ seed_hash: string; yielded_at: string }>();
+		expect(parked.results).toEqual([{ seed_hash: systemSeedHash(seedById("paste")), yielded_at: NOW }]);
+		await db.prepare("UPDATE discover_resume SET seed_hash = ? WHERE system_id = 'paste'").bind("stale").run();
+		await db.prepare("DELETE FROM cap_defer WHERE system_id = 'paste'").run();
+		await db.prepare("UPDATE page_work SET status = 'done' WHERE system_id = 'paste'").run();
+		const started: string[] = [];
+		const resumed = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			start: async (_auth, seed, startUrl) => {
+				started.push(startUrl ?? seed.startUrl);
+				return { startUrl: startUrl ?? seed.startUrl, jobId: "job-seed" };
+			},
+			cancel: async () => undefined,
+		});
+		expect(started).toEqual(["https://paste-dsys.com/"]);
+		expect(resumed).toMatchObject({ action: "started", systemId: "paste" });
+		expect(await urls(db, "discover_frontier")).toEqual([]);
+		const resumeRows = await db.prepare("SELECT system_id FROM discover_resume").all<{ system_id: string }>();
+		expect(resumeRows.results).toEqual([]);
+	});
+
+	it("yields a discover run past the 7 day poll deadline and keeps the frontier", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		const startedAt = new Date(Date.parse(NOW) - CRAWL_POLL_DEADLINE_MS - 60_000).toISOString();
+		const stuck = "https://paste-dsys.com/components/button";
+		const kept = "https://paste-dsys.com/components/form";
+		await pageQueue.insertRun({
+			systemId: "paste",
+			kind: "seed",
+			trigger: "deploy-drift",
+			jobId: "job-stuck",
+			startUrl: stuck,
+			cursor: null,
+			pollFailures: 0,
+			startedAt,
+			now: startedAt,
+		});
+		await pageQueue.stageUrl("paste", kept);
+		await pageQueue.stageIndexable("paste", kept);
+		await pageQueue.addFrontier("paste", [stuck, "https://paste-dsys.com/components/dialog"]);
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const cancelled: string[] = [];
+		const result = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			poll: async () => {
+				throw new Error("a 7 day deadline must not poll");
+			},
+			page: async () => {
+				throw new Error("a 7 day deadline must not page");
+			},
+			start: async () => {
+				throw new Error("a 7 day deadline must not start another crawl");
+			},
+			deleteDocs: async () => {
+				throw new Error("a 7 day yield must not prune");
+			},
+			cancel: async (_auth, jobId) => {
+				cancelled.push(jobId);
+			},
+		});
+		expect(cancelled).toEqual(["job-stuck"]);
+		expect(result).toMatchObject({
+			action: "enqueued",
+			systemId: "paste",
+			incomplete: true,
+			pruned: [],
+		});
+		expect(await urls(db, "discover_frontier")).toEqual([
+			stuck,
+			"https://paste-dsys.com/components/dialog",
+		]);
+		expect(await urls(db, "discover_url")).toEqual([kept]);
+		expect(await urls(db, "discover_indexable")).toEqual([kept]);
+		expect(await urls(db, "discover_attempt")).toContain(stuck);
+		const runs = await db.prepare("SELECT system_id FROM discover_run").all<{ system_id: string }>();
+		expect(runs.results).toEqual([]);
+		const parked = await db
+			.prepare("SELECT seed_hash, yielded_at FROM discover_resume WHERE system_id = 'paste'")
+			.all<{ seed_hash: string; yielded_at: string }>();
+		expect(parked.results).toEqual([{ seed_hash: systemSeedHash(seedById("paste")), yielded_at: NOW }]);
 	});
 });
