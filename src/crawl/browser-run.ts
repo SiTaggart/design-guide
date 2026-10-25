@@ -63,7 +63,7 @@ export class CrawlStartError extends Error {
 }
 
 export const CLI_POLL_INTERVAL_MS = 15_000;
-export const CRAWL_POLL_DEADLINE_MS = 7 * 24 * 60 * 60 * 1000;
+export const CRAWL_POLL_DEADLINE_MS = 24 * 60 * 60 * 1000;
 const MAX_CONSECUTIVE_POLL_FAILURES = 5;
 
 function crawlUrl(accountId: string, jobId?: string): string {
