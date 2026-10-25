@@ -31,6 +31,8 @@ import {
 export const DISCOVER_URLS_PER_TICK = 25;
 export const CAP_RETRY_MS = 60 * 60 * 1000;
 export const DISCOVER_SLOT_BUDGET_MS = 24 * 60 * 60 * 1000;
+/** Resume has no crawl job yet. Poll would have nothing to read, so the frontier loop runs instead. */
+const AWAITING_FRONTIER_JOB = "";
 
 export type CapDeferMark = string | { at: string; streak: number };
 
@@ -384,6 +386,9 @@ async function continueDiscover(
 		await cancelJob(auth, run, deps);
 		return yieldDiscoverSlot(env, queue, auth, run, deps, iso);
 	}
+	if (run.jobId === AWAITING_FRONTIER_JOB) {
+		return followFrontier(env, queue, auth, run, deps, iso, 0);
+	}
 	let snapshot: { status: string; finished: number };
 	try {
 		const job = await deps.poll(auth, run.jobId);
@@ -482,48 +487,66 @@ async function continueDiscover(
 		}
 	}
 	if (!runaway) {
-		const seen = new Set(await queue.stagedUrls(run.systemId));
-		let next = await queue.nextFrontier(run.systemId, seen);
-		while (next) {
-			const frontierUrl = next;
-			try {
-				const started = await deps.start(auth, seed, frontierUrl);
-				await queue.replaceJob(run.systemId, started.jobId, started.startUrl, iso);
-				return { action: "continued", systemId: run.systemId, accepted };
-			} catch (error) {
-				if (isTickDeadlineStop(error)) {
-					throw error;
-				}
-				const message = startFailureMessage(error);
-				console.log(
-					JSON.stringify({
-						event: "crawl_start_failed",
-						system: run.systemId,
-						url: frontierUrl,
-						error: message,
-					}),
-				);
-				if (accountAuthFailure(error)) {
-					await queue.noteSkipped(run.systemId, iso);
-					await queue.noteAttempt(run.systemId, frontierUrl);
-					break;
-				}
-				const failures = await queue.noteStartFailure(run.systemId, iso);
-				if (failures < MAX_POLL_FAILURES) {
-					return { action: "continued", systemId: run.systemId, accepted };
-				}
-				const skipped = await queue.noteSkipped(run.systemId, iso);
-				await queue.noteAttempt(run.systemId, frontierUrl);
-				await queue.clearStartFailures(run.systemId, iso);
-				await queue.clearPollFailures(run.systemId, iso);
-				if (skipped >= MAX_SKIPPED_STARTS) {
-					break;
-				}
-				next = await queue.nextFrontier(run.systemId, seen);
-			}
-		}
+		return followFrontier(env, queue, auth, run, deps, iso, accepted);
 	}
 	const incomplete = runaway || (await queue.cappedAny(run.systemId)) || (await queue.skippedAny(run.systemId));
+	return finishDiscover(env, queue, auth, run, deps, iso, incomplete);
+}
+
+async function followFrontier(
+	env: WorkerEnv,
+	queue: D1PageQueue,
+	auth: CrawlAuth,
+	run: DiscoverRun,
+	deps: DiscoverDeps,
+	iso: string,
+	accepted: number,
+): Promise<DiscoverTickResult> {
+	const seed = seedById(run.systemId);
+	const seen = new Set(await queue.stagedUrls(run.systemId));
+	let next = await queue.nextFrontier(run.systemId, seen);
+	while (next) {
+		const frontierUrl = next;
+		try {
+			const started = await deps.start(auth, seed, frontierUrl);
+			await queue.replaceJob(run.systemId, started.jobId, started.startUrl, iso);
+			return { action: "continued", systemId: run.systemId, accepted };
+		} catch (error) {
+			if (isTickDeadlineStop(error)) {
+				throw error;
+			}
+			const message = startFailureMessage(error);
+			console.log(
+				JSON.stringify({
+					event: "crawl_start_failed",
+					system: run.systemId,
+					url: frontierUrl,
+					error: message,
+				}),
+			);
+			if (accountAuthFailure(error)) {
+				await queue.noteSkipped(run.systemId, iso);
+				await queue.noteAttempt(run.systemId, frontierUrl);
+				break;
+			}
+			const failures = await queue.noteStartFailure(run.systemId, iso);
+			if (failures < MAX_POLL_FAILURES) {
+				return { action: "continued", systemId: run.systemId, accepted };
+			}
+			const skipped = await queue.noteSkipped(run.systemId, iso);
+			await queue.noteAttempt(run.systemId, frontierUrl);
+			await queue.clearStartFailures(run.systemId, iso);
+			await queue.clearPollFailures(run.systemId, iso);
+			if (skipped >= MAX_SKIPPED_STARTS) {
+				break;
+			}
+			next = await queue.nextFrontier(run.systemId, seen);
+		}
+	}
+	if (await queue.skippedAny(run.systemId)) {
+		return yieldDiscoverSlot(env, queue, auth, run, deps, iso);
+	}
+	const incomplete = (await queue.cappedAny(run.systemId)) || (await queue.skippedAny(run.systemId));
 	return finishDiscover(env, queue, auth, run, deps, iso, incomplete);
 }
 
@@ -568,33 +591,31 @@ async function resumeDiscover(
 			incomplete,
 		);
 	}
-	let started: { startUrl: string; jobId: string };
-	try {
-		started = await deps.start(auth, seed, next);
-	} catch (error) {
-		return {
-			action: "failed",
-			systemId: pick.systemId,
-			trigger: pick.trigger,
-			error: error instanceof Error ? error.message : String(error),
-		};
-	}
 	await queue.insertRun({
 		systemId: pick.systemId,
 		kind: pick.kind,
 		trigger: pick.trigger,
-		jobId: started.jobId,
-		startUrl: started.startUrl,
+		jobId: AWAITING_FRONTIER_JOB,
+		startUrl: seed.startUrl,
 		cursor: null,
 		pollFailures: 0,
 		startedAt: iso,
 		now: iso,
 	});
+	await queue.saveCursor(pick.systemId, "done", iso);
 	await queue.noteSliceBaseline(pick.systemId, frontierAtStart);
 	if (await queue.takeSliceIncomplete(pick.systemId)) {
 		await queue.noteCapped(pick.systemId, iso);
 	}
-	return { action: "started", systemId: pick.systemId, kind: pick.kind, trigger: pick.trigger };
+	const run = await queue.running();
+	if (!run) {
+		return { action: "failed", systemId: pick.systemId, trigger: pick.trigger, error: "resume run missing" };
+	}
+	const followed = await followFrontier(env, queue, auth, run, deps, iso, 0);
+	if (followed.action === "continued" && (await queue.running())?.jobId) {
+		return { action: "started", systemId: pick.systemId, kind: pick.kind, trigger: pick.trigger };
+	}
+	return followed;
 }
 
 async function yieldDiscoverSlot(
