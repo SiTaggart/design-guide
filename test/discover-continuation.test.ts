@@ -1379,11 +1379,12 @@ describe("discover continuation", () => {
 			CLOUDFLARE_API_TOKEN: "token",
 		});
 		const started: string[] = [];
+		let holdCursor = false;
 		const deps = {
 			poll: async () => ({ status: "completed" as const, finished: 1, total: 1 }),
 			page: async () => ({
 				records: [{ url: form, status: "completed" as const, markdown: "# form" }],
-				cursor: null,
+				cursor: holdCursor ? "2" : null,
 			}),
 			start: async (_auth: unknown, seed: { startUrl: string }, startUrl?: string) => {
 				const url = startUrl ?? seed.startUrl;
@@ -1405,7 +1406,19 @@ describe("discover continuation", () => {
 		const resumed = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
 		expect(resumed).toMatchObject({ action: "started", systemId: "paste" });
 		expect(started).toEqual([button]);
-		await db.prepare("UPDATE discover_run SET started_at = ? WHERE system_id = 'paste'").bind(aged).run();
+		const opened = await db
+			.prepare("SELECT slice_frontier_start, slice_accepted, error FROM discover_run WHERE system_id = 'paste'")
+			.all<{ slice_frontier_start: number | null; slice_accepted: number; error: string | null }>();
+		expect(opened.results).toEqual([{ slice_frontier_start: 2, slice_accepted: 0, error: null }]);
+		holdCursor = true;
+		const acceptedOpen = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+		expect(acceptedOpen).toMatchObject({ action: "continued", systemId: "paste" });
+		const acceptedRow = await db
+			.prepare("SELECT slice_frontier_start, slice_accepted, error FROM discover_run WHERE system_id = 'paste'")
+			.all<{ slice_frontier_start: number | null; slice_accepted: number; error: string | null }>();
+		expect(acceptedRow.results).toEqual([{ slice_frontier_start: 2, slice_accepted: 1, error: null }]);
+		holdCursor = false;
+		await db.prepare("UPDATE discover_run SET cursor = 'done', started_at = ? WHERE system_id = 'paste'").bind(aged).run();
 		const acceptedAgain = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
 		expect(acceptedAgain).toMatchObject({ action: "enqueued", systemId: "paste" });
 		const progressed = await db
@@ -1418,6 +1431,11 @@ describe("discover continuation", () => {
 		const shorter = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
 		expect(shorter).toMatchObject({ action: "started", systemId: "paste" });
 		expect(started).toEqual([button, dialog]);
+		const shrunk = await db
+			.prepare("SELECT slice_frontier_start, slice_accepted, error FROM discover_run WHERE system_id = 'paste'")
+			.all<{ slice_frontier_start: number | null; slice_accepted: number; error: string | null }>();
+		expect(shrunk.results).toEqual([{ slice_frontier_start: 4, slice_accepted: 0, error: null }]);
+		expect((await urls(db, "discover_frontier")).length).toBeLessThan(4);
 		await db
 			.prepare("UPDATE discover_run SET cursor = 'done', started_at = ? WHERE system_id = 'paste'")
 			.bind(aged)
@@ -1568,5 +1586,68 @@ describe("discover continuation", () => {
 			.prepare("SELECT seed_hash, yielded_at FROM discover_resume WHERE system_id = 'paste'")
 			.all<{ seed_hash: string; yielded_at: string }>();
 		expect(parked.results).toEqual([{ seed_hash: systemSeedHash(seedById("paste")), yielded_at: NOW }]);
+	});
+
+	it("frees the slot and escalates cap_defer when a resume start throws", async () => {
+		const db = memoryD1();
+		const pageQueue = new D1PageQueue(db);
+		const button = "https://paste-dsys.com/components/button";
+		const cooled = new Date(Date.parse(NOW) - 8 * DAY_MS).toISOString();
+		await pageQueue.addFrontier("paste", [button]);
+		await db
+			.prepare("INSERT INTO discover_resume (system_id, seed_hash, yielded_at) VALUES ('paste', ?, ?)")
+			.bind(systemSeedHash(seedById("paste")), NOW)
+			.run();
+		await db
+			.prepare("INSERT INTO cap_defer (system_id, deferred_at, streak) VALUES ('paste', ?, 1)")
+			.bind(cooled)
+			.run();
+		const { env } = envWithIndex(fixtureChunks, true, {
+			INDEX: memoryKV(),
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const deps = {
+			poll: async () => ({ status: "completed" as const, finished: 1, total: 1 }),
+			page: async () => {
+				throw new Error("a failed resume start must not page");
+			},
+			start: async () => {
+				throw new Error("crawl start failed");
+			},
+			deleteDocs: async () => {
+				throw new Error("a failed resume must not prune");
+			},
+			cancel: async () => {
+				throw new Error("a failed resume must not cancel");
+			},
+		};
+		let result: Awaited<ReturnType<typeof discoverTick>> = { action: "skip", reason: "init" };
+		for (let tick = 0; tick < 8; tick += 1) {
+			result = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
+			if (result.action !== "continued" && result.action !== "started") {
+				break;
+			}
+		}
+		expect(result).toMatchObject({ action: "enqueued", systemId: "paste", incomplete: true, pruned: [] });
+		expect(await urls(db, "discover_attempt")).toContain(button);
+		const runs = await db.prepare("SELECT system_id FROM discover_run").all<{ system_id: string }>();
+		expect(runs.results).toEqual([]);
+		const streak = await db
+			.prepare("SELECT streak FROM cap_defer WHERE system_id = 'paste'")
+			.all<{ streak: number }>();
+		expect(streak.results).toEqual([{ streak: 2 }]);
+		const started: string[] = [];
+		const next = await discoverTick(env, DRIFT_CRON, new Date(NOW), {
+			start: async (_auth, seed) => {
+				started.push(seed.id);
+				return { startUrl: seed.startUrl, jobId: `job-${seed.id}` };
+			},
+			poll: async () => ({ status: "running" }),
+			cancel: async () => undefined,
+		});
+		expect(started).toEqual(["primer"]);
+		expect(next).toMatchObject({ action: "started", systemId: "primer" });
 	});
 });

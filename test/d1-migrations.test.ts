@@ -77,6 +77,18 @@ describe("page queue migrations", () => {
 		expect(lease.results.map((column) => column.name)).toEqual(["id", "owner", "claimed_at"]);
 		const resume = await db.prepare("PRAGMA table_info(discover_resume)").all<{ name: string }>();
 		expect(resume.results.map((column) => column.name)).toEqual(["system_id", "seed_hash", "yielded_at"]);
+		const discoverRun = await db.prepare("PRAGMA table_info(discover_run)").all<{ name: string }>();
+		const discoverNames = discoverRun.results.map((column) => column.name);
+		expect(discoverNames).toContain("slice_frontier_start");
+		expect(discoverNames).toContain("slice_accepted");
+		expect(discoverNames).toContain("error");
+	});
+
+	it("adds slice progress columns in the discover_resume migration", () => {
+		const sql = readFileSync(join(root, "migrations/0014_discover_resume.sql"), "utf8");
+		expect(sql).toContain("CREATE TABLE IF NOT EXISTS discover_resume");
+		expect(sql).toContain("ALTER TABLE discover_run ADD COLUMN slice_frontier_start INTEGER");
+		expect(sql).toContain("ALTER TABLE discover_run ADD COLUMN slice_accepted INTEGER NOT NULL DEFAULT 0");
 	});
 
 	it("adds claim_token in its own migration", () => {
