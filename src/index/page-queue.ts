@@ -858,6 +858,11 @@ export class D1PageQueue implements PageQueue {
 		);
 	}
 
+	async resumedSystems(): Promise<SystemId[]> {
+		const rows = await all<{ system_id: string }>(this.step, "SELECT system_id FROM discover_resume");
+		return rows.flatMap((row) => (isSystemId(row.system_id) ? [row.system_id] : []));
+	}
+
 	async discoverResume(systemId: SystemId): Promise<{ seedHash: string; yieldedAt: string } | null> {
 		const row = await first<{ seed_hash: string; yielded_at: string }>(
 			this.step,
@@ -1236,7 +1241,12 @@ export function isDue(input: {
 	lastDiscovered: string | null;
 	pending: number;
 	now: number;
+	hasResume?: boolean;
 }): boolean {
+	// A resume skips pending and busy. One slot, cap_defer spaces re-picks, and a claim keeps its token.
+	if (input.hasResume) {
+		return true;
+	}
 	if (input.pending > 0) {
 		return false;
 	}

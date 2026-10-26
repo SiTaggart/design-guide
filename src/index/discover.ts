@@ -22,6 +22,7 @@ import { isRecoveryCron } from "./trigger.ts";
 import { isTickDeadlineStop, type D1QueueOptions } from "./d1-step.ts";
 import {
 	D1PageQueue,
+	FRESHNESS_MS,
 	isDue,
 	type DiscoverRun,
 	type PageKind,
@@ -160,7 +161,9 @@ export function dueSystemIds(
 		claimed: number;
 	}>,
 	now: number,
+	resumed: readonly SystemId[] = [],
 ): SystemId[] {
+	const waiting = new Set(resumed);
 	return rows
 		.filter((row) =>
 			isDue({
@@ -168,6 +171,7 @@ export function dueSystemIds(
 				lastDiscovered: row.lastDiscovered,
 				pending: row.pending + row.claimed,
 				now,
+				hasResume: waiting.has(row.system),
 			}),
 		)
 		.sort((left, right) => {
@@ -322,7 +326,7 @@ async function runDiscover(
 	const pick = pickDiscoverSystem({
 		cron,
 		drifted: driftedSystems(await readIndexedHashes(env)),
-		due: dueSystemIds(freshness, now.getTime()),
+		due: dueSystemIds(freshness, now.getTime(), await queue.resumedSystems()),
 		parked: parkedSystemIds(parksRead.parks),
 		parks: parksRead.parks,
 		busy: new Set(freshness.filter((row) => row.pending + row.claimed > 0).map((row) => row.system)),
@@ -338,10 +342,11 @@ async function runDiscover(
 	if (pick.trigger === "recovery") {
 		await queue.noteRecoveryAttempt(pick.systemId, iso);
 	}
-	// discover_resume is the parked slice. A different seed hash drops that map and starts over.
+	// discover_resume is the parked slice. A different seed hash, or a yield older than the recrawl window, drops that map and starts over.
 	const parked = await queue.discoverResume(pick.systemId);
 	if (parked) {
-		if (parked.seedHash !== systemSeedHash(seed)) {
+		const resumeStale = now.getTime() - Date.parse(parked.yieldedAt) > FRESHNESS_MS;
+		if (parked.seedHash !== systemSeedHash(seed) || resumeStale) {
 			await queue.clearRun(pick.systemId);
 		} else {
 			return resumeDiscover(env, queue, auth, pick, deps, iso);
@@ -647,10 +652,14 @@ async function yieldDiscoverSlot(
 					deleteDocs: (dropped) => deps.deleteDocs(itemsAuth, run.systemId, dropped, new Set(live)),
 				});
 	await queue.rememberSliceIncomplete(run.systemId, markIncomplete);
-	if (await queue.sliceMadeProgress(run.systemId)) {
-		await queue.noteCapDeferBase(run.systemId, iso);
-	} else {
-		await queue.noteCapDefer(run.systemId, iso);
+	const defer = (await queue.capDeferMarks())[run.systemId];
+	const notedThisSlice = defer !== undefined && Date.parse(defer.at) >= Date.parse(run.startedAt);
+	if (!notedThisSlice) {
+		if (await queue.sliceMadeProgress(run.systemId)) {
+			await queue.noteCapDeferBase(run.systemId, iso);
+		} else {
+			await queue.noteCapDefer(run.systemId, iso);
+		}
 	}
 	await queue.recordDiscoverResume(run.systemId, systemSeedHash(seedById(run.systemId)), iso);
 	await queue.releaseSlot(run.systemId);
@@ -731,6 +740,12 @@ async function failOrFinish(
 	iso: string,
 	error: string,
 ): Promise<DiscoverTickResult> {
+	// A later slice yields on a poll error and on a crawl that ended with a non-success status.
+	if (await queue.discoverResume(run.systemId)) {
+		await queue.noteAttempt(run.systemId, run.startUrl);
+		await cancelJob(auth, run, deps);
+		return yieldDiscoverSlot(env, queue, auth, run, deps, iso, true);
+	}
 	if (await hasStagedPages(queue, run.systemId)) {
 		await queue.noteAttempt(run.systemId, run.startUrl);
 		await cancelJob(auth, run, deps);
