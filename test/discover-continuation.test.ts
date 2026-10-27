@@ -33,9 +33,7 @@ async function settleFreshCatalog(
 		await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
 		const url = `${seedById(id).startUrl}indexed`;
 		await queue.enqueueUpsert([{ systemId: id, url, kind: "reindex" }], NOW);
-		expect(
-			await queue.complete(await stampClaim(db, id, url, NOW), { lastCrawled: NOW, lastIndexed: NOW }, `${id}/indexed.md`),
-		).toBe(true);
+		expect(await queue.complete(await stampClaim(db, id, url, NOW), { lastCrawled: NOW, lastIndexed: NOW }, `${id}/indexed.md`)).toBe(true);
 		await queue.markDiscovered(id, NOW);
 	}
 }
@@ -288,13 +286,11 @@ describe("discover continuation", () => {
 		const pageQueue = new D1PageQueue(db);
 		const sitemapOnly = "https://paste-dsys.com/sitemap-only";
 		await pageQueue.enqueueUpsert([{ systemId: "paste", url: sitemapOnly, kind: "seed" }], NOW);
-		expect(
-			await pageQueue.complete(
-				await stampClaim(db, "paste", sitemapOnly, NOW),
-				{ lastCrawled: NOW, lastIndexed: NOW },
-				"paste/page/sitemap-only.md",
-			),
-		).toBe(true);
+		expect(await pageQueue.complete(
+			await stampClaim(db, "paste", sitemapOnly, NOW),
+			{ lastCrawled: NOW, lastIndexed: NOW },
+			"paste/page/sitemap-only.md",
+		)).toBe(true);
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",

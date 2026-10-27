@@ -80,13 +80,11 @@ describe("an admitted page has one live claim", () => {
 			],
 			"2026-01-01T00:00:00.000Z",
 		);
-		expect(
-			await pageQueue.complete(
-				await stampClaim(db, "backpack", SLASH, "2026-01-02T00:00:00.000Z"),
-				{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
-				PRIOR,
-			),
-		).toBe(true);
+		expect(await pageQueue.complete(
+			await stampClaim(db, "backpack", SLASH, "2026-01-02T00:00:00.000Z"),
+			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
+			PRIOR,
+		)).toBe(true);
 		await pageQueue.enqueueUpsert([{ systemId: "backpack", url: SLASH, kind: "seed" }], NOW);
 		const items: Stored[] = [
 			{
