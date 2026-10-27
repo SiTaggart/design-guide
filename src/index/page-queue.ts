@@ -56,7 +56,7 @@ export type PageWorkItem = {
 	claimToken?: string;
 };
 
-export type ClaimedPage = PageWorkItem & { claimedAt: string };
+export type ClaimedPage = PageWorkItem & { claimedAt: string; claimToken: string };
 
 export type QueueDepths = {
 	pending: number;
@@ -84,14 +84,14 @@ export type PageQueue = {
 	): Promise<void>;
 	claim(limit: number, now: string): Promise<ClaimedPage[]>;
 	complete(
-		item: Pick<PageWorkItem, "systemId" | "url" | "claimToken"> & { attempts?: number; claimedAt?: string },
+		item: Pick<PageWorkItem, "systemId" | "url" | "attempts"> & { claimedAt: string; claimToken: string },
 		timestamps: { lastCrawled: string; lastIndexed: string },
 		itemKey: string | null,
 		options?: { keepIndexedAt?: boolean },
 	): Promise<boolean>;
 	holdsFreshness(systemId: SystemId): Promise<boolean>;
 	fail(
-		item: Pick<PageWorkItem, "systemId" | "url" | "claimToken"> & { attempts?: number; claimedAt?: string },
+		item: Pick<PageWorkItem, "systemId" | "url" | "attempts"> & { claimedAt: string; claimToken: string },
 		error: string,
 	): Promise<boolean>;
 	owns(item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt" | "claimToken">): Promise<boolean>;
@@ -473,51 +473,35 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async complete(
-		item: Pick<PageWorkItem, "systemId" | "url" | "claimToken"> & { attempts?: number; claimedAt?: string },
+		item: Pick<PageWorkItem, "systemId" | "url" | "attempts"> & { claimedAt: string; claimToken: string },
 		timestamps: { lastCrawled: string; lastIndexed: string },
 		itemKey: string | null,
 		options?: { keepIndexedAt?: boolean },
 	): Promise<boolean> {
 		const keepIndexedAt = options?.keepIndexedAt === true;
-		if (item.claimedAt !== undefined && item.attempts !== undefined) {
-			const changes = await run(
-				this.step,
-				keepIndexedAt
-					? `UPDATE page_work
-					   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL
-					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`
-					: `UPDATE page_work
-					   SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
-					   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
-				...(keepIndexedAt
-					? [timestamps.lastCrawled, itemKey, item.systemId, item.url, item.attempts, item.claimedAt, item.claimToken]
-					: [
-							timestamps.lastCrawled,
-							timestamps.lastIndexed,
-							itemKey,
-							item.systemId,
-							item.url,
-							item.attempts,
-							item.claimedAt,
-							item.claimToken,
-						]),
-			);
-			return guardedChanges(this.step, "complete", item, "done", changes);
-		}
-		await run(
+		const changes = await run(
 			this.step,
 			keepIndexedAt
 				? `UPDATE page_work
 				   SET status = 'done', last_crawled = ?, item_key = ?, error = NULL, claimed_at = NULL
-				   WHERE system_id = ? AND url = ?`
+				   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`
 				: `UPDATE page_work
 				   SET status = 'done', last_crawled = ?, last_indexed = ?, item_key = ?, error = NULL, claimed_at = NULL
-				   WHERE system_id = ? AND url = ?`,
+				   WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
 			...(keepIndexedAt
-				? [timestamps.lastCrawled, itemKey, item.systemId, item.url]
-				: [timestamps.lastCrawled, timestamps.lastIndexed, itemKey, item.systemId, item.url]),
+				? [timestamps.lastCrawled, itemKey, item.systemId, item.url, item.attempts, item.claimedAt, item.claimToken]
+				: [
+						timestamps.lastCrawled,
+						timestamps.lastIndexed,
+						itemKey,
+						item.systemId,
+						item.url,
+						item.attempts,
+						item.claimedAt,
+						item.claimToken,
+					]),
 		);
-		return true;
+		return guardedChanges(this.step, "complete", item, "done", changes);
 	}
 
 	async holdsFreshness(systemId: SystemId): Promise<boolean> {
@@ -526,34 +510,22 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async fail(
-		item: Pick<PageWorkItem, "systemId" | "url" | "claimToken"> & { attempts?: number; claimedAt?: string },
+		item: Pick<PageWorkItem, "systemId" | "url" | "attempts"> & { claimedAt: string; claimToken: string },
 		error: string,
 	): Promise<boolean> {
-		if (item.claimedAt !== undefined && item.attempts !== undefined) {
-			const changes = await run(
-				this.step,
-				`UPDATE page_work
-				 SET status = 'failed', error = ?
-				 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
-				error,
-				item.systemId,
-				item.url,
-				item.attempts,
-				item.claimedAt,
-				item.claimToken,
-			);
-			return guardedChanges(this.step, "fail", item, "failed", changes);
-		}
-		await run(
+		const changes = await run(
 			this.step,
 			`UPDATE page_work
 			 SET status = 'failed', error = ?
-			 WHERE system_id = ? AND url = ?`,
+			 WHERE system_id = ? AND url = ? AND status = 'claimed' AND attempts = ? AND claimed_at = ? AND claim_token = ?`,
 			error,
 			item.systemId,
 			item.url,
+			item.attempts,
+			item.claimedAt,
+			item.claimToken,
 		);
-		return true;
+		return guardedChanges(this.step, "fail", item, "failed", changes);
 	}
 
 	async depths(): Promise<QueueDepths> {
@@ -671,8 +643,8 @@ export class D1PageQueue implements PageQueue {
 		await runOnce(
 			this.step,
 			`INSERT INTO discover_run (
-			   system_id, kind, trigger_name, job_id, start_url, state, cursor, poll_failures, started_at, updated_at
-			 ) VALUES (?, ?, ?, ?, ?, 'running', NULL, 0, ?, ?)`,
+			   system_id, kind, trigger_name, job_id, start_url, cursor, poll_failures, started_at, updated_at
+			 ) VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?)`,
 			run.systemId,
 			run.kind,
 			run.trigger,

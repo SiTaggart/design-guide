@@ -13,7 +13,7 @@ import { persistSystemOutcome } from "../src/index/trigger.ts";
 import { fillHealthFrom, type FillHealthBody } from "../src/serve/fill-health.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { memoryD1 } from "./helpers/d1.ts";
+import { memoryD1, stampClaim } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
 const STATUS_TOKEN = "test-status-token";
@@ -830,7 +830,7 @@ async function fleetEnv(now: string, skip: readonly SystemId[] = []): Promise<Fl
 	}));
 	await queue.enqueueUpsert(items, now);
 	for (const item of items) {
-		await queue.complete(item, { lastCrawled: now, lastIndexed: now }, `${item.systemId}/key`);
+		await queue.complete(await stampClaim(queue, item.systemId, item.url, now), { lastCrawled: now, lastIndexed: now }, `${item.systemId}/key`);
 		await queue.markDiscovered(item.systemId, now);
 	}
 	const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });

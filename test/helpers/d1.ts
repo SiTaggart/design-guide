@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import type { SystemId } from "../../src/config/types.ts";
 
 type Bound = {
 	all<T>(): Promise<{ results: T[] }>;
@@ -58,4 +59,15 @@ export function memoryD1(): D1Database {
 			throw new Error("batch unused");
 		},
 	} as unknown as D1Database;
+}
+
+export async function stampClaim(queue: object, systemId: SystemId, url: string, claimedAt: string) {
+	const db = (queue as unknown as { db: D1Database }).db;
+	await db
+		.prepare(
+			"UPDATE page_work SET status = 'claimed', claimed_at = ?, claim_token = ? WHERE system_id = ? AND url = ? AND status = 'pending' AND attempts = 0",
+		)
+		.bind(claimedAt, "fixture-claim", systemId, url)
+		.run();
+	return { systemId, url, attempts: 0, claimedAt, claimToken: "fixture-claim" };
 }

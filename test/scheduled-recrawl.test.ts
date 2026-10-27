@@ -13,7 +13,7 @@ import { systemSeedHash } from "../src/index/seed-hash.ts";
 import { DRIFT_CRON } from "../src/index/trigger.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { memoryD1 } from "./helpers/d1.ts";
+import { memoryD1, stampClaim } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
 const NOW = "2026-10-18T00:00:00.000Z";
@@ -43,7 +43,7 @@ async function indexed(
 	at: string,
 ): Promise<void> {
 	await queue.enqueueUpsert([{ systemId, url, kind: "seed" }], at);
-	await queue.complete({ systemId, url }, { lastCrawled: at, lastIndexed: at }, `${systemId}/page/old.md`);
+	await queue.complete(await stampClaim(queue, systemId, url, at), { lastCrawled: at, lastIndexed: at }, `${systemId}/page/old.md`);
 }
 
 describe("scheduled recrawl", () => {

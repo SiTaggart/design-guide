@@ -38,6 +38,7 @@ const MIGRATIONS = [
 	"0012_fill_lease.sql",
 	"0013_claim_token.sql",
 	"0014_discover_resume.sql",
+	"0015_discover_run_drop_state.sql",
 ];
 
 function filesUnder(dir: string): string[] {
@@ -81,7 +82,8 @@ describe("page queue migrations", () => {
 		const discoverNames = discoverRun.results.map((column) => column.name);
 		expect(discoverNames).toContain("slice_frontier_start");
 		expect(discoverNames).toContain("slice_accepted");
-		expect(discoverNames).toContain("error");
+		expect(discoverNames).not.toContain("state");
+		expect(discoverNames).not.toContain("error");
 	});
 
 	it("adds slice progress columns in the discover_resume migration", () => {
