@@ -175,9 +175,9 @@ async function settle(env: Parameters<typeof writeIndexedHash>[0], queue: D1Page
 	}
 }
 
-async function indexed(queue: D1PageQueue, url: string, at: string): Promise<void> {
+async function indexed(db: D1Database, queue: D1PageQueue, url: string, at: string): Promise<void> {
 	await queue.enqueueUpsert([{ systemId: "primer", url, kind: "reindex" }], at);
-	await queue.complete(await stampClaim(queue, "primer", url, at), { lastCrawled: at, lastIndexed: at }, "primer/page/old.md");
+	await queue.complete(await stampClaim(db, "primer", url, at), { lastCrawled: at, lastIndexed: at }, "primer/page/old.md");
 }
 
 function mockIndex(): { sent: Array<{ subject?: string; text?: string }>; deleted: ReturnType<typeof vi.fn> } {
@@ -331,8 +331,8 @@ describe("drain D1 steps", () => {
 			CLOUDFLARE_API_TOKEN: "token",
 		});
 		await settle(env, queue);
-		await indexed(queue, PAGE, OLD);
-		await indexed(queue, REMOVED, OLD);
+		await indexed(db, queue, PAGE, OLD);
+		await indexed(db, queue, REMOVED, OLD);
 		const { sent, deleted } = mockIndex();
 		env.EMAIL = {
 			send: async (message) => {
@@ -1542,7 +1542,7 @@ describe("drain D1 steps", () => {
 		const url = "https://primer.style/components";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], OLD);
 		await pageQueue.complete(
-			await stampClaim(pageQueue, "primer", url, NOW),
+			await stampClaim(db, "primer", url, NOW),
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			"primer/page/components.md",
 		);

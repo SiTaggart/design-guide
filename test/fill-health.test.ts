@@ -830,7 +830,7 @@ async function fleetEnv(now: string, skip: readonly SystemId[] = []): Promise<Fl
 	}));
 	await queue.enqueueUpsert(items, now);
 	for (const item of items) {
-		await queue.complete(await stampClaim(queue, item.systemId, item.url, now), { lastCrawled: now, lastIndexed: now }, `${item.systemId}/key`);
+		await queue.complete(await stampClaim(db, item.systemId, item.url, now), { lastCrawled: now, lastIndexed: now }, `${item.systemId}/key`);
 		await queue.markDiscovered(item.systemId, now);
 	}
 	const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });

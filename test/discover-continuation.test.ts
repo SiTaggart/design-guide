@@ -26,13 +26,14 @@ async function urls(
 
 async function settleFreshCatalog(
 	env: Parameters<typeof writeIndexedHash>[0],
+	db: D1Database,
 	queue: D1PageQueue,
 ): Promise<void> {
 	for (const id of SYSTEM_IDS) {
 		await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
 		const url = `${seedById(id).startUrl}indexed`;
 		await queue.enqueueUpsert([{ systemId: id, url, kind: "reindex" }], NOW);
-		await queue.complete(await stampClaim(queue, id, url, NOW), { lastCrawled: NOW, lastIndexed: NOW }, `${id}/indexed.md`);
+		await queue.complete(await stampClaim(db, id, url, NOW), { lastCrawled: NOW, lastIndexed: NOW }, `${id}/indexed.md`);
 		await queue.markDiscovered(id, NOW);
 	}
 }
@@ -286,7 +287,7 @@ describe("discover continuation", () => {
 		const sitemapOnly = "https://paste-dsys.com/sitemap-only";
 		await pageQueue.enqueueUpsert([{ systemId: "paste", url: sitemapOnly, kind: "seed" }], NOW);
 		await pageQueue.complete(
-			await stampClaim(pageQueue, "paste", sitemapOnly, NOW),
+			await stampClaim(db, "paste", sitemapOnly, NOW),
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			"paste/page/sitemap-only.md",
 		);
@@ -1813,7 +1814,7 @@ describe("discover continuation", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		await settleFreshCatalog(env, pageQueue);
+		await settleFreshCatalog(env, db, pageQueue);
 		await pageQueue.enqueueUpsert(
 			[{ systemId: "paste", url: "https://paste-dsys.com/components/pending", kind: "reindex" }],
 			NOW,
@@ -1845,7 +1846,7 @@ describe("discover continuation", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		await settleFreshCatalog(env, pageQueue);
+		await settleFreshCatalog(env, db, pageQueue);
 		await pageQueue.addFrontier("paste", [button]);
 		await db
 			.prepare("INSERT INTO discover_resume (system_id, seed_hash, yielded_at) VALUES ('paste', ?, ?)")
@@ -1882,7 +1883,7 @@ describe("discover continuation", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		await settleFreshCatalog(env, pageQueue);
+		await settleFreshCatalog(env, db, pageQueue);
 		await pageQueue.addFrontier("paste", [button]);
 		await pageQueue.stageUrl("paste", button);
 		await db

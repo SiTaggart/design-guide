@@ -61,8 +61,7 @@ export function memoryD1(): D1Database {
 	} as unknown as D1Database;
 }
 
-export async function stampClaim(queue: object, systemId: SystemId, url: string, claimedAt: string) {
-	const db = (queue as unknown as { db: D1Database }).db;
+export async function stampClaim(db: D1Database, systemId: SystemId, url: string, claimedAt: string) {
 	await db
 		.prepare(
 			"UPDATE page_work SET status = 'claimed', claimed_at = ?, claim_token = ? WHERE system_id = ? AND url = ? AND status = 'pending' AND attempts = 0",

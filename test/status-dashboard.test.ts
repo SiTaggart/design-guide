@@ -86,7 +86,7 @@ describe("GET /status", () => {
 			.bind(NOW, "primer", "https://primer.style/b")
 			.run();
 		await queue.complete(
-			await stampClaim(queue, "paste", "https://paste-dsys.com/a", NOW),
+			await stampClaim(db, "paste", "https://paste-dsys.com/a", NOW),
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			"paste/key",
 		);

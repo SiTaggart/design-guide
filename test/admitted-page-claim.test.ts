@@ -81,7 +81,7 @@ describe("an admitted page has one live claim", () => {
 			"2026-01-01T00:00:00.000Z",
 		);
 		await pageQueue.complete(
-			await stampClaim(pageQueue, "backpack", SLASH, "2026-01-02T00:00:00.000Z"),
+			await stampClaim(db, "backpack", SLASH, "2026-01-02T00:00:00.000Z"),
 			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
 			PRIOR,
 		);
