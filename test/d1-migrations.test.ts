@@ -79,11 +79,20 @@ describe("page queue migrations", () => {
 		const resume = await db.prepare("PRAGMA table_info(discover_resume)").all<{ name: string }>();
 		expect(resume.results.map((column) => column.name)).toEqual(["system_id", "seed_hash", "yielded_at"]);
 		const discoverRun = await db.prepare("PRAGMA table_info(discover_run)").all<{ name: string }>();
-		const discoverNames = discoverRun.results.map((column) => column.name);
-		expect(discoverNames).toContain("slice_frontier_start");
-		expect(discoverNames).toContain("slice_accepted");
-		expect(discoverNames).not.toContain("state");
-		expect(discoverNames).not.toContain("error");
+		const freshNames = discoverRun.results.map((column) => column.name);
+		const migrated = new DatabaseSync(":memory:");
+		const tableNames = (sqlite: DatabaseSync) =>
+			(sqlite.prepare("PRAGMA table_info(discover_run)").all() as Array<{ name: string }>).map((row) => row.name);
+		for (const name of MIGRATIONS.slice(0, -1)) migrated.exec(readFileSync(join(root, "migrations", name), "utf8"));
+		expect(tableNames(migrated)).toEqual(expect.arrayContaining(["state", "error", "slice_frontier_start", "slice_accepted"]));
+		for (const name of MIGRATIONS.slice(-1)) migrated.exec(readFileSync(join(root, "migrations", name), "utf8"));
+		const migratedNames = tableNames(migrated);
+		expect(migratedNames).toEqual(freshNames);
+		for (const names of [freshNames, migratedNames]) {
+			expect(names).not.toContain("state");
+			expect(names).not.toContain("error");
+		}
+		expect(freshNames).toEqual(expect.arrayContaining(["slice_frontier_start", "slice_accepted"]));
 	});
 
 	it("adds slice progress columns in the discover_resume migration", () => {
