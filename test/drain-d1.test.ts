@@ -13,7 +13,7 @@ import { PARKS_KEY } from "../src/index/parks.ts";
 import { LAST_INDEXED_HASH_KEY, readStatus, STATUS_KEY } from "../src/index/status.ts";
 import { DRIFT_CRON } from "../src/index/trigger.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
-import { memoryD1 } from "./helpers/d1.ts";
+import { memoryD1, stampClaim } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
 const NOW = "2026-10-24T12:00:53.053Z";
@@ -175,9 +175,9 @@ async function settle(env: Parameters<typeof writeIndexedHash>[0], queue: D1Page
 	}
 }
 
-async function indexed(queue: D1PageQueue, url: string, at: string): Promise<void> {
+async function indexed(db: D1Database, queue: D1PageQueue, url: string, at: string): Promise<void> {
 	await queue.enqueueUpsert([{ systemId: "primer", url, kind: "reindex" }], at);
-	await queue.complete({ systemId: "primer", url }, { lastCrawled: at, lastIndexed: at }, "primer/page/old.md");
+	await queue.complete(await stampClaim(db, "primer", url, at), { lastCrawled: at, lastIndexed: at }, "primer/page/old.md");
 }
 
 function mockIndex(): { sent: Array<{ subject?: string; text?: string }>; deleted: ReturnType<typeof vi.fn> } {
@@ -331,8 +331,8 @@ describe("drain D1 steps", () => {
 			CLOUDFLARE_API_TOKEN: "token",
 		});
 		await settle(env, queue);
-		await indexed(queue, PAGE, OLD);
-		await indexed(queue, REMOVED, OLD);
+		await indexed(db, queue, PAGE, OLD);
+		await indexed(db, queue, REMOVED, OLD);
 		const { sent, deleted } = mockIndex();
 		env.EMAIL = {
 			send: async (message) => {
@@ -1542,7 +1542,7 @@ describe("drain D1 steps", () => {
 		const url = "https://primer.style/components";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], OLD);
 		await pageQueue.complete(
-			{ systemId: "primer", url },
+			await stampClaim(db, "primer", url, NOW),
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			"primer/page/components.md",
 		);

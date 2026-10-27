@@ -7,7 +7,7 @@ import { emptyStatus, writeStatus, type IndexStatusDocument } from "../src/index
 import { queueMotion, renderStatusPage, systemPhase } from "../src/serve/status-page.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { memoryD1 } from "./helpers/d1.ts";
+import { memoryD1, stampClaim } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
 const STATUS_TOKEN = "test-status-token";
@@ -86,7 +86,7 @@ describe("GET /status", () => {
 			.bind(NOW, "primer", "https://primer.style/b")
 			.run();
 		await queue.complete(
-			{ systemId: "paste", url: "https://paste-dsys.com/a" },
+			await stampClaim(db, "paste", "https://paste-dsys.com/a", NOW),
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			"paste/key",
 		);

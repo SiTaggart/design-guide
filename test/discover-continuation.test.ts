@@ -7,7 +7,7 @@ import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import { readParks } from "../src/index/parks.ts";
 import { D1PageQueue, FRESHNESS_MS } from "../src/index/page-queue.ts";
 import { systemSeedHash } from "../src/index/seed-hash.ts";
-import { memoryD1 } from "./helpers/d1.ts";
+import { memoryD1, stampClaim } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 
@@ -26,13 +26,14 @@ async function urls(
 
 async function settleFreshCatalog(
 	env: Parameters<typeof writeIndexedHash>[0],
+	db: D1Database,
 	queue: D1PageQueue,
 ): Promise<void> {
 	for (const id of SYSTEM_IDS) {
 		await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
 		const url = `${seedById(id).startUrl}indexed`;
 		await queue.enqueueUpsert([{ systemId: id, url, kind: "reindex" }], NOW);
-		await queue.complete({ systemId: id, url }, { lastCrawled: NOW, lastIndexed: NOW }, `${id}/indexed.md`);
+		expect(await queue.complete(await stampClaim(db, id, url, NOW), { lastCrawled: NOW, lastIndexed: NOW }, `${id}/indexed.md`)).toBe(true);
 		await queue.markDiscovered(id, NOW);
 	}
 }
@@ -285,11 +286,11 @@ describe("discover continuation", () => {
 		const pageQueue = new D1PageQueue(db);
 		const sitemapOnly = "https://paste-dsys.com/sitemap-only";
 		await pageQueue.enqueueUpsert([{ systemId: "paste", url: sitemapOnly, kind: "seed" }], NOW);
-		await pageQueue.complete(
-			{ systemId: "paste", url: sitemapOnly },
+		expect(await pageQueue.complete(
+			await stampClaim(db, "paste", sitemapOnly, NOW),
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			"paste/page/sitemap-only.md",
-		);
+		)).toBe(true);
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",
@@ -1459,16 +1460,16 @@ describe("discover continuation", () => {
 		expect(resumed).toMatchObject({ action: "started", systemId: "paste" });
 		expect(started).toEqual([button]);
 		const opened = await db
-			.prepare("SELECT slice_frontier_start, slice_accepted, error FROM discover_run WHERE system_id = 'paste'")
-			.all<{ slice_frontier_start: number | null; slice_accepted: number; error: string | null }>();
-		expect(opened.results).toEqual([{ slice_frontier_start: 2, slice_accepted: 0, error: null }]);
+			.prepare("SELECT slice_frontier_start, slice_accepted FROM discover_run WHERE system_id = 'paste'")
+			.all<{ slice_frontier_start: number | null; slice_accepted: number }>();
+		expect(opened.results).toEqual([{ slice_frontier_start: 2, slice_accepted: 0 }]);
 		holdCursor = true;
 		const acceptedOpen = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
 		expect(acceptedOpen).toMatchObject({ action: "continued", systemId: "paste" });
 		const acceptedRow = await db
-			.prepare("SELECT slice_frontier_start, slice_accepted, error FROM discover_run WHERE system_id = 'paste'")
-			.all<{ slice_frontier_start: number | null; slice_accepted: number; error: string | null }>();
-		expect(acceptedRow.results).toEqual([{ slice_frontier_start: 2, slice_accepted: 1, error: null }]);
+			.prepare("SELECT slice_frontier_start, slice_accepted FROM discover_run WHERE system_id = 'paste'")
+			.all<{ slice_frontier_start: number | null; slice_accepted: number }>();
+		expect(acceptedRow.results).toEqual([{ slice_frontier_start: 2, slice_accepted: 1 }]);
 		holdCursor = false;
 		await db.prepare("UPDATE discover_run SET cursor = 'done', started_at = ? WHERE system_id = 'paste'").bind(aged).run();
 		const acceptedAgain = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
@@ -1484,9 +1485,9 @@ describe("discover continuation", () => {
 		expect(shorter).toMatchObject({ action: "started", systemId: "paste" });
 		expect(started).toEqual([button, dialog]);
 		const shrunk = await db
-			.prepare("SELECT slice_frontier_start, slice_accepted, error FROM discover_run WHERE system_id = 'paste'")
-			.all<{ slice_frontier_start: number | null; slice_accepted: number; error: string | null }>();
-		expect(shrunk.results).toEqual([{ slice_frontier_start: 4, slice_accepted: 0, error: null }]);
+			.prepare("SELECT slice_frontier_start, slice_accepted FROM discover_run WHERE system_id = 'paste'")
+			.all<{ slice_frontier_start: number | null; slice_accepted: number }>();
+		expect(shrunk.results).toEqual([{ slice_frontier_start: 4, slice_accepted: 0 }]);
 		expect((await urls(db, "discover_frontier")).length).toBeLessThan(4);
 		await db
 			.prepare("UPDATE discover_run SET cursor = 'done', started_at = ? WHERE system_id = 'paste'")
@@ -1813,7 +1814,7 @@ describe("discover continuation", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		await settleFreshCatalog(env, pageQueue);
+		await settleFreshCatalog(env, db, pageQueue);
 		await pageQueue.enqueueUpsert(
 			[{ systemId: "paste", url: "https://paste-dsys.com/components/pending", kind: "reindex" }],
 			NOW,
@@ -1845,7 +1846,7 @@ describe("discover continuation", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		await settleFreshCatalog(env, pageQueue);
+		await settleFreshCatalog(env, db, pageQueue);
 		await pageQueue.addFrontier("paste", [button]);
 		await db
 			.prepare("INSERT INTO discover_resume (system_id, seed_hash, yielded_at) VALUES ('paste', ?, ?)")
@@ -1882,7 +1883,7 @@ describe("discover continuation", () => {
 			CLOUDFLARE_ACCOUNT_ID: "acct",
 			CLOUDFLARE_API_TOKEN: "token",
 		});
-		await settleFreshCatalog(env, pageQueue);
+		await settleFreshCatalog(env, db, pageQueue);
 		await pageQueue.addFrontier("paste", [button]);
 		await pageQueue.stageUrl("paste", button);
 		await db
@@ -2074,8 +2075,8 @@ describe("discover continuation", () => {
 		await db
 			.prepare(
 				`INSERT INTO discover_run (
-				   system_id, kind, trigger_name, job_id, start_url, state, cursor, poll_failures, started_at, updated_at
-				 ) VALUES ('paste', 'seed', 'deploy-drift', 'job-legacy', 'https://paste-dsys.com/', 'running', 'done', 0, ?, ?)`,
+				   system_id, kind, trigger_name, job_id, start_url, cursor, poll_failures, started_at, updated_at
+				 ) VALUES ('paste', 'seed', 'deploy-drift', 'job-legacy', 'https://paste-dsys.com/', 'done', 0, ?, ?)`,
 			)
 			.bind(aged, aged)
 			.run();

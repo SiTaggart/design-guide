@@ -21,7 +21,7 @@ import { holdRetrieval, readRetrievalHold } from "../src/index/retrieval-hold.ts
 import { seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
 import { emptyStatus, readStatus, writeStatus } from "../src/index/status.ts";
 import { DRIFT_CRON, RECOVERY_CRON } from "../src/index/trigger.ts";
-import { memoryD1 } from "./helpers/d1.ts";
+import { memoryD1, stampClaim } from "./helpers/d1.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
@@ -58,17 +58,17 @@ describe("PageQueue claim order", () => {
 			"2026-01-01T00:00:00.000Z",
 		);
 		await pageQueue.complete(
-			{ systemId: "govuk", url: "https://design-system.service.gov.uk/reindex-old" },
+			await stampClaim(pageQueueDb(pageQueue), "govuk", "https://design-system.service.gov.uk/reindex-old", "2020-01-01T00:00:00.000Z"),
 			{ lastCrawled: "2020-01-01T00:00:00.000Z", lastIndexed: "2020-01-01T00:00:00.000Z" },
 			null,
 		);
 		await pageQueue.complete(
-			{ systemId: "primer", url: "https://primer.style/seed-fresh" },
+			await stampClaim(pageQueueDb(pageQueue), "primer", "https://primer.style/seed-fresh", "2024-06-01T00:00:00.000Z"),
 			{ lastCrawled: "2024-06-01T00:00:00.000Z", lastIndexed: "2024-06-01T00:00:00.000Z" },
 			null,
 		);
 		await pageQueue.complete(
-			{ systemId: "primer", url: "https://primer.style/seed-new" },
+			await stampClaim(pageQueueDb(pageQueue), "primer", "https://primer.style/seed-new", "2024-06-01T00:00:00.000Z"),
 			{ lastCrawled: "2024-06-01T00:00:00.000Z", lastIndexed: "2024-06-01T00:00:00.000Z" },
 			null,
 		);
@@ -108,7 +108,7 @@ describe("PageQueue claim order", () => {
 		const url = "https://primer.style/components";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "reindex" }], "2026-01-01T00:00:00.000Z");
 		await pageQueue.complete(
-			{ systemId: "primer", url },
+			await stampClaim(pageQueueDb(pageQueue), "primer", url, "2026-01-02T00:00:00.000Z"),
 			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
 			"primer/page/old.md",
 		);
@@ -146,17 +146,17 @@ describe("PageQueue claim order", () => {
 			"2026-01-01T00:00:00.000Z",
 		);
 		await pageQueue.complete(
-			{ systemId: "primer", url: "https://primer.style/reindex-old" },
+			await stampClaim(pageQueueDb(pageQueue), "primer", "https://primer.style/reindex-old", "2020-01-01T00:00:00.000Z"),
 			{ lastCrawled: "2020-01-01T00:00:00.000Z", lastIndexed: "2020-01-01T00:00:00.000Z" },
 			null,
 		);
 		await pageQueue.complete(
-			{ systemId: "primer", url: "https://primer.style/seed-fresh" },
+			await stampClaim(pageQueueDb(pageQueue), "primer", "https://primer.style/seed-fresh", "2024-06-01T00:00:00.000Z"),
 			{ lastCrawled: "2024-06-01T00:00:00.000Z", lastIndexed: "2024-06-01T00:00:00.000Z" },
 			null,
 		);
 		await pageQueue.complete(
-			{ systemId: "primer", url: "https://primer.style/seed-new" },
+			await stampClaim(pageQueueDb(pageQueue), "primer", "https://primer.style/seed-new", "2024-06-01T00:00:00.000Z"),
 			{ lastCrawled: "2024-06-01T00:00:00.000Z", lastIndexed: "2024-06-01T00:00:00.000Z" },
 			null,
 		);
@@ -540,11 +540,11 @@ describe("orphan prune", () => {
 			NOW,
 		);
 		await pageQueue.complete(
-			{ systemId: "primer", url: keep },
+			await stampClaim(pageQueueDb(pageQueue), "primer", keep, NOW),
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			"primer/page/keep.md",
 		);
-		await pageQueue.fail({ systemId: "primer", url: failed }, "boom");
+		await pageQueue.fail(await stampClaim(pageQueueDb(pageQueue), "primer", failed, NOW), "boom");
 		const deleted: string[] = [];
 		const blocked = await commitDiscoveredUrls({
 			queue: pageQueue,
@@ -628,7 +628,7 @@ describe("drain wipe bar", () => {
 		const url = "https://primer.style/components/select";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
 		await pageQueue.complete(
-			{ systemId: "primer", url },
+			await stampClaim(pageQueueDb(pageQueue), "primer", url, "2026-01-02T00:00:00.000Z"),
 			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
 			"primer/page/previous.md",
 		);
@@ -692,7 +692,7 @@ describe("held index clock", () => {
 		);
 		for (const url of urls) {
 			await pageQueue.complete(
-				{ systemId: "paste", url },
+				await stampClaim(pageQueueDb(pageQueue), "paste", url, old),
 				{ lastCrawled: old, lastIndexed: old },
 				"paste/page/old.md",
 			);
@@ -731,7 +731,7 @@ describe("held index clock", () => {
 		const old = "2026-01-02T00:00:00.000Z";
 		const oldKey = pageItemKey("paste", url, 1, old);
 		await pageQueue.enqueueUpsert([{ systemId: "paste", url, kind: "seed" }], old);
-		await pageQueue.complete({ systemId: "paste", url }, { lastCrawled: old, lastIndexed: old }, oldKey);
+		await pageQueue.complete(await stampClaim(pageQueueDb(pageQueue), "paste", url, old), { lastCrawled: old, lastIndexed: old }, oldKey);
 		await pageQueue.enqueueUpsert([{ systemId: "paste", url, kind: "reindex" }], NOW);
 		await pageQueue.noteCapDefer("paste", old);
 		type Stored = { id: string; key: string; body: string; metadata: Record<string, string> };
@@ -1023,7 +1023,7 @@ describe("drain claim ownership", () => {
 		const liveKey = "primer/page/previous.md";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
 		await pageQueue.complete(
-			{ systemId: "primer", url },
+			await stampClaim(pageQueueDb(pageQueue), "primer", url, "2026-01-02T00:00:00.000Z"),
 			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
 			liveKey,
 		);
@@ -1072,7 +1072,7 @@ describe("drain claim ownership", () => {
 		const liveKey = "primer/page/previous.md";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
 		await pageQueue.complete(
-			{ systemId: "primer", url },
+			await stampClaim(pageQueueDb(pageQueue), "primer", url, "2026-01-02T00:00:00.000Z"),
 			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
 			liveKey,
 		);
@@ -1121,7 +1121,7 @@ describe("drain claim ownership", () => {
 		const liveKey = "primer/page/previous.md";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2026-01-01T00:00:00.000Z");
 		await pageQueue.complete(
-			{ systemId: "primer", url },
+			await stampClaim(pageQueueDb(pageQueue), "primer", url, "2026-01-02T00:00:00.000Z"),
 			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
 			liveKey,
 		);
@@ -1384,7 +1384,7 @@ describe("live map prune", () => {
 			NOW,
 		);
 		await pageQueue.complete(
-			{ systemId: "primer", url: blurry },
+			await stampClaim(pageQueueDb(pageQueue), "primer", blurry, NOW),
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			"primer/page/blurry.md",
 		);
@@ -1551,12 +1551,12 @@ describe("park stickiness", () => {
 			NOW,
 		);
 		await pageQueue.complete(
-			{ systemId: "vanilla", url: "https://vanillaframework.io/docs/a" },
+			await stampClaim(pageQueueDb(pageQueue), "vanilla", "https://vanillaframework.io/docs/a", NOW),
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			"vanilla/page/a.md",
 		);
 		await pageQueue.complete(
-			{ systemId: "vanilla", url: "https://vanillaframework.io/docs/b" },
+			await stampClaim(pageQueueDb(pageQueue), "vanilla", "https://vanillaframework.io/docs/b", NOW),
 			{ lastCrawled: NOW, lastIndexed: NOW },
 			"vanilla/page/b.md",
 		);
@@ -1610,7 +1610,7 @@ describe("indexed seed hash", () => {
 		const url = "https://primer.style/components";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "seed" }], "2020-01-01T00:00:00.000Z");
 		await pageQueue.complete(
-			{ systemId: "primer", url },
+			await stampClaim(pageQueueDb(pageQueue), "primer", url, "2020-01-02T00:00:00.000Z"),
 			{ lastCrawled: "2020-01-02T00:00:00.000Z", lastIndexed: "2020-01-02T00:00:00.000Z" },
 			"primer/page/components.md",
 		);
@@ -1665,7 +1665,7 @@ describe("indexed seed hash", () => {
 		const url = "https://primer.style/components";
 		await pageQueue.enqueueUpsert([{ systemId: "primer", url, kind: "reindex" }], "2020-01-01T00:00:00.000Z");
 		await pageQueue.complete(
-			{ systemId: "primer", url },
+			await stampClaim(pageQueueDb(pageQueue), "primer", url, "2020-01-02T00:00:00.000Z"),
 			{ lastCrawled: "2020-01-02T00:00:00.000Z", lastIndexed: "2020-01-02T00:00:00.000Z" },
 			"primer/page/components.md",
 		);
@@ -1811,7 +1811,7 @@ describe("page cap recovery", () => {
 		const previous = "https://paste-dsys.com/old";
 		await pageQueue.enqueueUpsert([{ systemId: "paste", url: previous, kind: "reindex" }], "2020-01-01T00:00:00.000Z");
 		await pageQueue.complete(
-			{ systemId: "paste", url: previous },
+			await stampClaim(pageQueueDb(pageQueue), "paste", previous, "2020-01-02T00:00:00.000Z"),
 			{ lastCrawled: "2020-01-02T00:00:00.000Z", lastIndexed: "2020-01-02T00:00:00.000Z" },
 			"paste/page/old.md",
 		);

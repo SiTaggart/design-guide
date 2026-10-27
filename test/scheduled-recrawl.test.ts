@@ -13,7 +13,7 @@ import { systemSeedHash } from "../src/index/seed-hash.ts";
 import { DRIFT_CRON } from "../src/index/trigger.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { memoryD1 } from "./helpers/d1.ts";
+import { memoryD1, stampClaim } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
 const NOW = "2026-10-18T00:00:00.000Z";
@@ -37,13 +37,14 @@ afterEach(() => {
 });
 
 async function indexed(
+	db: D1Database,
 	queue: D1PageQueue,
 	systemId: SystemId,
 	url: string,
 	at: string,
 ): Promise<void> {
 	await queue.enqueueUpsert([{ systemId, url, kind: "seed" }], at);
-	await queue.complete({ systemId, url }, { lastCrawled: at, lastIndexed: at }, `${systemId}/page/old.md`);
+	await queue.complete(await stampClaim(db, systemId, url, at), { lastCrawled: at, lastIndexed: at }, `${systemId}/page/old.md`);
 }
 
 describe("scheduled recrawl", () => {
@@ -91,8 +92,8 @@ describe("scheduled recrawl", () => {
 		const keep = "https://paste-dsys.com/components/button";
 		const removed = "https://paste-dsys.com/components/removed";
 		const added = "https://paste-dsys.com/components/alert";
-		await indexed(queue, "paste", keep, ago(31));
-		await indexed(queue, "paste", removed, ago(31));
+		await indexed(db, queue, "paste", keep, ago(31));
+		await indexed(db, queue, "paste", removed, ago(31));
 		await queue.insertRun({
 			systemId: "paste",
 			kind: "reindex",
@@ -200,8 +201,8 @@ describe("scheduled recrawl", () => {
 				continue;
 			}
 			await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
-			await indexed(queue, id, `${seedById(id).startUrl}page`, ago(1));
-			await indexed(queue, id, `${seedById(id).startUrl}other`, ago(1));
+			await indexed(db, queue, id, `${seedById(id).startUrl}page`, ago(1));
+			await indexed(db, queue, id, `${seedById(id).startUrl}other`, ago(1));
 		}
 		vi.spyOn(itemsRest, "listItems").mockResolvedValue([]);
 		vi.spyOn(itemsRest, "deleteItem").mockResolvedValue();
@@ -267,8 +268,8 @@ describe("scheduled recrawl", () => {
 				continue;
 			}
 			await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
-			await indexed(queue, id, `${seedById(id).startUrl}page`, ago(1));
-			await indexed(queue, id, `${seedById(id).startUrl}other`, ago(1));
+			await indexed(db, queue, id, `${seedById(id).startUrl}page`, ago(1));
+			await indexed(db, queue, id, `${seedById(id).startUrl}other`, ago(1));
 		}
 		vi.spyOn(itemsRest, "listItems").mockResolvedValue([]);
 		vi.spyOn(itemsRest, "deleteItem").mockResolvedValue();
@@ -337,8 +338,8 @@ describe("scheduled recrawl", () => {
 				continue;
 			}
 			await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
-			await indexed(queue, id, `${seedById(id).startUrl}page`, ago(1));
-			await indexed(queue, id, `${seedById(id).startUrl}other`, ago(1));
+			await indexed(db, queue, id, `${seedById(id).startUrl}page`, ago(1));
+			await indexed(db, queue, id, `${seedById(id).startUrl}other`, ago(1));
 		}
 		let capped = true;
 		const starts: string[] = [];
@@ -411,8 +412,8 @@ async function catalog(input: { pasteDays: number }): Promise<{ env: ReturnType<
 	for (const id of SYSTEM_IDS) {
 		await writeIndexedHash(env, id, systemSeedHash(seedById(id)));
 		const days = id === "paste" ? input.pasteDays : id === "garden" || id === "vanilla" || id === "cloudscape" ? 60 : 29;
-		await indexed(queue, id, `${seedById(id).startUrl}page`, ago(days));
-		await indexed(queue, id, `${seedById(id).startUrl}other`, ago(days));
+		await indexed(db, queue, id, `${seedById(id).startUrl}page`, ago(days));
+		await indexed(db, queue, id, `${seedById(id).startUrl}other`, ago(days));
 	}
 	await writePark(env, "garden", 1, NOW);
 	await writePark(env, "vanilla", 1, NOW);
@@ -426,13 +427,13 @@ async function cappedRecrawlClock(): Promise<void> {
 	const old = ago(31);
 	const keep = "https://paste-dsys.com/components/button";
 	const removed = "https://paste-dsys.com/components/removed";
-	await indexed(queue, "paste", keep, old);
-	await indexed(queue, "paste", removed, old);
+	await indexed(db, queue, "paste", keep, old);
+	await indexed(db, queue, "paste", removed, old);
 	for (const id of SYSTEM_IDS) {
 		if (id === "paste") {
 			continue;
 		}
-		await indexed(queue, id, `${seedById(id).startUrl}page`, ago(1));
+		await indexed(db, queue, id, `${seedById(id).startUrl}page`, ago(1));
 	}
 	await queue.insertRun({
 		systemId: "paste",
@@ -528,7 +529,7 @@ async function ceilingRecrawl(): Promise<void> {
 	) INSERT INTO discover_indexable (system_id, url)
 	  SELECT 'paste', 'https://paste-dsys.com/p/' || i FROM n`);
 	const removed = "https://paste-dsys.com/components/removed";
-	await indexed(queue, "paste", removed, ago(31));
+	await indexed(db, queue, "paste", removed, ago(31));
 	await queue.insertRun({
 		systemId: "paste",
 		kind: "reindex",
@@ -577,7 +578,7 @@ async function failedFollowUpRecrawl(): Promise<void> {
 	const old = ago(31);
 	const removed = "https://paste-dsys.com/components/removed";
 	const good = "https://paste-dsys.com/components/good";
-	await indexed(queue, "paste", removed, old);
+	await indexed(db, queue, "paste", removed, old);
 	await queue.insertRun({
 		systemId: "paste",
 		kind: "reindex",

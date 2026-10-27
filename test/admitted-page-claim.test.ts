@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { drainTick } from "../src/index/drain.ts";
 import { D1PageQueue } from "../src/index/page-queue.ts";
-import { memoryD1 } from "./helpers/d1.ts";
+import { memoryD1, stampClaim } from "./helpers/d1.ts";
 
 const NOW = "2026-10-18T00:00:00.000Z";
 const LATER = "2026-10-18T00:05:00.000Z";
@@ -80,11 +80,11 @@ describe("an admitted page has one live claim", () => {
 			],
 			"2026-01-01T00:00:00.000Z",
 		);
-		await pageQueue.complete(
-			{ systemId: "backpack", url: SLASH },
+		expect(await pageQueue.complete(
+			await stampClaim(db, "backpack", SLASH, "2026-01-02T00:00:00.000Z"),
 			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
 			PRIOR,
-		);
+		)).toBe(true);
 		await pageQueue.enqueueUpsert([{ systemId: "backpack", url: SLASH, kind: "seed" }], NOW);
 		const items: Stored[] = [
 			{
