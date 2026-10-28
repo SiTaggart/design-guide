@@ -4,7 +4,6 @@ import { isCrawlCapError } from "./crawl-cap.ts";
 import {
 	D1PageQueue,
 	emptyDepths,
-	type DiscoverRun,
 	type QueueDepths,
 	type SystemFreshness,
 } from "./page-queue.ts";
@@ -34,7 +33,7 @@ export type IndexStatusCounts = {
 export type IndexDiscoverStatus = {
 	systemId: SystemId;
 	jobId: string;
-	kind: DiscoverRun["kind"];
+	kind: "seed" | "reindex";
 	trigger: IndexTrigger;
 	startedAt: string;
 };
@@ -169,19 +168,6 @@ export function emptyStatus(unbound: boolean, lastIndexedHash: string | null = n
 	};
 }
 
-function discoverFromRun(run: DiscoverRun | null): IndexDiscoverStatus | null {
-	if (!run) {
-		return null;
-	}
-	return {
-		systemId: run.systemId,
-		jobId: run.jobId,
-		kind: run.kind,
-		trigger: run.trigger,
-		startedAt: run.startedAt,
-	};
-}
-
 export async function readLastIndexedHash(env: WorkerEnv): Promise<string | null> {
 	if (!env.INDEX) {
 		return null;
@@ -238,12 +224,8 @@ export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 	}
 	try {
 		const queue = new D1PageQueue(env.PAGE_QUEUE);
-		const [depths, freshness, run] = await Promise.all([
-			queue.depths(),
-			queue.freshness(),
-			queue.running(),
-		]);
-		return { ...stored, queue: depths, freshness, discover: discoverFromRun(run) };
+		const [depths, freshness] = await Promise.all([queue.depths(), queue.freshness()]);
+		return { ...stored, queue: depths, freshness, discover: null };
 	} catch (error) {
 		console.log(
 			JSON.stringify({
