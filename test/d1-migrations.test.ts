@@ -39,6 +39,7 @@ const MIGRATIONS = [
 	"0013_claim_token.sql",
 	"0014_discover_resume.sql",
 	"0015_discover_run_drop_state.sql",
+	"0016_queue.sql",
 ];
 
 function filesUnder(dir: string): string[] {
@@ -83,9 +84,12 @@ describe("page queue migrations", () => {
 		const migrated = new DatabaseSync(":memory:");
 		const tableNames = (sqlite: DatabaseSync) =>
 			(sqlite.prepare("PRAGMA table_info(discover_run)").all() as Array<{ name: string }>).map((row) => row.name);
-		for (const name of MIGRATIONS.slice(0, -1)) migrated.exec(readFileSync(join(root, "migrations", name), "utf8"));
+		const dropState = "0015_discover_run_drop_state.sql";
+		const beforeDrop = MIGRATIONS.slice(0, MIGRATIONS.indexOf(dropState));
+		const afterDrop = MIGRATIONS.slice(MIGRATIONS.indexOf(dropState));
+		for (const name of beforeDrop) migrated.exec(readFileSync(join(root, "migrations", name), "utf8"));
 		expect(tableNames(migrated)).toEqual(expect.arrayContaining(["state", "error", "slice_frontier_start", "slice_accepted"]));
-		for (const name of MIGRATIONS.slice(-1)) migrated.exec(readFileSync(join(root, "migrations", name), "utf8"));
+		for (const name of afterDrop) migrated.exec(readFileSync(join(root, "migrations", name), "utf8"));
 		const migratedNames = tableNames(migrated);
 		expect(migratedNames).toEqual(freshNames);
 		for (const names of [freshNames, migratedNames]) {
