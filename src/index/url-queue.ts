@@ -1,6 +1,6 @@
 import { isSystemId, type SystemId } from "../config/types.ts";
 
-export type QueueOp = "fetch" | "delete";
+export type QueueOp = "fetch" | "delete" | "sitemap";
 
 export type QueueRow = {
 	url: string;
@@ -19,7 +19,7 @@ type QueueSqlRow = {
 };
 
 function isOp(value: string): value is QueueOp {
-	return value === "fetch" || value === "delete";
+	return value === "fetch" || value === "delete" || value === "sitemap";
 }
 
 function toRow(row: QueueSqlRow): QueueRow | null {

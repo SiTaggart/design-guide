@@ -11,10 +11,7 @@ import { fitsItem } from "./reindex.ts";
 import { reindexAuth } from "./trigger.ts";
 import {
 	isSitemapFile,
-	isSitemapIndex,
-	robotsSitemaps,
-	sitemapLocs,
-	urlsToSeed,
+	expandSitemap,
 } from "./refresh-delta.ts";
 import { clearPark } from "./parks.ts";
 import { clearRetrievalHold } from "./retrieval-hold.ts";
@@ -49,116 +46,50 @@ export type ConveyorDeps = {
 
 type Clock = { ms: number };
 
-export async function discoverPageUrls(
-	seed: Seed,
-	fetchText: (url: string) => Promise<FetchedPage>,
-	fetchPage: (url: string) => Promise<FetchedPage>,
-	deadline = Number.POSITIVE_INFINITY,
-): Promise<{ urls: string[]; finished: boolean }> {
-	const collected = await collectSitemapLocs(seed, fetchText, deadline);
-	let links: string[] = [];
-	let finished = collected.finished;
-	if (finished && Date.now() < deadline) {
-		try {
-			const page = await fetchPage(seed.startUrl);
-			if (page.status === 200 && page.body.trim()) {
-				links = frontierLinks(page.body, seed.startUrl, seed);
-			}
-		} catch {
-			links = [];
-		}
-	} else if (Date.now() >= deadline) {
-		finished = false;
-	}
-	return {
-		urls: urlsToSeed({
-			startUrl: seed.startUrl,
-			sitemapLocs: collected.locs,
-			pageLinks: links,
-			admit: (url) => admittedUrl(url, seed),
-		}),
-		finished,
-	};
-}
-
-async function collectSitemapLocs(
-	seed: Seed,
-	fetchText: (url: string) => Promise<FetchedPage>,
-	deadline: number,
-): Promise<{ locs: string[]; finished: boolean }> {
+export function discoveryRows(seed: Seed): { url: string; op: "fetch" | "sitemap" }[] {
 	const origin = new URL(seed.startUrl).origin;
-	const pending = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`];
-	try {
-		const robots = await fetchText(`${origin}/robots.txt`);
-		if (robots.status === 200) {
-			pending.push(...robotsSitemaps(robots.body));
-		}
-	} catch {
-		// Leave the sitemap list as the origin defaults when robots.txt cannot be read.
+	const start = admittedUrl(seed.startUrl, seed);
+	const rows: { url: string; op: "fetch" | "sitemap" }[] = [];
+	if (start) {
+		rows.push({ url: start, op: "fetch" });
 	}
-	const locs: string[] = [];
-	const seen = new Set<string>();
-	while (pending.length > 0) {
-		if (Date.now() >= deadline) {
-			return { locs, finished: false };
-		}
-		const next = pending.pop();
-		if (!next || seen.has(next)) {
-			continue;
-		}
-		seen.add(next);
-		let page: FetchedPage;
-		try {
-			page = await fetchText(next);
-		} catch {
-			continue;
-		}
-		if (page.status !== 200) {
-			continue;
-		}
-		const found = sitemapLocs(page.body);
-		if (isSitemapIndex(page.body)) {
-			pending.push(...found);
-			continue;
-		}
-		locs.push(...found);
+	for (const url of [`${origin}/robots.txt`, `${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`]) {
+		rows.push({ url, op: "sitemap" });
 	}
-	return { locs, finished: true };
+	return rows;
 }
 
 export async function seedSystem(input: {
 	queue: UrlQueue;
 	seed: Seed;
-	fetchText: (url: string) => Promise<FetchedPage>;
-	fetchPage: (url: string) => Promise<FetchedPage>;
 	clock: Clock;
 }): Promise<string[]> {
-	const found = await discoverPageUrls(input.seed, input.fetchText, input.fetchPage);
+	const rows = discoveryRows(input.seed);
 	await input.queue.enqueue(
-		found.urls.map((url) => ({ url, systemId: input.seed.id, op: "fetch" as const })),
+		rows.map((row) => ({ url: row.url, systemId: input.seed.id, op: row.op })),
 		input.clock,
 	);
-	return found.urls;
+	return rows.map((row) => row.url);
 }
 
 export async function applyRefresh(input: {
 	queue: UrlQueue;
 	systemId: SystemId;
-	discovered: readonly string[];
+	seed: Seed;
 	known: readonly string[];
 	clock: Clock;
 }): Promise<number> {
-	const seen = new Set<string>();
-	const urls: string[] = [];
-	for (const url of [...input.discovered, ...input.known]) {
+	const rows = discoveryRows(input.seed).filter((row) => row.op === "sitemap");
+	const seen = new Set(rows.map((row) => row.url));
+	for (const url of input.known) {
 		if (!url || seen.has(url)) {
 			continue;
 		}
 		seen.add(url);
-		urls.push(url);
+		rows.push({ url, op: "fetch" });
 	}
 	return input.queue.enqueue(
-		urls.map((url) => ({ url, systemId: input.systemId, op: "fetch" as const })),
+		rows.map((row) => ({ url: row.url, systemId: input.systemId, op: row.op })),
 		input.clock,
 	);
 }
@@ -169,12 +100,13 @@ export async function consumeQueue(input: {
 	limit: number;
 	clock: Clock;
 	fetchPage: (url: string) => Promise<FetchedPage>;
+	fetchText?: (url: string) => Promise<FetchedPage>;
 	knownHashes: Map<string, string>;
 	knownUrls: Set<string>;
 	upload: (row: QueueRow, markdown: string, hash: string) => Promise<void>;
 	deletePage: (systemId: SystemId, url: string) => Promise<void>;
 	deadline?: number;
-	dropExtras?: (systemId: SystemId, url: string) => Promise<void>;
+	retain?: (systemId: SystemId, url: string, hash: string) => Promise<void>;
 }): Promise<Pick<ConveyorReport, "indexed" | "unchanged" | "deleted" | "failed" | "appended"> & { systems: SystemId[] }> {
 	const batch = await input.queue.takeOldest(input.limit);
 	let indexed = 0;
@@ -184,11 +116,16 @@ export async function consumeQueue(input: {
 	let appended = 0;
 	const systems: SystemId[] = [];
 	const deadline = input.deadline ?? Number.POSITIVE_INFINITY;
+	const retain = input.retain ?? (async () => undefined);
 	for (const row of batch) {
 		if (Date.now() >= deadline) {
 			break;
 		}
 		try {
+			if (row.op === "sitemap") {
+				appended += await expandQueuedSitemap(input.queue, row, input.fetchText, input.clock);
+				continue;
+			}
 			if (row.op === "delete") {
 				await input.deletePage(row.systemId, row.url);
 				await input.queue.remove(row.url);
@@ -211,9 +148,7 @@ export async function consumeQueue(input: {
 			const hash = contentHash(page.body);
 			const stored = input.knownHashes.get(`${row.systemId}\0${row.url}`);
 			if (stored !== undefined && stored === hash) {
-				if (input.dropExtras) {
-					await input.dropExtras(row.systemId, row.url);
-				}
+				await retain(row.systemId, row.url, hash);
 				appended += await appendLinks(input.queue, seed, row.url, page.body, input.knownUrls, input.clock);
 				await input.queue.remove(row.url);
 				input.knownUrls.add(`${row.systemId}\0${row.url}`);
@@ -225,6 +160,7 @@ export async function consumeQueue(input: {
 				continue;
 			}
 			await input.upload(row, page.body, hash);
+			await retain(row.systemId, row.url, hash);
 			appended += await appendLinks(input.queue, seed, row.url, page.body, input.knownUrls, input.clock);
 			await input.queue.remove(row.url);
 			input.knownUrls.add(`${row.systemId}\0${row.url}`);
@@ -237,6 +173,36 @@ export async function consumeQueue(input: {
 		}
 	}
 	return { indexed, unchanged, deleted, failed, appended, systems };
+}
+
+async function expandQueuedSitemap(
+	queue: UrlQueue,
+	row: QueueRow,
+	fetchText: ((url: string) => Promise<FetchedPage>) | undefined,
+	clock: Clock,
+): Promise<number> {
+	if (!fetchText) {
+		throw new Error("sitemap fetch is missing");
+	}
+	const page = await fetchText(row.url);
+	if (page.status === 404 || page.status === 410) {
+		await queue.remove(row.url);
+		return 0;
+	}
+	if (page.status !== 200) {
+		throw new Error(`fetch failed ${page.status}`);
+	}
+	const seed = seedById(row.systemId);
+	const expanded = expandSitemap(page.body, (url) => admittedUrl(url, seed));
+	const appended = await queue.enqueue(
+		[
+			...expanded.sitemaps.map((url) => ({ url, systemId: row.systemId, op: "sitemap" as const })),
+			...expanded.pages.map((url) => ({ url, systemId: row.systemId, op: "fetch" as const })),
+		],
+		clock,
+	);
+	await queue.remove(row.url);
+	return appended;
 }
 
 async function appendLinks(
@@ -345,14 +311,12 @@ async function runConveyor(input: {
 		if (mark?.lastDiscovered) {
 			continue;
 		}
-		const found = await discoverPageUrls(seed, fetchText, fetchPage, deadline);
+		const rows = discoveryRows(seed);
 		appended += await queue.enqueue(
-			found.urls.map((url) => ({ url, systemId: seed.id, op: "fetch" as const })),
+			rows.map((row) => ({ url: row.url, systemId: seed.id, op: row.op })),
 			clock,
 		);
-		if (found.finished) {
-			await writeMark(db, seed.id, { lastDiscovered: now.toISOString() });
-		}
+		await writeMark(db, seed.id, { lastDiscovered: now.toISOString() });
 	}
 
 	if (items) {
@@ -361,7 +325,6 @@ async function runConveyor(input: {
 			queue,
 			now,
 			clock,
-			fetchText,
 			known,
 			deadline,
 		});
@@ -380,6 +343,7 @@ async function runConveyor(input: {
 				limit: deps.limit ?? DRAIN_LIMIT,
 				clock,
 				fetchPage,
+				fetchText,
 				knownHashes,
 				knownUrls,
 				deadline,
@@ -394,15 +358,12 @@ async function runConveyor(input: {
 						});
 						return;
 					}
-					await uploadIndexedPage(auth, items, row, markdown, hash, now.toISOString());
+					await uploadIndexedPage(auth, row, markdown, hash, now.toISOString());
 				},
 				deletePage: deps.deletePage ?? ((systemId, url) => deleteStoredPage(auth, items, systemId, url)),
-				dropExtras:
-					deps.deletePage === undefined
-						? async (systemId, url) => {
-								await deleteExtraCopies(auth, items, systemId, url);
-							}
-						: undefined,
+				retain: async (systemId, url, hash) => {
+					await deleteOtherCopies(auth, items, systemId, url, hash);
+				},
 			})
 		: { indexed: 0, unchanged: 0, deleted: 0, failed: 0, appended: 0, systems: [] as SystemId[] };
 	appended += consumed.appended;
@@ -432,7 +393,6 @@ async function refreshDue(input: {
 	queue: UrlQueue;
 	now: Date;
 	clock: Clock;
-	fetchText: (url: string) => Promise<FetchedPage>;
 	known: Map<string, { hash: string }>;
 	deadline: number;
 }): Promise<number> {
@@ -449,23 +409,15 @@ async function refreshDue(input: {
 		if (input.now.getTime() - Date.parse(mark.lastDiscovered) < REFRESH_MS) {
 			continue;
 		}
-		const collected = await collectSitemapLocs(seed, input.fetchText, input.deadline);
-		const discovered = urlsToSeed({
-			startUrl: seed.startUrl,
-			sitemapLocs: collected.locs,
-			pageLinks: [],
-			admit: (url) => admittedUrl(url, seed),
-		});
+		const collected = knownPages(input.known, seed.id);
 		appended += await applyRefresh({
 			queue: input.queue,
 			systemId: seed.id,
-			discovered,
-			known: knownPages(input.known, seed.id),
+			seed,
+			known: collected,
 			clock: input.clock,
 		});
-		if (collected.finished) {
-			await writeMark(input.db, seed.id, { lastDiscovered: input.now.toISOString() });
-		}
+		await writeMark(input.db, seed.id, { lastDiscovered: input.now.toISOString() });
 	}
 	return appended;
 }
@@ -509,7 +461,6 @@ async function loadItems(auth: CrawlAuth, override: ConveyorDeps["listItems"]): 
 
 async function uploadIndexedPage(
 	auth: CrawlAuth,
-	items: ItemRecord[],
 	row: QueueRow,
 	markdown: string,
 	hash: string,
@@ -526,24 +477,28 @@ async function uploadIndexedPage(
 		lastCrawled: now,
 		lastIndexed: now,
 	});
-	await deleteStoredPage(auth, items, row.systemId, row.url, key);
 }
 
-async function deleteExtraCopies(
+async function deleteOtherCopies(
 	auth: CrawlAuth,
 	items: readonly ItemRecord[],
 	systemId: SystemId,
 	url: string,
+	keepHash: string,
 ): Promise<void> {
-	const matches = items.filter((item) => {
+	const itemsAuth: ItemsAuth = { ...auth, instanceId: INSTANCE_ID };
+	for (const item of items) {
 		if (item.metadata?.system !== systemId) {
-			return false;
+			continue;
 		}
 		const source = item.metadata?.source_url;
-		return typeof source === "string" && pageKey(source) === url;
-	});
-	const itemsAuth: ItemsAuth = { ...auth, instanceId: INSTANCE_ID };
-	for (const item of matches.slice(1)) {
+		if (typeof source !== "string" || pageKey(source) !== url) {
+			continue;
+		}
+		const hash = item.metadata?.content_hash;
+		if (hash === keepHash) {
+			continue;
+		}
 		await deleteItem(itemsAuth, item.id);
 	}
 }

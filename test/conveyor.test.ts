@@ -35,38 +35,43 @@ function page(status: number, body: string): FetchedPage {
 }
 
 describe("seed and weekly refresh share one append", () => {
-	it("seeding appends that system's sitemap and page links", async () => {
+	it("seeding appends the root and the sitemap urls without fetching them", async () => {
 		const pageQueue = queue();
 		const primer = seedById("primer");
 		const urls = await seedSystem({
 			queue: pageQueue,
 			seed: primer,
 			clock: clock(),
-			fetchText: async () =>
-				page(
-					200,
-					"<urlset><url><loc>https://primer.style/about</loc></url><url><loc>https://primer.style/sitemap.xml</loc></url></urlset>",
-				),
-			fetchPage: async () => page(200, "See [components](https://primer.style/components)"),
 		});
-		expect(urls).toEqual([PRIMER, ABOUT, "https://primer.style/components"]);
-		expect((await pageQueue.list()).map((row) => row.url)).toEqual(urls);
-		expect((await pageQueue.list()).every((row) => row.systemId === "primer" && row.op === "fetch")).toBe(true);
+		expect(urls).toEqual([
+			PRIMER,
+			"https://primer.style/robots.txt",
+			"https://primer.style/sitemap.xml",
+			"https://primer.style/sitemap_index.xml",
+		]);
+		expect((await pageQueue.list()).map((row) => [row.url, row.op])).toEqual([
+			[PRIMER, "fetch"],
+			["https://primer.style/robots.txt", "sitemap"],
+			["https://primer.style/sitemap.xml", "sitemap"],
+			["https://primer.style/sitemap_index.xml", "sitemap"],
+		]);
 	});
 
-	it("enqueues every known page and every new sitemap url, and does not delete a page the sitemap omitted", async () => {
+	it("enqueues sitemap rows and every known page, and does not delete a page the sitemap omitted", async () => {
 		const pageQueue = queue();
 		const appended = await applyRefresh({
 			queue: pageQueue,
 			systemId: "primer",
-			discovered: [PRIMER, "https://primer.style/new"],
+			seed: seedById("primer"),
 			known: [PRIMER, ABOUT],
 			clock: clock(),
 		});
-		expect(appended).toBe(3);
+		expect(appended).toBe(5);
 		expect((await pageQueue.list()).map((row) => [row.url, row.op])).toEqual([
+			["https://primer.style/robots.txt", "sitemap"],
+			["https://primer.style/sitemap.xml", "sitemap"],
+			["https://primer.style/sitemap_index.xml", "sitemap"],
 			[PRIMER, "fetch"],
-			["https://primer.style/new", "fetch"],
 			[ABOUT, "fetch"],
 		]);
 	});
@@ -154,6 +159,63 @@ describe("queue consumer", () => {
 		expect(uploads).toEqual(["changed page"]);
 	});
 
+	it("keeps the row when deleting the old copy fails, including a matching hash", async () => {
+		const pageQueue = queue();
+		const same = "unchanged page";
+		const hash = contentHash(same);
+		await pageQueue.enqueue(
+			[
+				{ url: PRIMER, systemId: "primer", op: "fetch" },
+				{ url: ABOUT, systemId: "primer", op: "fetch" },
+			],
+			clock(),
+		);
+		const uploads: string[] = [];
+		await consumeQueue({
+			queue: pageQueue,
+			now: NOW,
+			limit: 1,
+			clock: clock(Date.parse(NOW) + 60_000),
+			knownHashes: new Map([[`primer\0${PRIMER}`, hash]]),
+			knownUrls: new Set([`primer\0${PRIMER}`]),
+			fetchPage: async () => page(200, same),
+			upload: async () => {
+				uploads.push("upload");
+			},
+			deletePage: async () => undefined,
+			retain: async () => {
+				throw new Error("old copy delete failed");
+			},
+		});
+		expect(uploads).toEqual([]);
+		const afterMatch = await pageQueue.list();
+		const matching = afterMatch.find((row) => row.url === PRIMER);
+		const stillQueued = afterMatch.find((row) => row.url === ABOUT);
+		expect(matching?.error).toBe("old copy delete failed");
+		expect(Date.parse(matching?.enqueuedAt ?? NOW)).toBeGreaterThan(Date.parse(stillQueued?.enqueuedAt ?? NOW));
+
+		await consumeQueue({
+			queue: pageQueue,
+			now: NOW,
+			limit: 1,
+			clock: clock(Date.parse(NOW) + 120_000),
+			knownHashes: new Map([[`primer\0${ABOUT}`, "previous"]]),
+			knownUrls: new Set([`primer\0${ABOUT}`]),
+			fetchPage: async (url) => page(200, url === ABOUT ? "changed page" : same),
+			upload: async (_row, markdown) => {
+				uploads.push(markdown);
+			},
+			deletePage: async () => undefined,
+			retain: async () => {
+				throw new Error("old copy delete failed");
+			},
+		});
+		expect(uploads).toEqual(["changed page"]);
+		const changed = (await pageQueue.list()).find((row) => row.url === ABOUT);
+		expect(changed?.error).toBe("old copy delete failed");
+		expect(await pageQueue.depth()).toBe(2);
+	});
+
 	it("removes a deleted page and a 404, and a failed fetch does not stop the next row", async () => {
 		const pageQueue = queue();
 		const removed: string[] = [];
@@ -233,14 +295,12 @@ describe("conveyor tick", () => {
 			upload: async () => undefined,
 			deletePage: async () => undefined,
 		});
-		expect(fetched.slice(0, 3)).toEqual([
-			"https://paste-dsys.com/",
-			"https://primer.style/",
-			"https://designsystem.digital.gov/",
-		]);
-		expect(report?.indexed).toBe(3);
+		expect(fetched).toEqual(["https://paste-dsys.com/"]);
+		expect(report?.indexed).toBe(1);
+		expect(report?.deleted).toBe(0);
 		expect(report?.failed).toBe(0);
-		expect(report?.depth).toBe(SYSTEM_IDS.length - 3);
+		expect(report?.depth).toBe(SYSTEM_IDS.length * 4 - 3);
+		expect((await new UrlQueue(db).list()).some((row) => row.op === "sitemap")).toBe(true);
 		const discover = await db.prepare("SELECT system_id FROM discover_run").first();
 		expect(discover).toBeNull();
 	});
@@ -270,8 +330,9 @@ describe("conveyor tick", () => {
 			},
 		}));
 		const pageFetches: string[] = [];
+		const deleted: string[] = [];
 		const report = await conveyorTick(env, "*/5 * * * *", new Date(NOW), {
-			limit: 20,
+			limit: 80,
 			listItems: async () => items,
 			fetchText: async () => page(404, ""),
 			fetchPage: async (url) => {
@@ -281,9 +342,12 @@ describe("conveyor tick", () => {
 			upload: async () => {
 				throw new Error("unchanged page must not be uploaded");
 			},
-			deletePage: async () => undefined,
+			deletePage: async (_systemId, url) => {
+				deleted.push(url);
+			},
 		});
 		expect(pageFetches.length).toBe(SYSTEM_IDS.length);
+		expect(deleted).toEqual([]);
 		expect(report?.indexed).toBe(0);
 		expect(report?.unchanged).toBe(SYSTEM_IDS.length);
 		expect(report?.failed).toBe(0);
@@ -292,5 +356,79 @@ describe("conveyor tick", () => {
 		expect(await db.prepare("SELECT COUNT(*) AS n FROM queue WHERE error IS NOT NULL").first<{ n: number }>()).toEqual({
 			n: 0,
 		});
+	});
+
+	it("continues a sitemap across ticks while a queued page still drains", async () => {
+		const db = memoryD1();
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		for (const id of SYSTEM_IDS) {
+			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, NOW).run();
+		}
+		const pageQueue = new UrlQueue(db);
+		const indexUrl = "https://primer.style/sitemap_index.xml";
+		const childA = "https://primer.style/sitemap-a.xml";
+		const childB = "https://primer.style/sitemap-b.xml";
+		const pageB = "https://primer.style/components";
+		await pageQueue.enqueue(
+			[
+				{ url: ABOUT, systemId: "primer", op: "fetch" },
+				{ url: indexUrl, systemId: "primer", op: "sitemap" },
+				{ url: pageB, systemId: "primer", op: "fetch" },
+			],
+			clock(Date.parse(NOW) - 60_000),
+		);
+		const textCalls: string[] = [];
+		const pageCalls: string[] = [];
+		const deps = {
+			limit: 1,
+			listItems: async (): Promise<ItemRecord[]> => [],
+			fetchText: async (url: string) => {
+				textCalls.push(url);
+				if (url === indexUrl) {
+					return page(
+						200,
+						`<sitemapindex><sitemap><loc>${childA}</loc></sitemap><sitemap><loc>${childB}</loc></sitemap></sitemapindex>`,
+					);
+				}
+				if (url === childA) {
+					return page(200, `<urlset><url><loc>${ABOUT}</loc></url></urlset>`);
+				}
+				return page(404, "");
+			},
+			fetchPage: async (url: string) => {
+				pageCalls.push(url);
+				return page(200, `body ${url}`);
+			},
+			upload: async () => undefined,
+			deletePage: async () => undefined,
+		};
+		const tick = (offsetMs: number) => conveyorTick(env, "*/5 * * * *", new Date(Date.parse(NOW) + offsetMs), deps);
+
+		const first = await tick(0);
+		expect(pageCalls).toEqual([ABOUT]);
+		expect(textCalls).toEqual([]);
+		expect(first?.indexed).toBe(1);
+		expect((await pageQueue.list()).map((row) => row.url)).toEqual([indexUrl, pageB]);
+
+		await tick(60_000);
+		expect(textCalls).toEqual([indexUrl]);
+		expect(pageCalls).toEqual([ABOUT]);
+		expect((await pageQueue.list()).map((row) => row.url)).toEqual([pageB, childA, childB]);
+
+		const third = await tick(120_000);
+		expect(pageCalls).toEqual([ABOUT, pageB]);
+		expect(textCalls).toEqual([indexUrl]);
+		expect(third?.indexed).toBe(1);
+		expect((await pageQueue.list()).map((row) => row.url)).toEqual([childA, childB]);
+
+		await tick(180_000);
+		expect(textCalls).toEqual([indexUrl, childA]);
+		expect((await pageQueue.list()).map((row) => row.url)).toEqual([childB, ABOUT]);
 	});
 });

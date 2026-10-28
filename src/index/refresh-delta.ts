@@ -61,3 +61,29 @@ export function urlsToSeed(input: {
 	}
 	return urls;
 }
+
+export function expandSitemap(
+	body: string,
+	admit: (url: string) => string | null,
+): { sitemaps: string[]; pages: string[] } {
+	if (isSitemapIndex(body)) {
+		return { sitemaps: sitemapLocs(body), pages: [] };
+	}
+	const locs = sitemapLocs(body);
+	if (locs.length === 0) {
+		return { sitemaps: robotsSitemaps(body), pages: [] };
+	}
+	const sitemaps: string[] = [];
+	const pages: string[] = [];
+	for (const loc of locs) {
+		if (isSitemapFile(loc)) {
+			sitemaps.push(loc);
+			continue;
+		}
+		const admitted = admit(loc);
+		if (admitted) {
+			pages.push(admitted);
+		}
+	}
+	return { sitemaps, pages };
+}
