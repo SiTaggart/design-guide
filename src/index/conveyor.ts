@@ -2,7 +2,7 @@ import { INSTANCE_ID } from "../config/instance.ts";
 import { SEEDS, seedById } from "../config/seed.ts";
 import { isSystemId, type Seed, type SystemId } from "../config/types.ts";
 import { fetchPageMarkdown, type CrawlAuth } from "../crawl/browser-run.ts";
-import { admittedUrl, canonicalLink, frontierLinks, pageKey } from "../crawl/links.ts";
+import { admittedUrl, canonicalLink, frontierLinks, linkBase, pageKey } from "../crawl/links.ts";
 import { contentHash } from "./content-hash.ts";
 import { D1PageQueue, DRAIN_LIMIT, FILL_TICK_DEADLINE_MS, MAX_ATTEMPTS } from "./page-queue.ts";
 import { deleteItem, listItems, uploadItem, type ItemRecord, type ItemsAuth } from "./items-rest.ts";
@@ -233,7 +233,8 @@ async function appendLinks(
 	knownUrls: ReadonlySet<string>,
 	clock: Clock,
 ): Promise<number> {
-	const links = frontierLinks(markdown, pageUrl, seed).filter((url) => !knownUrls.has(`${seed.id}\0${url}`) && !isSitemapFile(url));
+	const base = linkBase(pageUrl, markdown, seed);
+	const links = frontierLinks(markdown, base, seed).filter((url) => !knownUrls.has(`${seed.id}\0${url}`) && !isSitemapFile(url));
 	const fresh: string[] = [];
 	for (const url of links) {
 		if (!(await queue.has(url))) {

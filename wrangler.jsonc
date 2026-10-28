@@ -33,16 +33,6 @@
 			"migrations_dir": "migrations"
 		}
 	],
-	"workflows": [
-		{
-			"name": "design-guide-reindex",
-			"binding": "REINDEX",
-			"class_name": "ReindexWorkflow",
-			"limits": {
-				"steps": 25000
-			}
-		}
-	],
 	"limits": {
 		"subrequests": 1000000
 	},

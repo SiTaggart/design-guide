@@ -2,7 +2,6 @@ import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
 import { isCrawlCapError, seedFailure } from "../index/crawl-cap.ts";
-import { capCooling, type CapDeferMark } from "../index/discover.ts";
 import { D1PageQueue } from "../index/page-queue.ts";
 import { seedHashKey, systemSeedHash } from "../index/seed-hash.ts";
 import type { IndexStatusDocument } from "../index/status.ts";
@@ -13,6 +12,40 @@ const JSON_HEADERS = {
 	"content-type": "application/json; charset=utf-8",
 	"cache-control": "no-store",
 };
+
+type CapDeferMark = string | { at: string; streak: number };
+
+const CAP_RETRY_MS = 60 * 60 * 1000;
+
+function capRetryDelayMs(streak: number): number {
+	if (streak <= 1) {
+		return CAP_RETRY_MS;
+	}
+	if (streak === 2) {
+		return 6 * CAP_RETRY_MS;
+	}
+	if (streak === 3) {
+		return 24 * CAP_RETRY_MS;
+	}
+	return 7 * 24 * CAP_RETRY_MS;
+}
+
+function capCooling(
+	id: SystemId,
+	deferred: Readonly<Record<string, CapDeferMark>>,
+	now: number | undefined,
+): boolean {
+	const mark = deferred[id];
+	if (!mark) {
+		return false;
+	}
+	const at = typeof mark === "string" ? mark : mark.at;
+	const streak = typeof mark === "string" ? 1 : mark.streak;
+	if (now === undefined) {
+		return true;
+	}
+	return now - Date.parse(at) < capRetryDelayMs(streak);
+}
 
 export type FillHealthBody = {
 	fill: "ok" | "alarm";

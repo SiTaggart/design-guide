@@ -7,9 +7,6 @@ import { handleMcp } from "./serve/mcp.ts";
 import { handleSearch } from "./serve/search.ts";
 import { statusMethodNotAllowed, statusTokenOk, statusUnauthorized } from "./serve/status-auth.ts";
 import { handleStatusPage } from "./serve/status-page.ts";
-import { ReindexWorkflow } from "./workflows/reindex.ts";
-
-export { ReindexWorkflow };
 
 export default {
 	async fetch(request: Request, env: WorkerEnv): Promise<Response> {
