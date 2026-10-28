@@ -619,24 +619,7 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async running(): Promise<DiscoverRun | null> {
-		const row = await first<RunRow>(
-			this.step,
-			`SELECT system_id, kind, trigger_name, job_id, start_url, cursor, poll_failures, started_at
-			 FROM discover_run LIMIT 1`,
-		);
-		if (!row || !isSystemId(row.system_id)) {
-			return null;
-		}
-		return {
-			systemId: row.system_id,
-			kind: asKind(row.kind),
-			trigger: asTrigger(row.trigger_name),
-			jobId: row.job_id,
-			startUrl: row.start_url,
-			cursor: row.cursor,
-			pollFailures: row.poll_failures,
-			startedAt: row.started_at,
-		};
+		return null;
 	}
 
 	async insertRun(run: DiscoverRun & { now: string }): Promise<void> {

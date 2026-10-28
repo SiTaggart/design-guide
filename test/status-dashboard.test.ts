@@ -141,19 +141,15 @@ describe("GET /status", () => {
 		const body = (await jsonResponse.json()) as IndexStatusDocument;
 		const html = await htmlResponse.text();
 
-		expect(body.discover).toEqual({
-			systemId: "primer",
-			jobId: "job-primer-1",
-			kind: "reindex",
-			trigger: "recrawl",
-			startedAt: NOW,
-		});
+		expect(body.discover).toBeNull();
 		expect(body.state).toBe("running");
 		expect(body.trigger).toBe("recrawl");
 		expect(body.queue).toEqual({ pending: 1, claimed: 1, failed: 1, done: 1 });
 		expect(body.runError).toBeUndefined();
 		expect(html).not.toContain(STATUS_TOKEN);
 		expect(html).not.toContain("stale-kv-job");
+		expect(html).toContain('data-discover="none"');
+		expect(html).toContain("No active discover");
 		expect(html).toContain('data-queue="filling"');
 		expect(html).not.toContain("Queue stuck");
 		expect(html).toContain("Filling.");
@@ -169,11 +165,6 @@ describe("GET /status", () => {
 			["queue.claimed", body.queue.claimed],
 			["queue.failed", body.queue.failed],
 			["queue.done", body.queue.done],
-			["discover.systemId", body.discover?.systemId],
-			["discover.jobId", body.discover?.jobId],
-			["discover.kind", body.discover?.kind],
-			["discover.trigger", body.discover?.trigger],
-			["discover.startedAt", body.discover?.startedAt],
 		] as const) {
 			expect(html).toContain(`data-field="${field[0]}">${field[1]}`);
 		}

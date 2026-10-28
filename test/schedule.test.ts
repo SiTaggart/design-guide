@@ -39,7 +39,7 @@ describe("wrangler automation config", () => {
 		expect(wrangler).toContain('"*/5 * * * *"');
 		expect(wrangler).toContain('"0 4 * * *"');
 		expect(wrangler).toContain('"0 6 * * SUN"');
-		expect(wrangler).toContain('"steps": 25000');
+		expect(wrangler).not.toContain("ReindexWorkflow");
 		expect(wrangler).toContain('"binding": "PAGE_QUEUE"');
 		expect(wrangler).not.toContain('"schedules"');
 		expect(DRIFT_CRON).toBe("*/5 * * * *");
