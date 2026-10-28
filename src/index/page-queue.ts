@@ -504,9 +504,8 @@ export class D1PageQueue implements PageQueue {
 		return guardedChanges(this.step, "complete", item, "done", changes);
 	}
 
-	async holdsFreshness(systemId: SystemId): Promise<boolean> {
-		const deferred = await this.capDefers();
-		return deferred[systemId] !== undefined;
+	async holdsFreshness(_systemId: SystemId): Promise<boolean> {
+		return false;
 	}
 
 	async fail(

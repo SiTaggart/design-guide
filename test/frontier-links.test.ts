@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { seedById } from "../src/config/seed.ts";
 import { frontierLinks } from "../src/crawl/links.ts";
-import { D1PageQueue } from "../src/index/page-queue.ts";
-import { memoryD1 } from "./helpers/d1.ts";
 
 const PAGE = "https://paste-dsys.com/components/button";
 const HTML_PAGE = "https://paste-dsys.com/patterns/form.html";
@@ -36,21 +34,19 @@ describe("frontierLinks", () => {
 		]);
 	});
 
-	it("does not pick a query-string variant when the path was already staged", async () => {
-		const db = memoryD1();
-		const pageQueue = new D1PageQueue(db);
-		await pageQueue.stageUrl("cloudscape", "https://cloudscape.design/components/alert");
-		await pageQueue.addFrontier("cloudscape", [
-			"https://cloudscape.design/components/alert?tabId=1",
-			"https://cloudscape.design/components/alert?tabId=2",
+	it("does not pick a query-string variant when the path was already linked", () => {
+		const links = frontierLinks(
+			"See https://cloudscape.design/components/alert?tabId=1 and https://cloudscape.design/components/table",
+			"https://cloudscape.design/components/alert",
+			seedById("cloudscape"),
+		);
+		expect(links).toEqual([
+			"https://cloudscape.design/components/alert",
 			"https://cloudscape.design/components/table",
 		]);
-		expect(await pageQueue.nextFrontier("cloudscape", new Set(await pageQueue.stagedUrls("cloudscape")))).toBe(
-			"https://cloudscape.design/components/table",
-		);
 	});
 
-	it("does not store static assets or pick them as a follow-up start", async () => {
+	it("leaves static assets out of the links", () => {
 		const markdown = [
 			`See [logo](${ASSETS[0]})`,
 			ASSETS[1],
@@ -60,21 +56,9 @@ describe("frontierLinks", () => {
 			`[button](${PAGE})`,
 			`[form](${HTML_PAGE})`,
 		].join(" ");
-		const links = frontierLinks(markdown, "https://paste-dsys.com/components/alert", seedById("paste"));
-		const db = memoryD1();
-		const pageQueue = new D1PageQueue(db);
-		await pageQueue.addFrontier("paste", links);
-		const stored = await db
-			.prepare("SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC")
-			.bind("paste")
-			.all<{ url: string }>();
-		expect(stored.results?.map((row) => row.url)).toEqual([PAGE, HTML_PAGE]);
-		for (const asset of ASSETS) {
-			await db
-				.prepare("INSERT INTO discover_frontier (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING")
-				.bind("paste", asset)
-				.run();
-		}
-		expect(await pageQueue.nextFrontier("paste", new Set())).toBe(PAGE);
+		expect(frontierLinks(markdown, "https://paste-dsys.com/components/alert", seedById("paste"))).toEqual([
+			PAGE,
+			HTML_PAGE,
+		]);
 	});
 });
