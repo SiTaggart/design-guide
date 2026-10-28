@@ -91,17 +91,6 @@ describe("GET /status", () => {
 			"paste/key",
 		);
 		await queue.markDiscovered("paste", NOW);
-		await queue.insertRun({
-			systemId: "primer",
-			kind: "reindex",
-			trigger: "recrawl",
-			jobId: "job-primer-1",
-			startUrl: "https://primer.style/",
-			cursor: null,
-			pollFailures: 0,
-			startedAt: NOW,
-			now: NOW,
-		});
 
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });
 		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");

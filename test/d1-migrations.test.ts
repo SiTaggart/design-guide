@@ -51,6 +51,7 @@ const MIGRATIONS = [
 	"0024_primer_exclusion_deletes.sql",
 	"0025_drop_finished_primer_exclusions.sql",
 	"0026_reset_done_attempts.sql",
+	"0027_drop_discover.sql",
 ];
 
 function filesUnder(dir: string): string[] {
@@ -88,26 +89,39 @@ describe("page queue migrations", () => {
 		expect(columns.results.map((column) => column.name)).toEqual(PAGE_WORK_COLUMNS_NOW);
 		const lease = await db.prepare("PRAGMA table_info(fill_lease)").all<{ name: string }>();
 		expect(lease.results.map((column) => column.name)).toEqual(["id", "owner", "claimed_at"]);
-		const resume = await db.prepare("PRAGMA table_info(discover_resume)").all<{ name: string }>();
-		expect(resume.results.map((column) => column.name)).toEqual(["system_id", "seed_hash", "yielded_at"]);
-		const discoverRun = await db.prepare("PRAGMA table_info(discover_run)").all<{ name: string }>();
-		const freshNames = discoverRun.results.map((column) => column.name);
+		const queue = await db.prepare("PRAGMA table_info(queue)").all<{ name: string }>();
+		expect(queue.results.map((column) => column.name)).toEqual([
+			"url",
+			"system_id",
+			"enqueued_at",
+			"error",
+			"op",
+		]);
+		const tables = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>();
+		const names = tables.results.map((row) => row.name);
+		for (const dropped of [
+			"discover_run",
+			"discover_resume",
+			"discover_url",
+			"discover_frontier",
+			"discover_indexable",
+			"discover_attempt",
+			"cap_defer",
+			"recovery_attempt",
+			"seed_refresh",
+		]) {
+			expect(names).not.toContain(dropped);
+		}
 		const migrated = new DatabaseSync(":memory:");
 		const tableNames = (sqlite: DatabaseSync) =>
 			(sqlite.prepare("PRAGMA table_info(discover_run)").all() as Array<{ name: string }>).map((row) => row.name);
 		const dropState = "0015_discover_run_drop_state.sql";
 		const beforeDrop = MIGRATIONS.slice(0, MIGRATIONS.indexOf(dropState));
-		const afterDrop = MIGRATIONS.slice(MIGRATIONS.indexOf(dropState));
 		for (const name of beforeDrop) migrated.exec(readFileSync(join(root, "migrations", name), "utf8"));
 		expect(tableNames(migrated)).toEqual(expect.arrayContaining(["state", "error", "slice_frontier_start", "slice_accepted"]));
-		for (const name of afterDrop) migrated.exec(readFileSync(join(root, "migrations", name), "utf8"));
-		const migratedNames = tableNames(migrated);
-		expect(migratedNames).toEqual(freshNames);
-		for (const names of [freshNames, migratedNames]) {
-			expect(names).not.toContain("state");
-			expect(names).not.toContain("error");
-		}
-		expect(freshNames).toEqual(expect.arrayContaining(["slice_frontier_start", "slice_accepted"]));
+		migrated.exec(readFileSync(join(root, "migrations", dropState), "utf8"));
+		expect(tableNames(migrated)).not.toContain("state");
+		expect(tableNames(migrated)).toEqual(expect.arrayContaining(["slice_frontier_start", "slice_accepted"]));
 	});
 
 	it("adds slice progress columns in the discover_resume migration", () => {
