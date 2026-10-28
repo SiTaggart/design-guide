@@ -98,7 +98,7 @@ describe("seed and weekly refresh share one append", () => {
 			bodies: new Map([[PRIMER, changed]]),
 		});
 		expect(delta.fetch).toEqual([PRIMER, "https://primer.style/new"]);
-		expect(delta.delete).toEqual([ABOUT]);
+		expect(delta.delete).toEqual([]);
 		await applyRefresh({
 			queue: pageQueue,
 			systemId: "primer",
@@ -113,7 +113,6 @@ describe("seed and weekly refresh share one append", () => {
 		expect((await pageQueue.list()).map((row) => [row.url, row.op])).toEqual([
 			[PRIMER, "fetch"],
 			["https://primer.style/new", "fetch"],
-			[ABOUT, "delete"],
 		]);
 	});
 

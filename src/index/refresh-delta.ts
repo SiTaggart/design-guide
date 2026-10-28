@@ -93,10 +93,5 @@ export function refreshDelta(input: {
 			fetch.push(url);
 		}
 	}
-	for (const page of input.known) {
-		if (!discovered.has(page.url)) {
-			deleted.push(page.url);
-		}
-	}
 	return { fetch, delete: deleted };
 }
