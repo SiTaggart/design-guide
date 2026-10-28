@@ -158,20 +158,6 @@ describe("canonical inserts", () => {
 		]);
 	});
 
-	it("stores one discover url and does not keep an excluded primer frontier", async () => {
-		const db = memoryD1();
-		const pages = new D1PageQueue(db);
-		await pages.stageUrl("primer", BUTTON_SLASH);
-		await pages.stageIndexable("primer", BUTTON_QUERY);
-		await pages.addFrontier("primer", [BUTTON_HASH, LOOKBOOK, OCTICON, PASCAL]);
-		const staged = await db.prepare("SELECT url FROM discover_url").all<{ url: string }>();
-		const indexable = await db.prepare("SELECT url FROM discover_indexable").all<{ url: string }>();
-		const frontier = await db.prepare("SELECT url FROM discover_frontier ORDER BY url").all<{ url: string }>();
-		expect(staged.results.map((row) => row.url)).toEqual([BUTTON]);
-		expect(indexable.results.map((row) => row.url)).toEqual([BUTTON]);
-		expect(frontier.results.map((row) => row.url)).toEqual([BUTTON, PASCAL].sort());
-	});
-
 	it("admits primer docs and rejects the lookbook and octicon icon pages", () => {
 		const primer = seedById("primer");
 		expect(admittedUrl("https://primer.style/product/contribute/design/", primer)).toBe(

@@ -2,7 +2,6 @@ import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
 import { isCrawlCapError, seedFailure } from "../index/crawl-cap.ts";
-import { D1PageQueue } from "../index/page-queue.ts";
 import { seedHashKey, systemSeedHash } from "../index/seed-hash.ts";
 import type { IndexStatusDocument } from "../index/status.ts";
 import { readIndexOverlay } from "./index-status.ts";
@@ -13,40 +12,6 @@ const JSON_HEADERS = {
 	"cache-control": "no-store",
 };
 
-type CapDeferMark = string | { at: string; streak: number };
-
-const CAP_RETRY_MS = 60 * 60 * 1000;
-
-function capRetryDelayMs(streak: number): number {
-	if (streak <= 1) {
-		return CAP_RETRY_MS;
-	}
-	if (streak === 2) {
-		return 6 * CAP_RETRY_MS;
-	}
-	if (streak === 3) {
-		return 24 * CAP_RETRY_MS;
-	}
-	return 7 * 24 * CAP_RETRY_MS;
-}
-
-function capCooling(
-	id: SystemId,
-	deferred: Readonly<Record<string, CapDeferMark>>,
-	now: number | undefined,
-): boolean {
-	const mark = deferred[id];
-	if (!mark) {
-		return false;
-	}
-	const at = typeof mark === "string" ? mark : mark.at;
-	const streak = typeof mark === "string" ? 1 : mark.streak;
-	if (now === undefined) {
-		return true;
-	}
-	return now - Date.parse(at) < capRetryDelayMs(streak);
-}
-
 export type FillHealthBody = {
 	fill: "ok" | "alarm";
 	alarms: string[];
@@ -54,7 +19,6 @@ export type FillHealthBody = {
 };
 
 export type FillSchedule = {
-	deferred?: Readonly<Record<string, CapDeferMark>>;
 	drifted?: ReadonlySet<SystemId>;
 };
 
@@ -93,8 +57,7 @@ export async function handleFillHealth(env: WorkerEnv): Promise<Response> {
 }
 
 async function readFillSchedule(env: WorkerEnv): Promise<FillSchedule> {
-	const [deferred, drifted] = await Promise.all([readCapDefers(env), readDriftedSeeds(env)]);
-	return { deferred, drifted };
+	return { drifted: await readDriftedSeeds(env) };
 }
 
 async function readDriftedSeeds(env: WorkerEnv): Promise<Set<SystemId>> {
@@ -124,29 +87,11 @@ async function readDriftedSeeds(env: WorkerEnv): Promise<Set<SystemId>> {
 	return drifted;
 }
 
-async function readCapDefers(env: WorkerEnv): Promise<Record<string, CapDeferMark>> {
-	if (!env.PAGE_QUEUE) {
-		return {};
-	}
-	try {
-		const queue = new D1PageQueue(env.PAGE_QUEUE);
-		return await queue.capDeferMarks();
-	} catch (error) {
-		console.log(
-			JSON.stringify({
-				event: "fill_health_defer_unread",
-				error: error instanceof Error ? error.message : String(error),
-			}),
-		);
-		return {};
-	}
-}
-
 function fillAlarms(document: IndexStatusDocument, now: number, schedule: FillSchedule): string[] {
 	const seeds = seedViews(document);
 	const alarms: string[] = [];
 	const idle = document.queue.pending + document.queue.claimed === 0;
-	if (document.discover === null && idle && seeds.some((seed) => freezeEligible(seed, now, schedule))) {
+	if (document.discover === null && idle && seeds.some((seed) => freezeEligible(seed, schedule))) {
 		alarms.push("fleet_freeze");
 	}
 	for (const seed of seeds) {
@@ -252,8 +197,8 @@ function seedViews(document: IndexStatusDocument): SeedView[] {
 	});
 }
 
-function freezeEligible(seed: SeedView, now: number, schedule: FillSchedule): boolean {
-	if (seed.parked || capCooling(seed.system, schedule.deferred ?? {}, now)) {
+function freezeEligible(seed: SeedView, schedule: FillSchedule): boolean {
+	if (seed.parked) {
 		return false;
 	}
 	if (seed.phase === "empty") {

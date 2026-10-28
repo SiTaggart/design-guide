@@ -231,7 +231,7 @@ describe("page queue migrations", () => {
 		);
 		db.prepare("INSERT INTO discover_url (system_id, url) VALUES (?, ?)").run("govuk", "https://design-system.service.gov.uk/styles/");
 		for (const name of MIGRATIONS) {
-			if (name < "0019") {
+			if (name < "0019" || name >= "0027") {
 				continue;
 			}
 			db.exec(readFileSync(join(root, "migrations", name), "utf8"));
@@ -319,6 +319,9 @@ describe("page queue migrations", () => {
 		expect(frontier.map((row) => row.url)).toEqual(["https://primer.style/brand/visual-assets"]);
 		const govukDiscover = db.prepare("SELECT url FROM discover_url").all() as Array<{ url: string }>;
 		expect(govukDiscover.map((row) => row.url)).toEqual(["https://design-system.service.gov.uk/styles"]);
+		db.exec(readFileSync(join(root, "migrations/0027_drop_discover.sql"), "utf8"));
+		const left = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('discover_frontier', 'discover_url')").all();
+		expect(left).toEqual([]);
 	});
 
 	it("drops finished excluded primer pages that are no longer queued for delete", () => {
