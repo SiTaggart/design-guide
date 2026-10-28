@@ -1,6 +1,6 @@
 import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, isSystemId, type SystemId } from "../config/types.ts";
-import { admittedUrl, isStaticAsset, pageKey } from "../crawl/links.ts";
+import { admittedUrl } from "../crawl/links.ts";
 import { D1_STEP_RETRIES, d1MaxBackoffMs, d1Query, tickFrom, type D1QueryStep, type D1QueueOptions } from "./d1-step.ts";
 
 export const DRAIN_LIMIT = 100;
@@ -10,8 +10,6 @@ export const FRESHNESS_MS = 30 * 24 * 60 * 60 * 1000;
 export const EXHAUSTED_RETRY_MS = 60 * 60 * 1000;
 const STALE_CLAIM_MS = 15 * 60 * 1000;
 const FILL_LEASE_ID = "fill";
-// Not a page url. A yielded slice that was capped, skipped, or cancelled at the poll deadline leaves this row so a later full pass does not prune.
-const INCOMPLETE_SLICE = "yield:incomplete";
 
 /**
  * A cron worker can run for 15 minutes. The fill lease used to expire at that same age, so a
@@ -107,17 +105,6 @@ export type PageQueue = {
 	removeUrls(systemId: SystemId, urls: readonly string[]): Promise<void>;
 };
 
-export type DiscoverRun = {
-	systemId: SystemId;
-	kind: PageKind;
-	trigger: "deploy-drift" | "recrawl" | "recovery";
-	jobId: string;
-	startUrl: string;
-	cursor: string | null;
-	pollFailures: number;
-	startedAt: string;
-};
-
 type WorkRow = {
 	system_id: string;
 	url: string;
@@ -130,30 +117,12 @@ type WorkRow = {
 	item_key: string | null;
 };
 
-type RunRow = {
-	system_id: string;
-	kind: string;
-	trigger_name: string;
-	job_id: string;
-	start_url: string;
-	cursor: string | null;
-	poll_failures: number;
-	started_at: string;
-};
-
 export function emptyDepths(): QueueDepths {
 	return { pending: 0, claimed: 0, failed: 0, done: 0 };
 }
 
 function asKind(value: string): PageKind {
 	return value === "seed" ? "seed" : "reindex";
-}
-
-function asTrigger(value: string): DiscoverRun["trigger"] {
-	if (value === "deploy-drift" || value === "recovery") {
-		return value;
-	}
-	return "recrawl";
 }
 
 function asStatus(value: string): PageStatus {
@@ -192,11 +161,6 @@ async function first<T>(step: D1QueryStep, sql: string, ...params: unknown[]): P
 
 async function run(step: D1QueryStep, sql: string, ...params: unknown[]): Promise<number> {
 	const result = await d1Query<{ meta?: { changes?: number } }>(step, true, "run", sql, params);
-	return result.meta?.changes ?? 0;
-}
-
-async function runOnce(step: D1QueryStep, sql: string, ...params: unknown[]): Promise<number> {
-	const result = await d1Query<{ meta?: { changes?: number } }>(step, false, "run", sql, params);
 	return result.meta?.changes ?? 0;
 }
 
@@ -504,9 +468,8 @@ export class D1PageQueue implements PageQueue {
 		return guardedChanges(this.step, "complete", item, "done", changes);
 	}
 
-	async holdsFreshness(systemId: SystemId): Promise<boolean> {
-		const deferred = await this.capDefers();
-		return deferred[systemId] !== undefined;
+	async holdsFreshness(_systemId: SystemId): Promise<boolean> {
+		return false;
 	}
 
 	async fail(
@@ -618,405 +581,6 @@ export class D1PageQueue implements PageQueue {
 		});
 	}
 
-	async running(): Promise<DiscoverRun | null> {
-		const row = await first<RunRow>(
-			this.step,
-			`SELECT system_id, kind, trigger_name, job_id, start_url, cursor, poll_failures, started_at
-			 FROM discover_run LIMIT 1`,
-		);
-		if (!row || !isSystemId(row.system_id)) {
-			return null;
-		}
-		return {
-			systemId: row.system_id,
-			kind: asKind(row.kind),
-			trigger: asTrigger(row.trigger_name),
-			jobId: row.job_id,
-			startUrl: row.start_url,
-			cursor: row.cursor,
-			pollFailures: row.poll_failures,
-			startedAt: row.started_at,
-		};
-	}
-
-	async insertRun(run: DiscoverRun & { now: string }): Promise<void> {
-		await runOnce(
-			this.step,
-			`INSERT INTO discover_run (
-			   system_id, kind, trigger_name, job_id, start_url, cursor, poll_failures, started_at, updated_at
-			 ) VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?)`,
-			run.systemId,
-			run.kind,
-			run.trigger,
-			run.jobId,
-			run.startUrl,
-			run.now,
-			run.now,
-		);
-		await this.noteAttempt(run.systemId, run.startUrl);
-		await this.noteSliceBaseline(run.systemId, await this.frontierCount(run.systemId));
-	}
-
-	async saveCursor(systemId: SystemId, cursor: string | null, now: string): Promise<void> {
-		await run(
-			this.step,
-			"UPDATE discover_run SET cursor = ?, poll_failures = 0, updated_at = ? WHERE system_id = ?",
-			cursor,
-			now,
-			systemId,
-		);
-	}
-
-	async noteCapped(systemId: SystemId, now: string): Promise<void> {
-		await run(
-			this.step,
-			"UPDATE discover_run SET capped_any = 1, updated_at = ? WHERE system_id = ?",
-			now,
-			systemId,
-		);
-	}
-
-	async cappedAny(systemId: SystemId): Promise<boolean> {
-		const row = await first<{ capped_any: number }>(
-			this.step,
-			"SELECT capped_any FROM discover_run WHERE system_id = ?",
-			systemId,
-		);
-		return row?.capped_any === 1;
-	}
-
-	async noteSkipped(systemId: SystemId, now: string): Promise<number> {
-		await runOnce(
-			this.step,
-			"UPDATE discover_run SET skipped_any = skipped_any + 1, updated_at = ? WHERE system_id = ?",
-			now,
-			systemId,
-		);
-		const row = await first<{ skipped_any: number }>(
-			this.step,
-			"SELECT skipped_any FROM discover_run WHERE system_id = ?",
-			systemId,
-		);
-		return row?.skipped_any ?? 0;
-	}
-
-	async skippedAny(systemId: SystemId): Promise<boolean> {
-		const row = await first<{ skipped_any: number }>(
-			this.step,
-			"SELECT skipped_any FROM discover_run WHERE system_id = ?",
-			systemId,
-		);
-		return (row?.skipped_any ?? 0) >= 1;
-	}
-
-	async clearPollFailures(systemId: SystemId, now: string): Promise<void> {
-		await run(
-			this.step,
-			"UPDATE discover_run SET poll_failures = 0, updated_at = ? WHERE system_id = ?",
-			now,
-			systemId,
-		);
-	}
-
-	async noteStartFailure(systemId: SystemId, now: string): Promise<number> {
-		await runOnce(
-			this.step,
-			"UPDATE discover_run SET start_failures = start_failures + 1, updated_at = ? WHERE system_id = ?",
-			now,
-			systemId,
-		);
-		const row = await first<{ start_failures: number }>(
-			this.step,
-			"SELECT start_failures FROM discover_run WHERE system_id = ?",
-			systemId,
-		);
-		return row?.start_failures ?? 0;
-	}
-
-	async clearStartFailures(systemId: SystemId, now: string): Promise<void> {
-		await run(
-			this.step,
-			"UPDATE discover_run SET start_failures = 0, updated_at = ? WHERE system_id = ?",
-			now,
-			systemId,
-		);
-	}
-
-	async notePollFailure(systemId: SystemId, now: string): Promise<number> {
-		await runOnce(
-			this.step,
-			"UPDATE discover_run SET poll_failures = poll_failures + 1, updated_at = ? WHERE system_id = ?",
-			now,
-			systemId,
-		);
-		const row = await first<{ poll_failures: number }>(
-			this.step,
-			"SELECT poll_failures FROM discover_run WHERE system_id = ?",
-			systemId,
-		);
-		return row?.poll_failures ?? 0;
-	}
-
-	async rememberSliceIncomplete(systemId: SystemId, forced = false): Promise<void> {
-		if (forced || (await this.cappedAny(systemId)) || (await this.skippedAny(systemId))) {
-			await this.noteAttempt(systemId, INCOMPLETE_SLICE);
-		}
-	}
-
-	async takeSliceIncomplete(systemId: SystemId): Promise<boolean> {
-		const row = await first<{ url: string }>(
-			this.step,
-			"SELECT url FROM discover_attempt WHERE system_id = ? AND url = ?",
-			systemId,
-			INCOMPLETE_SLICE,
-		);
-		if (!row) {
-			return false;
-		}
-		await run(this.step, "DELETE FROM discover_attempt WHERE system_id = ? AND url = ?", systemId, INCOMPLETE_SLICE);
-		return true;
-	}
-
-	async frontierCount(systemId: SystemId): Promise<number> {
-		const row = await first<{ n: number }>(
-			this.step,
-			"SELECT COUNT(*) AS n FROM discover_frontier WHERE system_id = ?",
-			systemId,
-		);
-		return Number(row?.n ?? 0);
-	}
-
-	async noteSliceBaseline(systemId: SystemId, frontier: number): Promise<void> {
-		await run(
-			this.step,
-			"UPDATE discover_run SET slice_frontier_start = ?, slice_accepted = 0 WHERE system_id = ?",
-			frontier,
-			systemId,
-		);
-	}
-
-	async noteSliceAccepted(systemId: SystemId): Promise<void> {
-		await run(this.step, "UPDATE discover_run SET slice_accepted = 1 WHERE system_id = ?", systemId);
-	}
-
-	async sliceMadeProgress(systemId: SystemId): Promise<boolean> {
-		const row = await first<{ slice_accepted: number; slice_frontier_start: number | null }>(
-			this.step,
-			"SELECT slice_accepted, slice_frontier_start FROM discover_run WHERE system_id = ?",
-			systemId,
-		);
-		if (!row) {
-			return false;
-		}
-		if (row.slice_accepted > 0) {
-			return true;
-		}
-		if (row.slice_frontier_start === null) {
-			return false;
-		}
-		return (await this.frontierCount(systemId)) < row.slice_frontier_start;
-	}
-
-	async recordDiscoverResume(systemId: SystemId, seedHash: string, yieldedAt: string): Promise<void> {
-		await run(
-			this.step,
-			`INSERT INTO discover_resume (system_id, seed_hash, yielded_at) VALUES (?, ?, ?)
-			 ON CONFLICT(system_id) DO UPDATE SET
-			   seed_hash = excluded.seed_hash,
-			   yielded_at = excluded.yielded_at`,
-			systemId,
-			seedHash,
-			yieldedAt,
-		);
-	}
-
-	async resumedSystems(): Promise<SystemId[]> {
-		const rows = await all<{ system_id: string }>(this.step, "SELECT system_id FROM discover_resume");
-		return rows.flatMap((row) => (isSystemId(row.system_id) ? [row.system_id] : []));
-	}
-
-	async discoverResume(systemId: SystemId): Promise<{ seedHash: string; yieldedAt: string } | null> {
-		const row = await first<{ seed_hash: string; yielded_at: string }>(
-			this.step,
-			"SELECT seed_hash, yielded_at FROM discover_resume WHERE system_id = ?",
-			systemId,
-		);
-		if (!row) {
-			return null;
-		}
-		return { seedHash: row.seed_hash, yieldedAt: row.yielded_at };
-	}
-
-	async releaseSlot(systemId: SystemId): Promise<void> {
-		await run(this.step, "DELETE FROM discover_run WHERE system_id = ?", systemId);
-	}
-
-	async clearRun(systemId: SystemId): Promise<void> {
-		await run(this.step, "DELETE FROM discover_indexable WHERE system_id = ?", systemId);
-		await run(this.step, "DELETE FROM discover_url WHERE system_id = ?", systemId);
-		await run(this.step, "DELETE FROM discover_frontier WHERE system_id = ?", systemId);
-		await run(this.step, "DELETE FROM discover_attempt WHERE system_id = ?", systemId);
-		await run(this.step, "DELETE FROM discover_resume WHERE system_id = ?", systemId);
-		await run(this.step, "DELETE FROM discover_run WHERE system_id = ?", systemId);
-	}
-
-	async replaceJob(systemId: SystemId, jobId: string, startUrl: string, now: string): Promise<void> {
-		// started_at stays put so the poll deadline covers the whole follow-up chain.
-		await run(
-			this.step,
-			`UPDATE discover_run
-			 SET job_id = ?, start_url = ?, cursor = NULL, poll_failures = 0, start_failures = 0, updated_at = ?
-			 WHERE system_id = ?`,
-			jobId,
-			startUrl,
-			now,
-			systemId,
-		);
-		await this.noteAttempt(systemId, startUrl);
-	}
-
-	async noteAttempt(systemId: SystemId, url: string): Promise<void> {
-		await run(
-			this.step,
-			"INSERT INTO discover_attempt (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
-			systemId,
-			url,
-		);
-	}
-
-	async addFrontier(systemId: SystemId, urls: readonly string[]): Promise<void> {
-		const unique = [...new Set(urls)];
-		if (unique.length === 0) {
-			return;
-		}
-		const fresh: string[] = [];
-		for (const group of chunks(unique, 80)) {
-			const existing = await all<{ url: string }>(
-				this.step,
-				`SELECT url FROM discover_frontier WHERE system_id = ? AND url IN (${group.map(() => "?").join(",")})`,
-				systemId,
-				...group,
-			);
-			const have = new Set(existing.map((row) => row.url));
-			for (const url of group) {
-				if (!have.has(url)) {
-					fresh.push(url);
-				}
-			}
-		}
-		for (const group of chunks(fresh, 40)) {
-			const values = group.map(() => "(?, ?)").join(", ");
-			const params: unknown[] = [];
-			for (const url of group) {
-				params.push(systemId, url);
-			}
-			await run(
-				this.step,
-				`INSERT INTO discover_frontier (system_id, url) VALUES ${values} ON CONFLICT DO NOTHING`,
-				...params,
-			);
-		}
-	}
-
-	async nextFrontier(systemId: SystemId, seen: ReadonlySet<string>): Promise<string | null> {
-		const seed = seedById(systemId);
-		const blocked = new Set<string>();
-		for (const url of seen) {
-			blocked.add(pageKey(url));
-		}
-		const attempted = await all<{ url: string }>(
-			this.step,
-			"SELECT url FROM discover_attempt WHERE system_id = ?",
-			systemId,
-		);
-		for (const row of attempted) {
-			blocked.add(pageKey(row.url));
-		}
-		const rows = await all<{ url: string }>(
-			this.step,
-			"SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url ASC",
-			systemId,
-		);
-		const rejected: string[] = [];
-		let chosen: string | null = null;
-		for (const row of rows) {
-			if (admittedUrl(row.url, seed) === null) {
-				rejected.push(row.url);
-				continue;
-			}
-			if (chosen === null && !blocked.has(pageKey(row.url)) && !isStaticAsset(row.url)) {
-				chosen = pageKey(row.url);
-			}
-		}
-		for (const group of chunks(rejected, 80)) {
-			await run(
-				this.step,
-				`DELETE FROM discover_frontier WHERE system_id = ? AND url IN (${group.map(() => "?").join(",")})`,
-				systemId,
-				...group,
-			);
-		}
-		return chosen;
-	}
-
-	async indexableCount(systemId: SystemId): Promise<number> {
-		const row = await first<{ n: number }>(
-			this.step,
-			"SELECT COUNT(*) AS n FROM discover_indexable WHERE system_id = ?",
-			systemId,
-		);
-		return Number(row?.n ?? 0);
-	}
-
-	async clearWork(systemId: SystemId): Promise<void> {
-		await run(this.step, "DELETE FROM page_work WHERE system_id = ?", systemId);
-	}
-
-	async stageUrl(systemId: SystemId, url: string): Promise<void> {
-		await run(
-			this.step,
-			"INSERT INTO discover_url (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
-			systemId,
-			url,
-		);
-	}
-
-	async stagedUrls(systemId: SystemId): Promise<string[]> {
-		const rows = await all<{ url: string }>(
-			this.step,
-			"SELECT url FROM discover_url WHERE system_id = ? ORDER BY url ASC",
-			systemId,
-		);
-		return rows.map((row) => row.url);
-	}
-
-	async stageIndexable(systemId: SystemId, url: string): Promise<void> {
-		await run(
-			this.step,
-			"INSERT INTO discover_indexable (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
-			systemId,
-			url,
-		);
-	}
-
-	async indexableUrls(systemId: SystemId): Promise<string[]> {
-		const rows = await all<{ url: string }>(
-			this.step,
-			"SELECT url FROM discover_indexable WHERE system_id = ? ORDER BY url ASC",
-			systemId,
-		);
-		return rows.map((row) => row.url);
-	}
-
-	async noteRecoveryAttempt(systemId: SystemId, now: string): Promise<void> {
-		await run(
-			this.step,
-			`INSERT INTO recovery_attempt (system_id, attempted_at) VALUES (?, ?)
-			 ON CONFLICT(system_id) DO UPDATE SET attempted_at = excluded.attempted_at`,
-			systemId,
-			now,
-		);
-	}
 
 	async owns(item: Pick<PageWorkItem, "systemId" | "url" | "attempts" | "claimedAt" | "claimToken">): Promise<boolean> {
 		if (item.claimedAt === undefined || item.attempts === undefined || !item.claimToken) {
@@ -1066,78 +630,6 @@ export class D1PageQueue implements PageQueue {
 			CLAIM_EXPIRED,
 		);
 		return guardedChanges(this.step, "releaseForRetry", item, "pending", changes);
-	}
-
-	async recordSeedRefresh(systemId: SystemId, seedHash: string, enqueuedAt: string): Promise<void> {
-		await run(
-			this.step,
-			`INSERT INTO seed_refresh (system_id, seed_hash, enqueued_at) VALUES (?, ?, ?)
-			 ON CONFLICT(system_id) DO UPDATE SET seed_hash = excluded.seed_hash, enqueued_at = excluded.enqueued_at`,
-			systemId,
-			seedHash,
-			enqueuedAt,
-		);
-	}
-
-	async seedRefreshes(): Promise<Record<string, { seedHash: string; enqueuedAt: string }>> {
-		const rows = await all<{ system_id: string; seed_hash: string; enqueued_at: string }>(
-			this.step,
-			"SELECT system_id, seed_hash, enqueued_at FROM seed_refresh",
-		);
-		return Object.fromEntries(
-			rows.map((row) => [row.system_id, { seedHash: row.seed_hash, enqueuedAt: row.enqueued_at }]),
-		);
-	}
-
-	async recoveryAttempts(): Promise<Record<string, string>> {
-		const rows = await all<{ system_id: string; attempted_at: string }>(
-			this.step,
-			"SELECT system_id, attempted_at FROM recovery_attempt",
-		);
-		return Object.fromEntries(rows.map((row) => [row.system_id, row.attempted_at]));
-	}
-
-	async noteCapDefer(systemId: SystemId, now: string): Promise<void> {
-		await runOnce(
-			this.step,
-			`INSERT INTO cap_defer (system_id, deferred_at, streak) VALUES (?, ?, 1)
-			 ON CONFLICT(system_id) DO UPDATE SET
-			   deferred_at = excluded.deferred_at,
-			   streak = cap_defer.streak + 1`,
-			systemId,
-			now,
-		);
-	}
-
-	async noteCapDeferBase(systemId: SystemId, now: string): Promise<void> {
-		await runOnce(
-			this.step,
-			`INSERT INTO cap_defer (system_id, deferred_at, streak) VALUES (?, ?, 1)
-			 ON CONFLICT(system_id) DO UPDATE SET
-			   deferred_at = excluded.deferred_at,
-			   streak = 1`,
-			systemId,
-			now,
-		);
-	}
-
-	async clearCapDefer(systemId: SystemId): Promise<void> {
-		await run(this.step, "DELETE FROM cap_defer WHERE system_id = ?", systemId);
-	}
-
-	async capDefers(): Promise<Record<string, string>> {
-		const marks = await this.capDeferMarks();
-		return Object.fromEntries(Object.entries(marks).map(([systemId, mark]) => [systemId, mark.at]));
-	}
-
-	async capDeferMarks(): Promise<Record<string, { at: string; streak: number }>> {
-		const rows = await all<{ system_id: string; deferred_at: string; streak: number }>(
-			this.step,
-			"SELECT system_id, deferred_at, streak FROM cap_defer",
-		);
-		return Object.fromEntries(
-			rows.map((row) => [row.system_id, { at: row.deferred_at, streak: row.streak }]),
-		);
 	}
 
 	async markDiscovered(systemId: SystemId, now: string): Promise<void> {
@@ -1200,25 +692,12 @@ function pageLease(systemId: SystemId, url: string): string | null {
 	return page === null ? null : `${systemId}\0${page}`;
 }
 
-function chunks<T>(values: readonly T[], size: number): T[][] {
-	const groups: T[][] = [];
-	for (let index = 0; index < values.length; index += size) {
-		groups.push(values.slice(index, index + size));
-	}
-	return groups;
-}
-
 export function isDue(input: {
 	lastIndexed: string | null;
 	lastDiscovered: string | null;
 	pending: number;
 	now: number;
-	hasResume?: boolean;
 }): boolean {
-	// A resume skips pending and busy. One slot, cap_defer spaces re-picks, and a claim keeps its token.
-	if (input.hasResume) {
-		return true;
-	}
 	if (input.pending > 0) {
 		return false;
 	}

@@ -301,8 +301,6 @@ describe("conveyor tick", () => {
 		expect(report?.failed).toBe(0);
 		expect(report?.depth).toBe(SYSTEM_IDS.length * 4 - 3);
 		expect((await new UrlQueue(db).list()).some((row) => row.op === "sitemap")).toBe(true);
-		const discover = await db.prepare("SELECT system_id FROM discover_run").first();
-		expect(discover).toBeNull();
 	});
 
 	it("enqueues every known page on a weekly refresh, and an unchanged page uploads nothing", async () => {

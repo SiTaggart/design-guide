@@ -39,7 +39,7 @@ describe("wrangler automation config", () => {
 		expect(wrangler).toContain('"*/5 * * * *"');
 		expect(wrangler).toContain('"0 4 * * *"');
 		expect(wrangler).toContain('"0 6 * * SUN"');
-		expect(wrangler).toContain('"steps": 25000');
+		expect(wrangler).not.toContain("ReindexWorkflow");
 		expect(wrangler).toContain('"binding": "PAGE_QUEUE"');
 		expect(wrangler).not.toContain('"schedules"');
 		expect(DRIFT_CRON).toBe("*/5 * * * *");
@@ -123,8 +123,6 @@ describe("decideReindex", () => {
 		});
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
 		expect(workflow.created).toEqual([]);
-		const running = await pageQueue.prepare("SELECT system_id FROM discover_run").first();
-		expect(running).toBeNull();
 		const marks = await pageQueue.prepare("SELECT system_id FROM system_mark").all<{ system_id: string }>();
 		const seeded = marks.results.map((row) => row.system_id);
 		expect(seeded).toEqual(expect.arrayContaining(["paste", "primer"]));
@@ -150,8 +148,6 @@ describe("decideReindex", () => {
 		});
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
 		expect(workflow.created).toEqual([]);
-		const running = await pageQueue.prepare("SELECT system_id FROM discover_run").first();
-		expect(running).toBeNull();
 		const marks = await pageQueue.prepare("SELECT COUNT(*) AS n FROM system_mark").first<{ n: number }>();
 		expect(marks?.n).toBe(SYSTEM_IDS.length);
 	});
@@ -177,8 +173,6 @@ describe("decideReindex", () => {
 		});
 		await handleScheduled({ cron: RECOVERY_CRON } as ScheduledController, env);
 		expect(workflow.created).toEqual([]);
-		const running = await pageQueue.prepare("SELECT system_id FROM discover_run").first();
-		expect(running).toBeNull();
 		const marks = await pageQueue.prepare("SELECT system_id FROM system_mark").all<{ system_id: string }>();
 		const seeded = marks.results.map((row) => row.system_id);
 		expect(seeded).toEqual(expect.arrayContaining(["garden", "primer"]));
