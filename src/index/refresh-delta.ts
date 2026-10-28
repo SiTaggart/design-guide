@@ -1,15 +1,4 @@
 import { isLlmsIndexFile, isStaticAsset } from "../crawl/links.ts";
-import { contentHash } from "./content-hash.ts";
-
-export type KnownPage = {
-	url: string;
-	hash: string;
-};
-
-export type RefreshDelta = {
-	fetch: string[];
-	delete: string[];
-};
 
 export function sitemapLocs(xml: string): string[] {
 	const locs: string[] = [];
@@ -71,27 +60,4 @@ export function urlsToSeed(input: {
 		add(url);
 	}
 	return urls;
-}
-
-export function refreshDelta(input: {
-	discovered: readonly string[];
-	known: readonly KnownPage[];
-	bodies: ReadonlyMap<string, string>;
-}): RefreshDelta {
-	const knownByUrl = new Map(input.known.map((page) => [page.url, page.hash]));
-	const discovered = new Set(input.discovered);
-	const fetch: string[] = [];
-	const deleted: string[] = [];
-	for (const url of input.discovered) {
-		const hash = knownByUrl.get(url);
-		if (hash === undefined) {
-			fetch.push(url);
-			continue;
-		}
-		const body = input.bodies.get(url);
-		if (body !== undefined && contentHash(body) !== hash) {
-			fetch.push(url);
-		}
-	}
-	return { fetch, delete: deleted };
 }

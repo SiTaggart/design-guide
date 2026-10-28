@@ -138,29 +138,18 @@ export class UrlQueue {
 
 export type SystemMark = {
 	lastDiscovered: string | null;
-	offset: number;
-	after: string | null;
 };
 
 export async function readMarks(db: D1Database): Promise<Map<SystemId, SystemMark>> {
 	const listed = await db
-		.prepare("SELECT system_id, last_discovered, refresh_offset, refresh_after FROM system_mark")
-		.all<{
-			system_id: string;
-			last_discovered: string | null;
-			refresh_offset: number;
-			refresh_after: string | null;
-		}>();
+		.prepare("SELECT system_id, last_discovered FROM system_mark")
+		.all<{ system_id: string; last_discovered: string | null }>();
 	const marks = new Map<SystemId, SystemMark>();
 	for (const row of listed.results) {
 		if (!isSystemId(row.system_id)) {
 			continue;
 		}
-		marks.set(row.system_id, {
-			lastDiscovered: row.last_discovered,
-			offset: row.refresh_offset,
-			after: row.refresh_after,
-		});
+		marks.set(row.system_id, { lastDiscovered: row.last_discovered });
 	}
 	return marks;
 }
@@ -168,13 +157,10 @@ export async function readMarks(db: D1Database): Promise<Map<SystemId, SystemMar
 export async function writeMark(db: D1Database, systemId: SystemId, mark: SystemMark): Promise<void> {
 	await db
 		.prepare(
-			`INSERT INTO system_mark (system_id, last_discovered, refresh_offset, refresh_after)
-			 VALUES (?, ?, ?, ?)
-			 ON CONFLICT(system_id) DO UPDATE SET
-			   last_discovered = excluded.last_discovered,
-			   refresh_offset = excluded.refresh_offset,
-			   refresh_after = excluded.refresh_after`,
+			`INSERT INTO system_mark (system_id, last_discovered)
+			 VALUES (?, ?)
+			 ON CONFLICT(system_id) DO UPDATE SET last_discovered = excluded.last_discovered`,
 		)
-		.bind(systemId, mark.lastDiscovered, mark.offset, mark.after)
+		.bind(systemId, mark.lastDiscovered)
 		.run();
 }

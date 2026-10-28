@@ -12,11 +12,9 @@ import { reindexAuth } from "./trigger.ts";
 import {
 	isSitemapFile,
 	isSitemapIndex,
-	refreshDelta,
 	robotsSitemaps,
 	sitemapLocs,
 	urlsToSeed,
-	type KnownPage,
 } from "./refresh-delta.ts";
 import { clearPark } from "./parks.ts";
 import { clearRetrievalHold } from "./retrieval-hold.ts";
@@ -147,23 +145,22 @@ export async function applyRefresh(input: {
 	queue: UrlQueue;
 	systemId: SystemId;
 	discovered: readonly string[];
-	known: readonly KnownPage[];
-	bodies: ReadonlyMap<string, string>;
+	known: readonly string[];
 	clock: Clock;
-}): Promise<{ fetch: string[]; delete: string[]; appended: number }> {
-	const delta = refreshDelta({
-		discovered: input.discovered,
-		known: input.known,
-		bodies: input.bodies,
-	});
-	const appended = await input.queue.enqueue(
-		[
-			...delta.fetch.map((url) => ({ url, systemId: input.systemId, op: "fetch" as const })),
-			...delta.delete.map((url) => ({ url, systemId: input.systemId, op: "delete" as const })),
-		],
+}): Promise<number> {
+	const seen = new Set<string>();
+	const urls: string[] = [];
+	for (const url of [...input.discovered, ...input.known]) {
+		if (!url || seen.has(url)) {
+			continue;
+		}
+		seen.add(url);
+		urls.push(url);
+	}
+	return input.queue.enqueue(
+		urls.map((url) => ({ url, systemId: input.systemId, op: "fetch" as const })),
 		input.clock,
 	);
-	return { fetch: delta.fetch, delete: delta.delete, appended };
 }
 
 export async function consumeQueue(input: {
@@ -354,7 +351,7 @@ async function runConveyor(input: {
 			clock,
 		);
 		if (found.finished) {
-			await writeMark(db, seed.id, { lastDiscovered: now.toISOString(), offset: 0, after: null });
+			await writeMark(db, seed.id, { lastDiscovered: now.toISOString() });
 		}
 	}
 
@@ -365,7 +362,6 @@ async function runConveyor(input: {
 			now,
 			clock,
 			fetchText,
-			fetchPage,
 			known,
 			deadline,
 		});
@@ -437,117 +433,52 @@ async function refreshDue(input: {
 	now: Date;
 	clock: Clock;
 	fetchText: (url: string) => Promise<FetchedPage>;
-	fetchPage: (url: string) => Promise<FetchedPage>;
 	known: Map<string, { hash: string }>;
 	deadline: number;
 }): Promise<number> {
 	const marks = await readMarks(input.db);
-	const due = SEEDS.filter((seed) => {
-		const mark = marks.get(seed.id);
-		if (!mark?.lastDiscovered) {
-			return false;
-		}
-		if (mark.after) {
-			return true;
-		}
-		return input.now.getTime() - Date.parse(mark.lastDiscovered) >= REFRESH_MS;
-	});
-	const scans = new Map<SystemId, { urls: string[]; after: string | null; discovered: string[]; diffed: boolean }>();
-	for (const seed of due) {
+	let appended = 0;
+	for (const seed of SEEDS) {
 		if (Date.now() >= input.deadline) {
 			break;
 		}
 		const mark = marks.get(seed.id);
-		const found = await discoverPageUrls(seed, input.fetchText, input.fetchPage, input.deadline);
-		const known = knownPages(input.known, seed.id);
-		scans.set(seed.id, {
-			urls: known.map((page) => page.url).sort(),
-			after: mark?.after ?? null,
-			discovered: found.urls,
-			diffed: mark?.after != null,
+		if (!mark?.lastDiscovered) {
+			continue;
+		}
+		if (input.now.getTime() - Date.parse(mark.lastDiscovered) < REFRESH_MS) {
+			continue;
+		}
+		const collected = await collectSitemapLocs(seed, input.fetchText, input.deadline);
+		const discovered = urlsToSeed({
+			startUrl: seed.startUrl,
+			sitemapLocs: collected.locs,
+			pageLinks: [],
+			admit: (url) => admittedUrl(url, seed),
 		});
-	}
-	let appended = 0;
-	let pending = true;
-	while (pending && Date.now() < input.deadline) {
-		pending = false;
-		for (const seed of due) {
-			const scan = scans.get(seed.id);
-			if (!scan || Date.now() >= input.deadline) {
-				continue;
-			}
-			const known = knownPages(input.known, seed.id);
-			if (!scan.diffed) {
-				const applied = await applyRefresh({
-					queue: input.queue,
-					systemId: seed.id,
-					discovered: scan.discovered,
-					known,
-					bodies: new Map(),
-					clock: input.clock,
-				});
-				appended += applied.appended;
-				scan.diffed = true;
-			}
-			if (scan.urls.every((url) => scan.after !== null && url <= scan.after)) {
-				await writeMark(input.db, seed.id, { lastDiscovered: input.now.toISOString(), offset: 0, after: null });
-				scans.delete(seed.id);
-				continue;
-			}
-			const url = scan.urls.find((candidate) => scan.after === null || candidate > scan.after) ?? "";
-			let page: FetchedPage;
-			try {
-				page = await input.fetchPage(url);
-			} catch (error) {
-				appended += await input.queue.enqueue([{ url, systemId: seed.id, op: "fetch" }], input.clock);
-				scan.after = url;
-				await writeMark(input.db, seed.id, {
-					lastDiscovered: marks.get(seed.id)?.lastDiscovered ?? input.now.toISOString(),
-					offset: 0,
-					after: url,
-				});
-				pending = true;
-				console.log(JSON.stringify({ event: "refresh_fetch_failed", system: seed.id, url, error: errorMessage(error) }));
-				continue;
-			}
-			if (page.status === 200) {
-				const knownHash = known.find((entry) => entry.url === url)?.hash;
-				if (knownHash === undefined || contentHash(page.body) !== knownHash) {
-					appended += await input.queue.enqueue([{ url, systemId: seed.id, op: "fetch" }], input.clock);
-				}
-			} else if (page.status === 404 || page.status === 410) {
-				appended += await input.queue.enqueue([{ url, systemId: seed.id, op: "delete" }], input.clock);
-			} else {
-				appended += await input.queue.enqueue([{ url, systemId: seed.id, op: "fetch" }], input.clock);
-			}
-			scan.after = url;
-			const more = scan.urls.some((candidate) => candidate > url);
-			if (!more) {
-				await writeMark(input.db, seed.id, { lastDiscovered: input.now.toISOString(), offset: 0, after: null });
-				scans.delete(seed.id);
-			} else {
-				await writeMark(input.db, seed.id, {
-					lastDiscovered: marks.get(seed.id)?.lastDiscovered ?? input.now.toISOString(),
-					offset: 0,
-					after: url,
-				});
-				pending = true;
-			}
+		appended += await applyRefresh({
+			queue: input.queue,
+			systemId: seed.id,
+			discovered,
+			known: knownPages(input.known, seed.id),
+			clock: input.clock,
+		});
+		if (collected.finished) {
+			await writeMark(input.db, seed.id, { lastDiscovered: input.now.toISOString() });
 		}
 	}
 	return appended;
 }
 
-function knownPages(known: Map<string, { hash: string }>, systemId: SystemId): KnownPage[] {
-	const pages: KnownPage[] = [];
-	for (const [key, page] of known) {
-		const prefix = `${systemId}\0`;
-		if (!key.startsWith(prefix)) {
-			continue;
+function knownPages(known: Map<string, { hash: string }>, systemId: SystemId): string[] {
+	const prefix = `${systemId}\0`;
+	const urls: string[] = [];
+	for (const key of known.keys()) {
+		if (key.startsWith(prefix)) {
+			urls.push(key.slice(prefix.length));
 		}
-		pages.push({ url: key.slice(prefix.length), hash: page.hash });
 	}
-	return pages;
+	return urls;
 }
 
 function indexItems(items: readonly ItemRecord[]): Map<string, { hash: string }> {

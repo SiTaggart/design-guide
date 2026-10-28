@@ -11,7 +11,7 @@ import {
 	type FetchedPage,
 } from "../src/index/conveyor.ts";
 import type { ItemRecord } from "../src/index/items-rest.ts";
-import { refreshDelta, urlsToSeed } from "../src/index/refresh-delta.ts";
+import { urlsToSeed } from "../src/index/refresh-delta.ts";
 import { UrlQueue } from "../src/index/url-queue.ts";
 import { admittedUrl } from "../src/crawl/links.ts";
 import { memoryD1 } from "./helpers/d1.ts";
@@ -54,65 +54,20 @@ describe("seed and weekly refresh share one append", () => {
 		expect((await pageQueue.list()).every((row) => row.systemId === "primer" && row.op === "fetch")).toBe(true);
 	});
 
-	it("appends a weekly diff of new, changed, and deleted pages, and appends nothing when the hash matches", async () => {
-		const same = "Same words.";
-		const hash = contentHash(same);
-		const unchanged = refreshDelta({
-			discovered: [PRIMER, ABOUT],
-			known: [
-				{ url: PRIMER, hash },
-				{ url: ABOUT, hash },
-			],
-			bodies: new Map([
-				[PRIMER, same],
-				[ABOUT, same],
-			]),
-		});
-		expect(unchanged).toEqual({ fetch: [], delete: [] });
-
+	it("enqueues every known page and every new sitemap url, and does not delete a page the sitemap omitted", async () => {
 		const pageQueue = queue();
-		const applied = await applyRefresh({
-			queue: pageQueue,
-			systemId: "primer",
-			discovered: [PRIMER, ABOUT],
-			known: [
-				{ url: PRIMER, hash },
-				{ url: ABOUT, hash },
-			],
-			bodies: new Map([
-				[PRIMER, same],
-				[ABOUT, same],
-			]),
-			clock: clock(),
-		});
-		expect(applied.appended).toBe(0);
-		expect(await pageQueue.depth()).toBe(0);
-
-		const changed = "Edited words.";
-		const delta = refreshDelta({
-			discovered: [PRIMER, "https://primer.style/new"],
-			known: [
-				{ url: PRIMER, hash },
-				{ url: ABOUT, hash },
-			],
-			bodies: new Map([[PRIMER, changed]]),
-		});
-		expect(delta.fetch).toEqual([PRIMER, "https://primer.style/new"]);
-		expect(delta.delete).toEqual([]);
-		await applyRefresh({
+		const appended = await applyRefresh({
 			queue: pageQueue,
 			systemId: "primer",
 			discovered: [PRIMER, "https://primer.style/new"],
-			known: [
-				{ url: PRIMER, hash },
-				{ url: ABOUT, hash },
-			],
-			bodies: new Map([[PRIMER, changed]]),
+			known: [PRIMER, ABOUT],
 			clock: clock(),
 		});
+		expect(appended).toBe(3);
 		expect((await pageQueue.list()).map((row) => [row.url, row.op])).toEqual([
 			[PRIMER, "fetch"],
 			["https://primer.style/new", "fetch"],
+			[ABOUT, "fetch"],
 		]);
 	});
 
@@ -290,7 +245,7 @@ describe("conveyor tick", () => {
 		expect(discover).toBeNull();
 	});
 
-	it("does not append a weekly refresh when every known page hash matches", async () => {
+	it("enqueues every known page on a weekly refresh, and an unchanged page uploads nothing", async () => {
 		const db = memoryD1();
 		const kv = memoryKV();
 		const { env } = envWithIndex([], true, {
@@ -303,10 +258,7 @@ describe("conveyor tick", () => {
 		const hash = contentHash(body);
 		const seededAt = new Date(Date.parse(NOW) - REFRESH_MS - 1000).toISOString();
 		for (const id of SYSTEM_IDS) {
-			await db
-				.prepare("INSERT INTO system_mark (system_id, last_discovered, refresh_offset) VALUES (?, ?, 0)")
-				.bind(id, seededAt)
-				.run();
+			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, seededAt).run();
 		}
 		const items: ItemRecord[] = SYSTEM_IDS.map((id) => ({
 			id: `item-${id}`,
@@ -317,20 +269,25 @@ describe("conveyor tick", () => {
 				content_hash: hash,
 			},
 		}));
+		const pageFetches: string[] = [];
 		const report = await conveyorTick(env, "*/5 * * * *", new Date(NOW), {
 			limit: 20,
 			listItems: async () => items,
 			fetchText: async () => page(404, ""),
-			fetchPage: async () => page(200, body),
+			fetchPage: async (url) => {
+				pageFetches.push(url);
+				return page(200, body);
+			},
 			upload: async () => {
 				throw new Error("unchanged page must not be uploaded");
 			},
 			deletePage: async () => undefined,
 		});
-		expect(report?.appended).toBe(0);
+		expect(pageFetches.length).toBe(SYSTEM_IDS.length);
 		expect(report?.indexed).toBe(0);
-		expect(report?.unchanged).toBe(0);
+		expect(report?.unchanged).toBe(SYSTEM_IDS.length);
 		expect(report?.failed).toBe(0);
+		expect(report?.deleted).toBe(0);
 		expect(report?.depth).toBe(0);
 		expect(await db.prepare("SELECT COUNT(*) AS n FROM queue WHERE error IS NOT NULL").first<{ n: number }>()).toEqual({
 			n: 0,
