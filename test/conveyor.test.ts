@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { contentHash } from "../src/index/content-hash.ts";
+import worker from "../src/worker.ts";
+import type { SearchChunk } from "../src/config/types.ts";
 import {
 	applyRefresh,
 	consumeQueue,
@@ -270,6 +272,99 @@ describe("queue consumer", () => {
 			deletePage: async () => undefined,
 		});
 		expect((await pageQueue.list()).map((row) => row.url)).toEqual(["https://primer.style/components"]);
+	});
+
+	it("drains a sitemap cycle across ticks", async () => {
+		const pageQueue = queue();
+		const indexA = "https://primer.style/sitemap-a.xml";
+		const indexB = "https://primer.style/sitemap-b.xml";
+		await pageQueue.enqueue([{ url: indexA, systemId: "primer", op: "sitemap" }], clock());
+		const fetched: string[] = [];
+		const shared = clock(Date.parse(NOW) + 60_000);
+		for (let tick = 0; tick < 4; tick += 1) {
+			await consumeQueue({
+				queue: pageQueue,
+				now: NOW,
+				limit: 1,
+				clock: shared,
+				knownHashes: new Map(),
+				knownUrls: new Set(),
+				fetchText: async (url) => {
+					fetched.push(url);
+					const child = url === indexA ? indexB : indexA;
+					return page(200, `<sitemapindex><sitemap><loc>${child}</loc></sitemap></sitemapindex>`);
+				},
+				fetchPage: async () => page(404, ""),
+				upload: async () => undefined,
+				deletePage: async () => undefined,
+			});
+		}
+		expect(fetched).toEqual([indexA, indexB]);
+		expect(await pageQueue.depth()).toBe(0);
+	});
+
+	it("hides a stale copy when deleting it fails and keeps the queue row", async () => {
+		const db = memoryD1();
+		const pageQueue = new UrlQueue(db);
+		const body = "current copy of the page";
+		const hash = contentHash(body);
+		await pageQueue.enqueue([{ url: PRIMER, systemId: "primer", op: "fetch" }], clock());
+		await consumeQueue({
+			queue: pageQueue,
+			now: NOW,
+			limit: 1,
+			clock: clock(Date.parse(NOW) + 60_000),
+			knownHashes: new Map([[`primer\0${PRIMER}`, hash]]),
+			knownUrls: new Set([`primer\0${PRIMER}`]),
+			fetchPage: async () => page(200, body),
+			upload: async () => {
+				throw new Error("must not upload");
+			},
+			deletePage: async () => undefined,
+			retain: async () => {
+				throw new Error("old copy delete failed");
+			},
+		});
+		const left = await pageQueue.list();
+		expect(left.map((row) => row.url)).toEqual([PRIMER]);
+		expect(left[0]?.error).toBe("old copy delete failed");
+		const stale: SearchChunk = {
+			text: "stale copy of the page",
+			score: 1,
+			scoring_details: { vector_score: 0.91 },
+			item: {
+				key: "primer/page/stale.md",
+				metadata: { system: "primer", source: "Primer", source_url: PRIMER, content_hash: "old-hash" },
+			},
+		};
+		const current: SearchChunk = {
+			text: body,
+			score: 1,
+			scoring_details: { vector_score: 0.72 },
+			item: {
+				key: "primer/page/current.md",
+				metadata: { system: "primer", source: "Primer", source_url: PRIMER, content_hash: hash },
+			},
+		};
+		const response = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: "copy of the page" }),
+			}),
+			{
+				AI_SEARCH: {
+					get: () => ({
+						search: async () => ({ chunks: [stale, current] }),
+						items: { list: async () => ({ result: [{ status: "completed" }] }) },
+					}),
+				},
+				PAGE_QUEUE: db,
+			},
+		);
+		expect(response.status).toBe(200);
+		const payload = (await response.json()) as { results: Array<{ passage: string }> };
+		expect(payload.results.map((hit) => hit.passage)).toEqual([body]);
 	});
 });
 
