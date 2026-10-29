@@ -40,6 +40,7 @@ const MIGRATIONS = [
 	"0014_discover_resume.sql",
 	"0015_discover_run_drop_state.sql",
 	"0016_queue.sql",
+	"0017_page_copy.sql",
 ];
 
 function filesUnder(dir: string): string[] {

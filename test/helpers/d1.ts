@@ -4,12 +4,6 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import type { SystemId } from "../../src/config/types.ts";
 
-type Bound = {
-	all<T>(): Promise<{ results: T[] }>;
-	run(): Promise<{ success: true; meta: { changes: number } }>;
-	first<T>(): Promise<T | null>;
-};
-
 export function applyMigrations(db: DatabaseSync): void {
 	const dir = join(dirname(fileURLToPath(import.meta.url)), "../../migrations");
 	const files = readdirSync(dir)
@@ -23,30 +17,33 @@ export function applyMigrations(db: DatabaseSync): void {
 export function memoryD1(): D1Database {
 	const db = new DatabaseSync(":memory:");
 	applyMigrations(db);
+	const statement = (sql: string, values: SQLInputValue[]) => ({
+		sql,
+		values,
+		async all<T>() {
+			const stmt = db.prepare(sql);
+			const results = (values.length > 0 ? stmt.all(...values) : stmt.all()) as T[];
+			return { results };
+		},
+		async run() {
+			const stmt = db.prepare(sql);
+			const info = values.length > 0 ? stmt.run(...values) : stmt.run();
+			return { success: true as const, meta: { changes: Number(info.changes) } };
+		},
+		async first<T>() {
+			const stmt = db.prepare(sql);
+			const row = (values.length > 0 ? stmt.get(...values) : stmt.get()) as T | undefined;
+			return row ?? null;
+		},
+	});
 	const prepare = (sql: string) => {
-		const stmt = db.prepare(sql);
-		const bound = (...params: unknown[]): Bound => {
-			const values = params.map((value) => (value === undefined ? null : value)) as SQLInputValue[];
-			return {
-			async all<T>() {
-				const results = (values.length > 0 ? stmt.all(...values) : stmt.all()) as T[];
-				return { results };
-			},
-			async run() {
-				const info = values.length > 0 ? stmt.run(...values) : stmt.run();
-				return { success: true as const, meta: { changes: Number(info.changes) } };
-			},
-			async first<T>() {
-				const row = (values.length > 0 ? stmt.get(...values) : stmt.get()) as T | undefined;
-				return row ?? null;
-			},
-			};
-		};
+		const bound = statement(sql, []);
 		return {
-			bind: (...params: unknown[]) => bound(...params),
-			all: <T>() => bound().all<T>(),
-			run: () => bound().run(),
-			first: <T>() => bound().first<T>(),
+			bind: (...params: unknown[]) =>
+				statement(sql, params.map((value) => (value === undefined ? null : value)) as SQLInputValue[]),
+			all: <T>() => bound.all<T>(),
+			run: () => bound.run(),
+			first: <T>() => bound.first<T>(),
 		};
 	};
 	return {
@@ -55,8 +52,26 @@ export function memoryD1(): D1Database {
 			db.exec(sql);
 			return { count: 0, duration: 0 };
 		},
-		async batch() {
-			throw new Error("batch unused");
+		async batch(statements: Array<{ sql: string; values: SQLInputValue[] }>) {
+			db.exec("BEGIN");
+			try {
+				const results = [];
+				for (const entry of statements) {
+					const stmt = db.prepare(entry.sql);
+					if (/^\s*select/i.test(entry.sql)) {
+						const rows = entry.values.length > 0 ? stmt.all(...entry.values) : stmt.all();
+						results.push({ success: true as const, meta: { changes: 0 }, results: rows });
+						continue;
+					}
+					const info = entry.values.length > 0 ? stmt.run(...entry.values) : stmt.run();
+					results.push({ success: true as const, meta: { changes: Number(info.changes) }, results: [] });
+				}
+				db.exec("COMMIT");
+				return results;
+			} catch (error) {
+				db.exec("ROLLBACK");
+				throw error;
+			}
 		},
 	} as unknown as D1Database;
 }

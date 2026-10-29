@@ -1,6 +1,6 @@
 import { isSystemId, type SystemId } from "../config/types.ts";
 
-export type QueueOp = "fetch" | "delete" | "sitemap";
+export type QueueOp = "fetch" | "delete" | "sitemap" | "seen";
 
 export type QueueRow = {
 	url: string;
@@ -19,7 +19,7 @@ type QueueSqlRow = {
 };
 
 function isOp(value: string): value is QueueOp {
-	return value === "fetch" || value === "delete" || value === "sitemap";
+	return value === "fetch" || value === "delete" || value === "sitemap" || value === "seen";
 }
 
 function toRow(row: QueueSqlRow): QueueRow | null {
@@ -64,6 +64,7 @@ export class UrlQueue {
 			.prepare(
 				`SELECT url, system_id, enqueued_at, error, op
 				 FROM queue
+				 WHERE op != 'seen'
 				 ORDER BY enqueued_at ASC, url ASC
 				 LIMIT ?`,
 			)
@@ -83,6 +84,25 @@ export class UrlQueue {
 		await this.db.prepare("DELETE FROM queue WHERE url = ?").bind(url).run();
 	}
 
+	async completeSitemap(url: string): Promise<void> {
+		await this.db.prepare("UPDATE queue SET op = 'seen', error = NULL WHERE url = ?").bind(url).run();
+		const left = await this.db
+			.prepare("SELECT COUNT(*) AS n FROM queue WHERE op = 'sitemap'")
+			.first<{ n: number }>();
+		if ((left?.n ?? 0) === 0) {
+			await this.db.prepare("DELETE FROM queue WHERE op = 'seen'").run();
+		}
+	}
+
+	async commitCopy(systemId: SystemId, url: string, hash: string): Promise<void> {
+		await this.db.batch([
+			this.db.prepare("DELETE FROM page_copy WHERE url = ?").bind(url),
+			this.db
+				.prepare("INSERT INTO page_copy (url, system_id, content_hash) VALUES (?, ?, ?)")
+				.bind(url, systemId, hash),
+		]);
+	}
+
 	async sendBack(url: string, enqueuedAt: string, error: string): Promise<void> {
 		await this.db
 			.prepare("UPDATE queue SET enqueued_at = ?, error = ? WHERE url = ?")
@@ -91,13 +111,15 @@ export class UrlQueue {
 	}
 
 	async depth(): Promise<number> {
-		const row = await this.db.prepare("SELECT COUNT(*) AS n FROM queue").first<{ n: number }>();
+		const row = await this.db
+			.prepare("SELECT COUNT(*) AS n FROM queue WHERE op != 'seen'")
+			.first<{ n: number }>();
 		return row?.n ?? 0;
 	}
 
 	async oldest(): Promise<{ url: string; enqueuedAt: string } | null> {
 		const row = await this.db
-			.prepare("SELECT url, enqueued_at FROM queue ORDER BY enqueued_at ASC, url ASC LIMIT 1")
+			.prepare("SELECT url, enqueued_at FROM queue WHERE op != 'seen' ORDER BY enqueued_at ASC, url ASC LIMIT 1")
 			.first<{ url: string; enqueued_at: string }>();
 		if (!row) {
 			return null;
@@ -115,6 +137,7 @@ export class UrlQueue {
 			.prepare(
 				`SELECT url, system_id, enqueued_at, error, op
 				 FROM queue
+				 WHERE op != 'seen'
 				 ORDER BY enqueued_at ASC, url ASC`,
 			)
 			.all<QueueSqlRow>();

@@ -77,7 +77,45 @@ export async function searchCitations(
 			},
 		},
 	});
-	return { results: selectCitations(mapChunks(result.chunks ?? []), params.k) };
+	const chunks = await withoutStaleCopies(env.PAGE_QUEUE, result.chunks ?? []);
+	return { results: selectCitations(mapChunks(chunks), params.k) };
+}
+
+async function withoutStaleCopies(db: D1Database | undefined, chunks: readonly SearchChunk[]): Promise<SearchChunk[]> {
+	if (!db || chunks.length === 0) {
+		return [...chunks];
+	}
+	const urls: string[] = [];
+	for (const chunk of chunks) {
+		const url = chunk.item?.metadata?.source_url;
+		if (typeof url === "string" && url && !urls.includes(url)) {
+			urls.push(url);
+		}
+	}
+	if (urls.length === 0) {
+		return [...chunks];
+	}
+	const listed = await db
+		.prepare(
+			`SELECT url, content_hash FROM page_copy WHERE url IN (${urls.map(() => "?").join(", ")})`,
+		)
+		.bind(...urls)
+		.all<{ url: string; content_hash: string }>();
+	const live = new Map(listed.results.map((row) => [row.url, row.content_hash]));
+	if (live.size === 0) {
+		return [...chunks];
+	}
+	return chunks.filter((chunk) => {
+		const url = chunk.item?.metadata?.source_url;
+		if (typeof url !== "string" || !live.has(url)) {
+			return true;
+		}
+		const hash = live.get(url);
+		if (!hash) {
+			return false;
+		}
+		return chunk.item?.metadata?.content_hash === hash;
+	});
 }
 
 export async function indexHasCompletedItems(env: WorkerEnv): Promise<boolean> {

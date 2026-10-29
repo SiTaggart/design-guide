@@ -127,6 +127,7 @@ export async function consumeQueue(input: {
 				continue;
 			}
 			if (row.op === "delete") {
+				await input.queue.commitCopy(row.systemId, row.url, "");
 				await input.deletePage(row.systemId, row.url);
 				await input.queue.remove(row.url);
 				deleted += 1;
@@ -134,6 +135,7 @@ export async function consumeQueue(input: {
 			}
 			const page = await input.fetchPage(row.url);
 			if (page.status === 404 || page.status === 410) {
+				await input.queue.commitCopy(row.systemId, row.url, "");
 				await input.deletePage(row.systemId, row.url);
 				await input.queue.remove(row.url);
 				deleted += 1;
@@ -148,6 +150,7 @@ export async function consumeQueue(input: {
 			const hash = contentHash(page.body);
 			const stored = input.knownHashes.get(`${row.systemId}\0${row.url}`);
 			if (stored !== undefined && stored === hash) {
+				await input.queue.commitCopy(row.systemId, row.url, hash);
 				await retain(row.systemId, row.url, hash);
 				appended += await appendLinks(input.queue, seed, row.url, page.body, input.knownUrls, input.clock);
 				await input.queue.remove(row.url);
@@ -160,6 +163,7 @@ export async function consumeQueue(input: {
 				continue;
 			}
 			await input.upload(row, page.body, hash);
+			await input.queue.commitCopy(row.systemId, row.url, hash);
 			await retain(row.systemId, row.url, hash);
 			appended += await appendLinks(input.queue, seed, row.url, page.body, input.knownUrls, input.clock);
 			await input.queue.remove(row.url);
@@ -201,7 +205,7 @@ async function expandQueuedSitemap(
 		],
 		clock,
 	);
-	await queue.remove(row.url);
+	await queue.completeSitemap(row.url);
 	return appended;
 }
 
