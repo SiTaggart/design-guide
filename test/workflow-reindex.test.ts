@@ -6,6 +6,7 @@ import { driftedSystems } from "../src/index/seed-hash.ts";
 import { persistSystemOutcome, shouldWriteSeedHash } from "../src/index/trigger.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
+import { memoryD1 } from "./helpers/d1.ts";
 import worker from "../src/worker.ts";
 import { ItemApiError } from "../src/index/items-rest.ts";
 import { streamSwap, swapFromOutcome, swapGeneration } from "../src/index/reindex.ts";
@@ -120,6 +121,66 @@ describe("swapFromOutcome", () => {
 		expect(uploadItem).not.toHaveBeenCalled();
 		expect(shouldWriteSeedHash(stub)).toBe(true);
 		expect(shouldWriteSeedHash({ ...stub, parked: false, error: "crawl ended failed" })).toBe(false);
+	});
+
+	it("returns reindexed content when page_copy still names the previous hash", async () => {
+		const db = memoryD1();
+		const seed = seedById("primer");
+		const url = seed.startUrl;
+		const next = "Primer reindexed body for search";
+		await db
+			.prepare("INSERT INTO page_copy (url, system_id, content_hash) VALUES (?, ?, ?)")
+			.bind(url, seed.id, "old-hash")
+			.run();
+		uploadItem.mockImplementation(async (_auth: unknown, key: string, content: string, metadata: Record<string, string>) => ({
+			id: key,
+			key,
+			content,
+			metadata,
+		}));
+		listItems.mockResolvedValue([]);
+		deleteItem.mockResolvedValue(undefined);
+		const result = await swapFromOutcome({ accountId: "acct", apiToken: "token" }, seed, {
+			startUrl: url,
+			status: "completed",
+			counts: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
+			records: [
+				{ url, status: "completed", markdown: next },
+				{ url: "https://primer.style/about", status: "completed", markdown: "About Primer" },
+			],
+		});
+		expect(result.indexed).toBe(2);
+		const uploaded = uploadItem.mock.calls.find((call) => call[3]?.source_url === url);
+		expect(uploaded?.[2]).toBe(next);
+		expect(uploaded?.[3]?.content_hash).toBeUndefined();
+		const response = await worker.fetch(
+			new Request("https://example.test/v1/search", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ query: "reindexed primer" }),
+			}),
+			{
+				AI_SEARCH: {
+					get: () => ({
+						search: async () => ({
+							chunks: [
+								{
+									text: uploaded?.[2],
+									score: 1,
+									scoring_details: { vector_score: 0.84 },
+									item: { key: uploaded?.[1], metadata: uploaded?.[3] },
+								},
+							],
+						}),
+						items: { list: async () => ({ result: [{ status: "completed" }] }) },
+					}),
+				},
+				PAGE_QUEUE: db,
+			},
+		);
+		expect(response.status).toBe(200);
+		const payload = (await response.json()) as { results: Array<{ passage: string }> };
+		expect(payload.results.map((hit) => hit.passage)).toEqual([next]);
 	});
 
 	it("swaps two usable pages and does not park", async () => {

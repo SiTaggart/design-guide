@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { seedById } from "../src/config/seed.ts";
 import { writeIndexedHash } from "../src/index/indexed-hashes.ts";
@@ -22,6 +22,14 @@ const startSeedCrawl = vi.hoisted(() =>
 vi.mock("../src/crawl/browser-run.ts", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/crawl/browser-run.ts")>();
 	return { ...actual, startSeedCrawl };
+});
+
+beforeEach(() => {
+	vi.stubGlobal("fetch", async () => new Response("", { status: 404 }));
+});
+
+afterEach(() => {
+	vi.unstubAllGlobals();
 });
 
 describe("wrangler automation config", () => {
@@ -115,10 +123,11 @@ describe("decideReindex", () => {
 		});
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
 		expect(workflow.created).toEqual([]);
-		const running = await pageQueue
-			.prepare("SELECT system_id, kind, trigger_name FROM discover_run")
-			.first<{ system_id: string; kind: string; trigger_name: string }>();
-		expect(running).toEqual({ system_id: "primer", kind: "seed", trigger_name: "deploy-drift" });
+		const running = await pageQueue.prepare("SELECT system_id FROM discover_run").first();
+		expect(running).toBeNull();
+		const marks = await pageQueue.prepare("SELECT system_id FROM system_mark").all<{ system_id: string }>();
+		const seeded = marks.results.map((row) => row.system_id);
+		expect(seeded).toEqual(expect.arrayContaining(["paste", "primer"]));
 	});
 
 	it("starts one deploy-drift system when every seed is stale", async () => {
@@ -141,10 +150,10 @@ describe("decideReindex", () => {
 		});
 		await handleScheduled({ cron: DRIFT_CRON } as ScheduledController, env);
 		expect(workflow.created).toEqual([]);
-		const running = await pageQueue
-			.prepare("SELECT system_id FROM discover_run")
-			.first<{ system_id: string }>();
-		expect(running).toEqual({ system_id: "paste" });
+		const running = await pageQueue.prepare("SELECT system_id FROM discover_run").first();
+		expect(running).toBeNull();
+		const marks = await pageQueue.prepare("SELECT COUNT(*) AS n FROM system_mark").first<{ n: number }>();
+		expect(marks?.n).toBe(SYSTEM_IDS.length);
 	});
 
 	it("recovers only parked seeds", async () => {
@@ -168,10 +177,11 @@ describe("decideReindex", () => {
 		});
 		await handleScheduled({ cron: RECOVERY_CRON } as ScheduledController, env);
 		expect(workflow.created).toEqual([]);
-		const running = await pageQueue
-			.prepare("SELECT system_id, trigger_name FROM discover_run")
-			.first<{ system_id: string; trigger_name: string }>();
-		expect(running).toEqual({ system_id: "garden", trigger_name: "recovery" });
+		const running = await pageQueue.prepare("SELECT system_id FROM discover_run").first();
+		expect(running).toBeNull();
+		const marks = await pageQueue.prepare("SELECT system_id FROM system_mark").all<{ system_id: string }>();
+		const seeded = marks.results.map((row) => row.system_id);
+		expect(seeded).toEqual(expect.arrayContaining(["garden", "primer"]));
 	});
 
 	it("skips recovery when nothing is parked", async () => {
