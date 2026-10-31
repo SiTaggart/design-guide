@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { contentHash } from "../src/index/content-hash.ts";
+import { MAX_ATTEMPTS } from "../src/index/page-queue.ts";
 import worker from "../src/worker.ts";
 import type { SearchChunk } from "../src/config/types.ts";
 import {
@@ -15,6 +16,7 @@ import {
 import type { ItemRecord } from "../src/index/items-rest.ts";
 import { urlsToSeed } from "../src/index/refresh-delta.ts";
 import { UrlQueue } from "../src/index/url-queue.ts";
+import { emptyStatus, readStatus, writeStatus } from "../src/index/status.ts";
 import { admittedUrl } from "../src/crawl/links.ts";
 import { memoryD1 } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
@@ -525,5 +527,144 @@ describe("conveyor tick", () => {
 		await tick(180_000);
 		expect(textCalls).toEqual([indexUrl, childA]);
 		expect((await pageQueue.list()).map((row) => row.url)).toEqual([childB, ABOUT]);
+	});
+
+	it("crawls pending page_work that discover already marked", async () => {
+		const db = memoryD1();
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		for (const id of SYSTEM_IDS) {
+			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, NOW).run();
+		}
+		await db
+			.prepare(
+				"INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts) VALUES (?, ?, 'seed', 'pending', ?, 0)",
+			)
+			.bind("primer", ABOUT, "2026-10-29T17:00:00.000Z")
+			.run();
+		await db
+			.prepare(
+				`INSERT INTO discover_run (
+				   system_id, kind, trigger_name, job_id, start_url, poll_failures, started_at, updated_at
+				 ) VALUES (?, 'seed', 'deploy-drift', 'job-patternfly', 'https://www.patternfly.org/', 0, ?, ?)`,
+			)
+			.bind("patternfly", "2026-10-29T17:20:00.000Z", "2026-10-29T17:20:00.000Z")
+			.run();
+		await writeStatus(env, {
+			...emptyStatus(false),
+			workflowId: "discover-deploy-drift-patternfly",
+			trigger: "deploy-drift",
+			state: "running",
+			startedAt: "2026-10-19T17:00:00.000Z",
+			finishedAt: null,
+		});
+		const fetched: string[] = [];
+		const report = await conveyorTick(env, "*/5 * * * *", new Date(NOW), {
+			limit: 5,
+			listItems: async () => [],
+			fetchText: async () => page(404, ""),
+			fetchPage: async (url) => {
+				fetched.push(url);
+				return page(200, `body ${url}`);
+			},
+			upload: async () => undefined,
+			deletePage: async () => undefined,
+		});
+		const status = await readStatus(env);
+		const primer = status.freshness.find((row) => row.system === "primer");
+		expect(fetched).toContain(ABOUT);
+		expect(report?.failed).toBe(0);
+		expect(status.queue).toMatchObject({ pending: 0, claimed: 0, failed: 0 });
+		expect(primer).toMatchObject({ pending: 0, lastCrawled: NOW });
+		expect(status.discover?.systemId).toBe("patternfly");
+		expect(status.state).toBe("ok");
+	});
+
+	it("records a page_work failure after MAX_ATTEMPTS fetches of 500", async () => {
+		const db = memoryD1();
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		for (const id of SYSTEM_IDS) {
+			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, NOW).run();
+		}
+		await db
+			.prepare(
+				"INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts) VALUES (?, ?, 'seed', 'pending', ?, 0)",
+			)
+			.bind("primer", ABOUT, "2026-10-27T00:00:00.000Z")
+			.run();
+		const deps = {
+			limit: 5,
+			listItems: async (): Promise<ItemRecord[]> => [],
+			fetchText: async () => page(404, ""),
+			fetchPage: async () => page(500, ""),
+			upload: async () => undefined,
+			deletePage: async () => undefined,
+		};
+		for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+			await conveyorTick(env, "*/5 * * * *", new Date(Date.parse(NOW) + attempt * 60_000), deps);
+		}
+		const row = await db
+			.prepare("SELECT status, attempts, error FROM page_work WHERE url = ?")
+			.bind(ABOUT)
+			.first<{ status: string; attempts: number; error: string | null }>();
+		const status = await readStatus(env);
+		const primer = status.freshness.find((entry) => entry.system === "primer");
+		expect(row).toEqual({ status: "failed", attempts: MAX_ATTEMPTS, error: "fetch failed 500" });
+		expect(status.queue.failed).toBe(1);
+		expect(primer).toMatchObject({ failed: 1, pending: 0 });
+	});
+
+	it("keeps the prior lastIndexed when the page is unchanged", async () => {
+		const db = memoryD1();
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const prior = "2026-10-01T00:00:00.000Z";
+		const body = "stable page";
+		const hash = contentHash(body);
+		for (const id of SYSTEM_IDS) {
+			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, NOW).run();
+		}
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, last_indexed)
+				 VALUES (?, ?, 'seed', 'pending', ?, 0, ?)`,
+			)
+			.bind("primer", ABOUT, "2026-10-27T00:00:00.000Z", prior)
+			.run();
+		await conveyorTick(env, "*/5 * * * *", new Date(NOW), {
+			limit: 5,
+			listItems: async (): Promise<ItemRecord[]> => [
+				{
+					id: "item-primer",
+					key: "primer/about.md",
+					metadata: { system: "primer", source_url: ABOUT, content_hash: hash },
+				},
+			],
+			fetchText: async () => page(404, ""),
+			fetchPage: async () => page(200, body),
+			upload: async () => {
+				throw new Error("unchanged page must not be uploaded");
+			},
+			deletePage: async () => undefined,
+		});
+		const status = await readStatus(env);
+		const primer = status.freshness.find((entry) => entry.system === "primer");
+		expect(primer).toMatchObject({ lastCrawled: NOW, lastIndexed: prior });
 	});
 });
