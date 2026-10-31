@@ -19,6 +19,9 @@ import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 const STATUS_TOKEN = "test-status-token";
 const CHECKED = "2026-10-05T16:00:00.000Z";
 const STALE = "2026-08-01T00:00:00.000Z";
+const TWENTY_HOURS_BEFORE = new Date(Date.parse(CHECKED) - 20 * 60 * 60 * 1000).toISOString();
+const UNDER_THIRTY_MIN = new Date(Date.parse(CHECKED) - 29 * 60 * 1000).toISOString();
+const THIRTY_MIN_BEFORE = new Date(Date.parse(CHECKED) - 30 * 60 * 1000).toISOString();
 
 function authed(url: string, token = STATUS_TOKEN): Request {
 	return new Request(url, { headers: { authorization: `Bearer ${token}` } });
@@ -63,6 +66,30 @@ function overlay(partial: Partial<IndexStatusDocument> = {}): IndexStatusDocumen
 		freshness,
 		queue,
 	};
+}
+
+function pendingCrawl(lastCrawled: string): IndexStatusDocument {
+	const freshness = liveRows({
+		patternfly: {
+			pending: 2049,
+			claimed: 0,
+			failed: 0,
+			done: 532,
+			lastIndexed: CHECKED,
+			lastDiscovered: CHECKED,
+		},
+	}).map((row) => ({ ...row, lastCrawled }));
+	return overlay({
+		state: "running",
+		discover: {
+			systemId: "patternfly",
+			jobId: "job-patternfly",
+			kind: "seed",
+			trigger: "deploy-drift",
+			startedAt: CHECKED,
+		},
+		freshness,
+	});
 }
 
 function systemError(system: SystemId, error: string, parked = false) {
@@ -461,7 +488,7 @@ describe("fillHealthFrom", () => {
 			}),
 			CHECKED,
 		);
-		expectAlarm(claimed, ["hard_fail"]);
+		expectAlarm(claimed, ["hard_fail", "crawl_stalled", "crawl_stalled:paste"]);
 
 		const discovering = fillHealthFrom(
 			overlay({
@@ -479,7 +506,7 @@ describe("fillHealthFrom", () => {
 			}),
 			CHECKED,
 		);
-		expectAlarm(discovering, ["hard_fail"]);
+		expectAlarm(discovering, ["hard_fail", "crawl_stalled", "crawl_stalled:paste"]);
 	});
 
 	it("does not hard_fail a Parked stub or an error that is still mid-fill", () => {
@@ -504,6 +531,18 @@ describe("fillHealthFrom", () => {
 			CHECKED,
 		);
 		expect(filling.fill).toBe("ok");
+	});
+
+	it("alarms crawl_stalled when pending pages have not been crawled for 20 hours", () => {
+		const body = fillHealthFrom(pendingCrawl(TWENTY_HOURS_BEFORE), CHECKED);
+		expectAlarm(body, ["crawl_stalled", "crawl_stalled:patternfly"]);
+	});
+
+	it("stays ok when pending pages were crawled within 30 minutes", () => {
+		for (const lastCrawled of [UNDER_THIRTY_MIN, THIRTY_MIN_BEFORE]) {
+			const body = fillHealthFrom(pendingCrawl(lastCrawled), CHECKED);
+			expect(body).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
+		}
 	});
 
 	it("lists every matching alarm and still omits the fill ok substring", () => {
