@@ -137,6 +137,38 @@ function fillAlarms(document: IndexStatusDocument, now: number, schedule: FillSc
 	if (hardFail(document, seeds)) {
 		alarms.push("hard_fail");
 	}
+	alarms.push(...crawlStallAlarms(document, seeds, now));
+	return alarms;
+}
+
+const CRAWL_STALL_MS = 30 * 60 * 1000;
+
+function crawlStallAlarms(document: IndexStatusDocument, seeds: readonly SeedView[], now: number): string[] {
+	if (document.queue.pending <= 0) {
+		return [];
+	}
+	let newest: number | null = null;
+	for (const row of document.freshness) {
+		if (row.lastCrawled === null) {
+			continue;
+		}
+		const crawledAt = Date.parse(row.lastCrawled);
+		if (Number.isNaN(crawledAt)) {
+			continue;
+		}
+		if (newest === null || crawledAt > newest) {
+			newest = crawledAt;
+		}
+	}
+	if (newest === null || now - newest <= CRAWL_STALL_MS) {
+		return [];
+	}
+	const alarms = ["crawl_stalled"];
+	for (const seed of seeds) {
+		if (seed.phase === "mid-fill") {
+			alarms.push(`crawl_stalled:${seed.system}`);
+		}
+	}
 	return alarms;
 }
 
