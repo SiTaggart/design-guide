@@ -105,6 +105,17 @@ async function withoutStaleCopies(db: D1Database | undefined, chunks: readonly S
 	if (live.size === 0) {
 		return [...chunks];
 	}
+	const matched = new Set<string>();
+	for (const chunk of chunks) {
+		const url = chunk.item?.metadata?.source_url;
+		if (typeof url !== "string") {
+			continue;
+		}
+		const hash = live.get(url);
+		if (hash && chunk.item?.metadata?.content_hash === hash) {
+			matched.add(url);
+		}
+	}
 	return chunks.filter((chunk) => {
 		const url = chunk.item?.metadata?.source_url;
 		if (typeof url !== "string" || !live.has(url)) {
@@ -113,6 +124,9 @@ async function withoutStaleCopies(db: D1Database | undefined, chunks: readonly S
 		const hash = live.get(url);
 		if (!hash) {
 			return false;
+		}
+		if (!matched.has(url)) {
+			return true;
 		}
 		return chunk.item?.metadata?.content_hash === hash;
 	});
