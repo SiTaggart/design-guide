@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { contentHash } from "../src/index/content-hash.ts";
+import { MAX_ATTEMPTS } from "../src/index/page-queue.ts";
 import worker from "../src/worker.ts";
 import type { SearchChunk } from "../src/config/types.ts";
 import {
@@ -582,5 +583,88 @@ describe("conveyor tick", () => {
 		expect(primer).toMatchObject({ pending: 0, lastCrawled: NOW });
 		expect(status.discover).toBeNull();
 		expect(status.state).toBe("ok");
+	});
+
+	it("records a page_work failure after MAX_ATTEMPTS fetches of 500", async () => {
+		const db = memoryD1();
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		for (const id of SYSTEM_IDS) {
+			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, NOW).run();
+		}
+		await db
+			.prepare(
+				"INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts) VALUES (?, ?, 'seed', 'pending', ?, 0)",
+			)
+			.bind("primer", ABOUT, "2026-10-27T00:00:00.000Z")
+			.run();
+		const deps = {
+			limit: 5,
+			listItems: async (): Promise<ItemRecord[]> => [],
+			fetchText: async () => page(404, ""),
+			fetchPage: async () => page(500, ""),
+			upload: async () => undefined,
+			deletePage: async () => undefined,
+		};
+		for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+			await conveyorTick(env, "*/5 * * * *", new Date(Date.parse(NOW) + attempt * 60_000), deps);
+		}
+		const row = await db
+			.prepare("SELECT status, attempts, error FROM page_work WHERE url = ?")
+			.bind(ABOUT)
+			.first<{ status: string; attempts: number; error: string | null }>();
+		const status = await readStatus(env);
+		const primer = status.freshness.find((entry) => entry.system === "primer");
+		expect(row).toEqual({ status: "failed", attempts: MAX_ATTEMPTS, error: "fetch failed 500" });
+		expect(status.queue.failed).toBe(1);
+		expect(primer).toMatchObject({ failed: 1, pending: 0 });
+	});
+
+	it("keeps the prior lastIndexed when the page is unchanged", async () => {
+		const db = memoryD1();
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		const prior = "2026-10-01T00:00:00.000Z";
+		const body = "stable page";
+		const hash = contentHash(body);
+		for (const id of SYSTEM_IDS) {
+			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, NOW).run();
+		}
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, last_indexed)
+				 VALUES (?, ?, 'seed', 'pending', ?, 0, ?)`,
+			)
+			.bind("primer", ABOUT, "2026-10-27T00:00:00.000Z", prior)
+			.run();
+		await conveyorTick(env, "*/5 * * * *", new Date(NOW), {
+			limit: 5,
+			listItems: async (): Promise<ItemRecord[]> => [
+				{
+					id: "item-primer",
+					key: "primer/about.md",
+					metadata: { system: "primer", source_url: ABOUT, content_hash: hash },
+				},
+			],
+			fetchText: async () => page(404, ""),
+			fetchPage: async () => page(200, body),
+			upload: async () => {
+				throw new Error("unchanged page must not be uploaded");
+			},
+			deletePage: async () => undefined,
+		});
+		const status = await readStatus(env);
+		const primer = status.freshness.find((entry) => entry.system === "primer");
+		expect(primer).toMatchObject({ lastCrawled: NOW, lastIndexed: prior });
 	});
 });
