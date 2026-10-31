@@ -529,7 +529,7 @@ describe("conveyor tick", () => {
 		expect((await pageQueue.list()).map((row) => row.url)).toEqual([childB, ABOUT]);
 	});
 
-	it("crawls pending page_work that discover already marked, and clears the abandoned slot", async () => {
+	it("crawls pending page_work that discover already marked", async () => {
 		const db = memoryD1();
 		const kv = memoryKV();
 		const { env } = envWithIndex([], true, {
@@ -581,7 +581,7 @@ describe("conveyor tick", () => {
 		expect(report?.failed).toBe(0);
 		expect(status.queue).toMatchObject({ pending: 0, claimed: 0, failed: 0 });
 		expect(primer).toMatchObject({ pending: 0, lastCrawled: NOW });
-		expect(status.discover).toBeNull();
+		expect(status.discover?.systemId).toBe("patternfly");
 		expect(status.state).toBe("ok");
 	});
 

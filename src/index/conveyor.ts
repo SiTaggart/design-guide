@@ -4,7 +4,7 @@ import { isSystemId, type Seed, type SystemId } from "../config/types.ts";
 import { fetchPageMarkdown, type CrawlAuth } from "../crawl/browser-run.ts";
 import { admittedUrl, frontierLinks, pageKey } from "../crawl/links.ts";
 import { contentHash } from "./content-hash.ts";
-import { D1PageQueue, DRAIN_LIMIT, FILL_TICK_DEADLINE_MS } from "./page-queue.ts";
+import { D1PageQueue, DRAIN_LIMIT, FILL_TICK_DEADLINE_MS, MAX_ATTEMPTS } from "./page-queue.ts";
 import { deleteItem, listItems, uploadItem, type ItemRecord, type ItemsAuth } from "./items-rest.ts";
 import { pageItemKey } from "./drain.ts";
 import { fitsItem } from "./reindex.ts";
@@ -111,7 +111,6 @@ export async function consumeQueue(input: {
 	pages?: D1Database;
 }): Promise<Pick<ConveyorReport, "indexed" | "unchanged" | "deleted" | "failed" | "appended"> & { systems: SystemId[] }> {
 	const batch = await input.queue.takeOldest(input.limit);
-	const claimToken = crypto.randomUUID();
 	let indexed = 0;
 	let unchanged = 0;
 	let deleted = 0;
@@ -129,12 +128,11 @@ export async function consumeQueue(input: {
 				appended += await expandQueuedSitemap(input.queue, row, input.fetchText, input.clock);
 				continue;
 			}
-			await claimPage(input.pages, row, input.now, claimToken);
 			if (row.op === "delete") {
 				await input.queue.commitCopy(row.systemId, row.url, "");
 				await input.deletePage(row.systemId, row.url);
 				await input.queue.remove(row.url);
-				await finishPage(input.pages, row, input.now);
+				await finishPage(input.pages, row, input.now, false);
 				deleted += 1;
 				continue;
 			}
@@ -143,13 +141,14 @@ export async function consumeQueue(input: {
 				await input.queue.commitCopy(row.systemId, row.url, "");
 				await input.deletePage(row.systemId, row.url);
 				await input.queue.remove(row.url);
-				await finishPage(input.pages, row, input.now);
+				await finishPage(input.pages, row, input.now, false);
 				deleted += 1;
 				continue;
 			}
 			if (page.status !== 200) {
-				await input.queue.sendBack(row.url, stamp(input.clock), `fetch failed ${page.status}`);
-				await releasePage(input.pages, row, claimToken);
+				const message = `fetch failed ${page.status}`;
+				await input.queue.sendBack(row.url, stamp(input.clock), message);
+				await noteFailure(input.pages, row, message);
 				failed += 1;
 				continue;
 			}
@@ -161,14 +160,14 @@ export async function consumeQueue(input: {
 				await retain(row.systemId, row.url, hash);
 				appended += await appendLinks(input.queue, seed, row.url, page.body, input.knownUrls, input.clock);
 				await input.queue.remove(row.url);
-				await finishPage(input.pages, row, input.now);
+				await finishPage(input.pages, row, input.now, false);
 				input.knownUrls.add(`${row.systemId}\0${row.url}`);
 				unchanged += 1;
 				continue;
 			}
 			if (!fitsItem({ url: row.url, status: "completed", markdown: page.body }, seed)) {
 				await input.queue.remove(row.url);
-				await finishPage(input.pages, row, input.now);
+				await finishPage(input.pages, row, input.now, false);
 				continue;
 			}
 			await input.upload(row, page.body, hash);
@@ -176,14 +175,15 @@ export async function consumeQueue(input: {
 			await retain(row.systemId, row.url, hash);
 			appended += await appendLinks(input.queue, seed, row.url, page.body, input.knownUrls, input.clock);
 			await input.queue.remove(row.url);
-			await finishPage(input.pages, row, input.now);
+			await finishPage(input.pages, row, input.now, true);
 			input.knownUrls.add(`${row.systemId}\0${row.url}`);
 			input.knownHashes.set(`${row.systemId}\0${row.url}`, hash);
 			systems.push(row.systemId);
 			indexed += 1;
 		} catch (error) {
-			await input.queue.sendBack(row.url, stamp(input.clock), errorMessage(error));
-			await releasePage(input.pages, row, claimToken);
+			const message = errorMessage(error);
+			await input.queue.sendBack(row.url, stamp(input.clock), message);
+			await noteFailure(input.pages, row, message);
 			failed += 1;
 		}
 	}
@@ -263,10 +263,6 @@ async function copyPendingPageWork(db: D1Database): Promise<void> {
 		.run();
 }
 
-async function releaseDiscoverSlot(db: D1Database): Promise<void> {
-	await db.prepare("DELETE FROM discover_run").run();
-}
-
 async function settleStaleRun(env: WorkerEnv, now: Date): Promise<void> {
 	const current = await readStoredStatus(env);
 	if (current.state !== "running") {
@@ -282,35 +278,25 @@ async function settleStaleRun(env: WorkerEnv, now: Date): Promise<void> {
 	});
 }
 
-async function claimPage(db: D1Database | undefined, row: QueueRow, now: string, token: string): Promise<void> {
+async function noteFailure(db: D1Database | undefined, row: QueueRow, error: string): Promise<void> {
 	if (!db) {
 		return;
 	}
 	await db
 		.prepare(
 			`UPDATE page_work
-			 SET status = 'claimed', claimed_at = ?, claim_token = ?, error = NULL
-			 WHERE system_id = ? AND url = ? AND status IN ('pending', 'claimed')`,
+			 SET error = ?,
+			     attempts = attempts + 1,
+			     status = CASE WHEN attempts + 1 >= ? THEN 'failed' ELSE 'pending' END,
+			     claimed_at = NULL,
+			     claim_token = NULL
+			 WHERE system_id = ? AND url = ?`,
 		)
-		.bind(now, token, row.systemId, row.url)
+		.bind(error, MAX_ATTEMPTS, row.systemId, row.url)
 		.run();
 }
 
-async function releasePage(db: D1Database | undefined, row: QueueRow, token: string): Promise<void> {
-	if (!db) {
-		return;
-	}
-	await db
-		.prepare(
-			`UPDATE page_work
-			 SET status = 'pending', claimed_at = NULL, claim_token = NULL
-			 WHERE system_id = ? AND url = ? AND claim_token = ?`,
-		)
-		.bind(row.systemId, row.url, token)
-		.run();
-}
-
-async function finishPage(db: D1Database | undefined, row: QueueRow, now: string): Promise<void> {
+async function finishPage(db: D1Database | undefined, row: QueueRow, now: string, indexed: boolean): Promise<void> {
 	if (!db) {
 		return;
 	}
@@ -322,12 +308,12 @@ async function finishPage(db: D1Database | undefined, row: QueueRow, now: string
 			 ON CONFLICT(system_id, url) DO UPDATE SET
 			   status = 'done',
 			   last_crawled = excluded.last_crawled,
-			   last_indexed = excluded.last_indexed,
+			   last_indexed = CASE WHEN ? = 1 THEN excluded.last_indexed ELSE page_work.last_indexed END,
 			   error = NULL,
 			   claimed_at = NULL,
 			   claim_token = NULL`,
 		)
-		.bind(row.systemId, row.url, now, now, now)
+		.bind(row.systemId, row.url, now, now, indexed ? now : null, indexed ? 1 : 0)
 		.run();
 }
 
@@ -389,7 +375,6 @@ async function runConveyor(input: {
 	deps: ConveyorDeps;
 }): Promise<ConveyorReport | undefined> {
 	const { env, auth, db, queue, cron, now, deps } = input;
-	await releaseDiscoverSlot(db);
 	await settleStaleRun(env, now);
 	const clock: Clock = { ms: now.getTime() };
 	const fetchText = deps.fetchText ?? fetchPlain;

@@ -41,6 +41,7 @@ const MIGRATIONS = [
 	"0015_discover_run_drop_state.sql",
 	"0016_queue.sql",
 	"0017_page_copy.sql",
+	"0018_clear_discover_run.sql",
 ];
 
 function filesUnder(dir: string): string[] {
@@ -105,6 +106,22 @@ describe("page queue migrations", () => {
 		expect(sql).toContain("CREATE TABLE IF NOT EXISTS discover_resume");
 		expect(sql).toContain("ALTER TABLE discover_run ADD COLUMN slice_frontier_start INTEGER");
 		expect(sql).toContain("ALTER TABLE discover_run ADD COLUMN slice_accepted INTEGER NOT NULL DEFAULT 0");
+	});
+
+	it("deletes discover_run rows once", () => {
+		const db = new DatabaseSync(":memory:");
+		const clear = "0018_clear_discover_run.sql";
+		for (const name of MIGRATIONS.slice(0, MIGRATIONS.indexOf(clear))) {
+			db.exec(readFileSync(join(root, "migrations", name), "utf8"));
+		}
+		db.prepare(
+			`INSERT INTO discover_run (
+			   system_id, kind, trigger_name, job_id, start_url, poll_failures, started_at, updated_at
+			 ) VALUES ('patternfly', 'seed', 'deploy-drift', 'job-patternfly', 'https://www.patternfly.org/', 0, ?, ?)`,
+		).run("2026-10-29T17:20:00.000Z", "2026-10-29T17:20:00.000Z");
+		db.exec(readFileSync(join(root, "migrations", clear), "utf8"));
+		const left = db.prepare("SELECT COUNT(*) AS n FROM discover_run").get() as { n: number };
+		expect(left.n).toBe(0);
 	});
 
 	it("adds claim_token in its own migration", () => {
