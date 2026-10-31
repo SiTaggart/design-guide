@@ -15,6 +15,7 @@ import {
 } from "./refresh-delta.ts";
 import { clearPark } from "./parks.ts";
 import { clearRetrievalHold } from "./retrieval-hold.ts";
+import { isWorkflowLive, readStoredStatus, writeStatus } from "./status.ts";
 import { readMarks, writeMark, UrlQueue, type QueueRow } from "./url-queue.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 export const REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
@@ -107,8 +108,10 @@ export async function consumeQueue(input: {
 	deletePage: (systemId: SystemId, url: string) => Promise<void>;
 	deadline?: number;
 	retain?: (systemId: SystemId, url: string, hash: string) => Promise<void>;
+	pages?: D1Database;
 }): Promise<Pick<ConveyorReport, "indexed" | "unchanged" | "deleted" | "failed" | "appended"> & { systems: SystemId[] }> {
 	const batch = await input.queue.takeOldest(input.limit);
+	const claimToken = crypto.randomUUID();
 	let indexed = 0;
 	let unchanged = 0;
 	let deleted = 0;
@@ -126,10 +129,12 @@ export async function consumeQueue(input: {
 				appended += await expandQueuedSitemap(input.queue, row, input.fetchText, input.clock);
 				continue;
 			}
+			await claimPage(input.pages, row, input.now, claimToken);
 			if (row.op === "delete") {
 				await input.queue.commitCopy(row.systemId, row.url, "");
 				await input.deletePage(row.systemId, row.url);
 				await input.queue.remove(row.url);
+				await finishPage(input.pages, row, input.now);
 				deleted += 1;
 				continue;
 			}
@@ -138,11 +143,13 @@ export async function consumeQueue(input: {
 				await input.queue.commitCopy(row.systemId, row.url, "");
 				await input.deletePage(row.systemId, row.url);
 				await input.queue.remove(row.url);
+				await finishPage(input.pages, row, input.now);
 				deleted += 1;
 				continue;
 			}
 			if (page.status !== 200) {
 				await input.queue.sendBack(row.url, stamp(input.clock), `fetch failed ${page.status}`);
+				await releasePage(input.pages, row, claimToken);
 				failed += 1;
 				continue;
 			}
@@ -154,12 +161,14 @@ export async function consumeQueue(input: {
 				await retain(row.systemId, row.url, hash);
 				appended += await appendLinks(input.queue, seed, row.url, page.body, input.knownUrls, input.clock);
 				await input.queue.remove(row.url);
+				await finishPage(input.pages, row, input.now);
 				input.knownUrls.add(`${row.systemId}\0${row.url}`);
 				unchanged += 1;
 				continue;
 			}
 			if (!fitsItem({ url: row.url, status: "completed", markdown: page.body }, seed)) {
 				await input.queue.remove(row.url);
+				await finishPage(input.pages, row, input.now);
 				continue;
 			}
 			await input.upload(row, page.body, hash);
@@ -167,12 +176,14 @@ export async function consumeQueue(input: {
 			await retain(row.systemId, row.url, hash);
 			appended += await appendLinks(input.queue, seed, row.url, page.body, input.knownUrls, input.clock);
 			await input.queue.remove(row.url);
+			await finishPage(input.pages, row, input.now);
 			input.knownUrls.add(`${row.systemId}\0${row.url}`);
 			input.knownHashes.set(`${row.systemId}\0${row.url}`, hash);
 			systems.push(row.systemId);
 			indexed += 1;
 		} catch (error) {
 			await input.queue.sendBack(row.url, stamp(input.clock), errorMessage(error));
+			await releasePage(input.pages, row, claimToken);
 			failed += 1;
 		}
 	}
@@ -240,6 +251,86 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+async function copyPendingPageWork(db: D1Database): Promise<void> {
+	await db
+		.prepare(
+			`INSERT INTO queue (url, system_id, enqueued_at, op)
+			 SELECT url, system_id, enqueued_at, 'fetch'
+			 FROM page_work
+			 WHERE status = 'pending' OR status = 'claimed'
+			 ON CONFLICT(url) DO NOTHING`,
+		)
+		.run();
+}
+
+async function releaseDiscoverSlot(db: D1Database): Promise<void> {
+	await db.prepare("DELETE FROM discover_run").run();
+}
+
+async function settleStaleRun(env: WorkerEnv, now: Date): Promise<void> {
+	const current = await readStoredStatus(env);
+	if (current.state !== "running") {
+		return;
+	}
+	if (await isWorkflowLive(env, current.workflowId)) {
+		return;
+	}
+	await writeStatus(env, {
+		...current,
+		state: "ok",
+		finishedAt: now.toISOString(),
+	});
+}
+
+async function claimPage(db: D1Database | undefined, row: QueueRow, now: string, token: string): Promise<void> {
+	if (!db) {
+		return;
+	}
+	await db
+		.prepare(
+			`UPDATE page_work
+			 SET status = 'claimed', claimed_at = ?, claim_token = ?, error = NULL
+			 WHERE system_id = ? AND url = ? AND status IN ('pending', 'claimed')`,
+		)
+		.bind(now, token, row.systemId, row.url)
+		.run();
+}
+
+async function releasePage(db: D1Database | undefined, row: QueueRow, token: string): Promise<void> {
+	if (!db) {
+		return;
+	}
+	await db
+		.prepare(
+			`UPDATE page_work
+			 SET status = 'pending', claimed_at = NULL, claim_token = NULL
+			 WHERE system_id = ? AND url = ? AND claim_token = ?`,
+		)
+		.bind(row.systemId, row.url, token)
+		.run();
+}
+
+async function finishPage(db: D1Database | undefined, row: QueueRow, now: string): Promise<void> {
+	if (!db) {
+		return;
+	}
+	await db
+		.prepare(
+			`INSERT INTO page_work (
+			   system_id, url, kind, status, enqueued_at, attempts, last_crawled, last_indexed
+			 ) VALUES (?, ?, 'reindex', 'done', ?, 0, ?, ?)
+			 ON CONFLICT(system_id, url) DO UPDATE SET
+			   status = 'done',
+			   last_crawled = excluded.last_crawled,
+			   last_indexed = excluded.last_indexed,
+			   error = NULL,
+			   claimed_at = NULL,
+			   claim_token = NULL`,
+		)
+		.bind(row.systemId, row.url, now, now, now)
+		.run();
+}
+
 export function oldestAgeMs(enqueuedAt: string | null, nowMs: number): number | null {
 	if (!enqueuedAt) {
 		return null;
@@ -298,6 +389,8 @@ async function runConveyor(input: {
 	deps: ConveyorDeps;
 }): Promise<ConveyorReport | undefined> {
 	const { env, auth, db, queue, cron, now, deps } = input;
+	await releaseDiscoverSlot(db);
+	await settleStaleRun(env, now);
 	const clock: Clock = { ms: now.getTime() };
 	const fetchText = deps.fetchText ?? fetchPlain;
 	const fetchPage = deps.fetchPage ?? ((url: string) => fetchRenderedPage(auth, url));
@@ -334,6 +427,7 @@ async function runConveyor(input: {
 		});
 	}
 
+	await copyPendingPageWork(db);
 	const knownHashes = new Map<string, string>();
 	const knownUrls = new Set<string>();
 	for (const [key, page] of known) {
@@ -351,6 +445,7 @@ async function runConveyor(input: {
 				knownHashes,
 				knownUrls,
 				deadline,
+				pages: db,
 				upload: async (row, markdown, hash) => {
 					if (deps.upload) {
 						await deps.upload({
