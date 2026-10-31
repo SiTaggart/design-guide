@@ -15,6 +15,7 @@ import {
 import type { ItemRecord } from "../src/index/items-rest.ts";
 import { urlsToSeed } from "../src/index/refresh-delta.ts";
 import { UrlQueue } from "../src/index/url-queue.ts";
+import { emptyStatus, readStatus, writeStatus } from "../src/index/status.ts";
 import { admittedUrl } from "../src/crawl/links.ts";
 import { memoryD1 } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
@@ -525,5 +526,61 @@ describe("conveyor tick", () => {
 		await tick(180_000);
 		expect(textCalls).toEqual([indexUrl, childA]);
 		expect((await pageQueue.list()).map((row) => row.url)).toEqual([childB, ABOUT]);
+	});
+
+	it("crawls pending page_work that discover already marked, and clears the abandoned slot", async () => {
+		const db = memoryD1();
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		for (const id of SYSTEM_IDS) {
+			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, NOW).run();
+		}
+		await db
+			.prepare(
+				"INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts) VALUES (?, ?, 'seed', 'pending', ?, 0)",
+			)
+			.bind("primer", ABOUT, "2026-10-29T17:00:00.000Z")
+			.run();
+		await db
+			.prepare(
+				`INSERT INTO discover_run (
+				   system_id, kind, trigger_name, job_id, start_url, poll_failures, started_at, updated_at
+				 ) VALUES (?, 'seed', 'deploy-drift', 'job-patternfly', 'https://www.patternfly.org/', 0, ?, ?)`,
+			)
+			.bind("patternfly", "2026-10-29T17:20:00.000Z", "2026-10-29T17:20:00.000Z")
+			.run();
+		await writeStatus(env, {
+			...emptyStatus(false),
+			workflowId: "discover-deploy-drift-patternfly",
+			trigger: "deploy-drift",
+			state: "running",
+			startedAt: "2026-10-19T17:00:00.000Z",
+			finishedAt: null,
+		});
+		const fetched: string[] = [];
+		const report = await conveyorTick(env, "*/5 * * * *", new Date(NOW), {
+			limit: 5,
+			listItems: async () => [],
+			fetchText: async () => page(404, ""),
+			fetchPage: async (url) => {
+				fetched.push(url);
+				return page(200, `body ${url}`);
+			},
+			upload: async () => undefined,
+			deletePage: async () => undefined,
+		});
+		const status = await readStatus(env);
+		const primer = status.freshness.find((row) => row.system === "primer");
+		expect(fetched).toContain(ABOUT);
+		expect(report?.failed).toBe(0);
+		expect(status.queue).toMatchObject({ pending: 0, claimed: 0, failed: 0 });
+		expect(primer).toMatchObject({ pending: 0, lastCrawled: NOW });
+		expect(status.discover).toBeNull();
+		expect(status.state).toBe("ok");
 	});
 });
