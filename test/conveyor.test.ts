@@ -155,6 +155,62 @@ describe("queue consumer", () => {
 		expect(picked).toEqual([older[0], uswds, nhs, older[1]]);
 	});
 
+	it("fetches every system within two ticks when each tick finishes three pages", async () => {
+		const db = memoryD1();
+		const pageQueue = new UrlQueue(db);
+		const systems = ["paste", "primer", "uswds", "govuk", "nhs"] as const;
+		await pageQueue.enqueue(
+			systems.flatMap((systemId) =>
+				[0, 1, 2, 3].map((index) => ({
+					url: `https://example.test/${systemId}/${index}`,
+					systemId,
+					op: "fetch" as const,
+				})),
+			),
+			clock(),
+		);
+		const fetched = new Map<string, number>();
+		const realNow = Date.now;
+		try {
+			for (let tick = 0; tick < 2; tick += 1) {
+				let finished = 0;
+				let clockMs = 0;
+				const deadline = 1;
+				Date.now = () => clockMs;
+				await consumeQueue({
+					queue: pageQueue,
+					pages: db,
+					now: new Date(Date.parse(NOW) + tick * 60_000).toISOString(),
+					limit: 30,
+					clock: clock(Date.parse(NOW) + 60_000 + tick),
+					deadline,
+					knownHashes: new Map(),
+					knownUrls: new Set(),
+					fetchPage: async (url) => {
+						const systemId = url.split("/")[3] ?? "";
+						fetched.set(systemId, (fetched.get(systemId) ?? 0) + 1);
+						finished += 1;
+						if (finished >= 3) {
+							clockMs = deadline;
+						}
+						return page(200, "page");
+					},
+					upload: async () => undefined,
+					deletePage: async () => undefined,
+				});
+			}
+		} finally {
+			Date.now = realNow;
+		}
+		expect(Object.fromEntries(systems.map((id) => [id, (fetched.get(id) ?? 0) > 0]))).toEqual({
+			paste: true,
+			primer: true,
+			uswds: true,
+			govuk: true,
+			nhs: true,
+		});
+	});
+
 	it("writes no embedding when the hash matches, and uploads when it does not", async () => {
 		const pageQueue = queue();
 		const same = "unchanged page";
