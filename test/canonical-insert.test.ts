@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { admittedUrl } from "../src/crawl/links.ts";
 import { applyRefresh, consumeQueue, conveyorTick, type FetchedPage } from "../src/index/conveyor.ts";
 import { D1PageQueue } from "../src/index/page-queue.ts";
 import { UrlQueue } from "../src/index/url-queue.ts";
-import { memoryD1 } from "./helpers/d1.ts";
+import * as itemsRest from "../src/index/items-rest.ts";
+import { databaseAsD1, memoryD1 } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
 const NOW = "2026-10-30T00:10:54.000Z";
@@ -19,6 +24,10 @@ const LOOKBOOK_LIST = "https://primer.style/view-components/components/button/_l
 const OCTICON = "https://primer.style/octicons/icon/shield-lock-24";
 const DOCS = "https://primer.style/product/contribute/design/";
 const USWDS = "https://designsystem.digital.gov/components/button";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function clock(ms = Date.parse(NOW)): { ms: number } {
 	return { ms };
@@ -179,5 +188,78 @@ describe("canonical inserts", () => {
 		expect(admittedUrl(LOOKBOOK_LIST, primer)).toBeNull();
 		expect(admittedUrl(OCTICON, primer)).toBeNull();
 		expect(admittedUrl(PASCAL, primer)).toBe(PASCAL);
+	});
+
+	it("removes an indexed excluded primer page from search and page_copy after the migration and a tick", async () => {
+		const indexed = "https://primer.style/view-components/lookbook/inspect/button";
+		const pendingOnly = "https://primer.style/view-components/lookbook/preview/button";
+		const sqlite = new DatabaseSync(":memory:");
+		const migrationDir = join(dirname(fileURLToPath(import.meta.url)), "../migrations");
+		const migrations = readdirSync(migrationDir)
+			.filter((name) => name.endsWith(".sql"))
+			.sort();
+		const canon = "0019_canonical_urls.sql";
+		for (const name of migrations.slice(0, migrations.indexOf(canon))) {
+			sqlite.exec(readFileSync(join(migrationDir, name), "utf8"));
+		}
+		const insertPage = sqlite.prepare(
+			`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, last_indexed)
+			 VALUES ('primer', ?, 'seed', 'done', '2026-10-01T00:00:00.000Z', 0, ?)`,
+		);
+		insertPage.run(indexed, "2026-10-01T00:00:00.000Z");
+		sqlite
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts)
+				 VALUES ('primer', ?, 'seed', 'pending', '2026-10-01T00:00:00.000Z', 0)`,
+			)
+			.run(pendingOnly);
+		sqlite
+			.prepare("INSERT INTO page_copy (url, system_id, content_hash) VALUES (?, 'primer', ?)")
+			.run(indexed, "hash-lookbook");
+		sqlite.exec(readFileSync(join(migrationDir, canon), "utf8"));
+		const db = databaseAsD1(sqlite);
+		for (const id of SYSTEM_IDS) {
+			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, NOW).run();
+		}
+		const deleted: string[] = [];
+		vi.spyOn(itemsRest, "deleteItem").mockImplementation(async (_auth, itemId) => {
+			deleted.push(itemId);
+		});
+		const kv = memoryKV();
+		const { env } = envWithIndex([], true, {
+			INDEX: kv,
+			PAGE_QUEUE: db,
+			CLOUDFLARE_ACCOUNT_ID: "acct",
+			CLOUDFLARE_API_TOKEN: "token",
+		});
+		await conveyorTick(env, "*/5 * * * *", new Date(NOW), {
+			listItems: async () => [
+				{
+					id: "item-lookbook",
+					key: "primer/page/lookbook.md",
+					metadata: {
+						system: "primer",
+						source_url: indexed,
+						content_hash: "hash-lookbook",
+					},
+				},
+			],
+		});
+		const copy = await db
+			.prepare("SELECT content_hash FROM page_copy WHERE url = ?")
+			.bind(indexed)
+			.first<{ content_hash: string }>();
+		const kept = await db
+			.prepare("SELECT status FROM page_work WHERE url = ?")
+			.bind(indexed)
+			.first<{ status: string }>();
+		const dropped = await db
+			.prepare("SELECT url FROM page_work WHERE url = ?")
+			.bind(pendingOnly)
+			.first<{ url: string }>();
+		expect(deleted).toEqual(["item-lookbook"]);
+		expect(copy?.content_hash ?? null).toBe("");
+		expect(kept?.status).toBe("done");
+		expect(dropped).toBeNull();
 	});
 });
