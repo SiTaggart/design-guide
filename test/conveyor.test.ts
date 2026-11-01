@@ -94,7 +94,7 @@ describe("seed and weekly refresh share one append", () => {
 });
 
 describe("queue consumer", () => {
-	it("drains oldest first across systems", async () => {
+	it("drains one row from each system before a system's next row", async () => {
 		const pageQueue = queue();
 		const seen: string[] = [];
 		await pageQueue.enqueue(
@@ -283,7 +283,7 @@ describe("queue consumer", () => {
 			},
 		});
 		expect(removed).toEqual([ABOUT, PASTE]);
-		expect(seen).toEqual([PRIMER, PASTE]);
+		expect(seen).toEqual([PASTE, PRIMER]);
 		const left = await pageQueue.list();
 		expect(left.map((row) => row.url)).toEqual([PRIMER]);
 		expect(left[0]?.error).toBe("primer down");
@@ -402,7 +402,7 @@ describe("queue consumer", () => {
 });
 
 describe("conveyor tick", () => {
-	it("seeds every unmarked system on the first tick and drains in FIFO order", async () => {
+	it("seeds every unmarked system on the first tick and picks one page per system", async () => {
 		const db = memoryD1();
 		const kv = memoryKV();
 		const { env } = envWithIndex([], true, {
@@ -423,8 +423,12 @@ describe("conveyor tick", () => {
 			upload: async () => undefined,
 			deletePage: async () => undefined,
 		});
-		expect(fetched).toEqual(["https://paste-dsys.com/"]);
-		expect(report?.indexed).toBe(1);
+		expect(fetched).toEqual([
+			"https://paste-dsys.com/",
+			"https://primer.style/",
+			"https://designsystem.digital.gov/",
+		]);
+		expect(report?.indexed).toBe(3);
 		expect(report?.deleted).toBe(0);
 		expect(report?.failed).toBe(0);
 		expect(report?.depth).toBe(SYSTEM_IDS.length * 4 - 3);

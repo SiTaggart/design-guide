@@ -63,9 +63,21 @@ export class UrlQueue {
 		const listed = await this.db
 			.prepare(
 				`SELECT url, system_id, enqueued_at, error, op
-				 FROM queue
-				 WHERE op != 'seen'
-				 ORDER BY enqueued_at ASC, url ASC
+				 FROM (
+				   SELECT
+				     url,
+				     system_id,
+				     enqueued_at,
+				     error,
+				     op,
+				     ROW_NUMBER() OVER (
+				       PARTITION BY system_id
+				       ORDER BY enqueued_at ASC, url ASC
+				     ) AS turn
+				   FROM queue
+				   WHERE op != 'seen'
+				 ) AS ranked
+				 ORDER BY turn ASC, enqueued_at ASC, url ASC
 				 LIMIT ?`,
 			)
 			.bind(limit)
