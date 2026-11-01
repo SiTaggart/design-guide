@@ -18,7 +18,6 @@ const LOOKBOOK = "https://primer.style/view-components/lookbook/inspect/primer/b
 const LOOKBOOK_LIST = "https://primer.style/view-components/components/button/_list";
 const OCTICON = "https://primer.style/octicons/icon/shield-lock-24";
 const DOCS = "https://primer.style/product/contribute/design/";
-const GOVUK = "https://design-system.service.gov.uk/components/button/";
 const USWDS = "https://designsystem.digital.gov/components/button";
 
 function clock(ms = Date.parse(NOW)): { ms: number } {
@@ -104,7 +103,7 @@ describe("canonical inserts", () => {
 		expect(rows.results.map((row) => row.url)).toEqual([BUTTON]);
 	});
 
-	it("copies a pending page_work row onto its canonical queue url and skips excluded primer paths", async () => {
+	it("copies a canonical pending row and keeps the earlier queue enqueued_at", async () => {
 		const db = memoryD1();
 		const kv = memoryKV();
 		const { env } = envWithIndex([], true, {
@@ -116,12 +115,16 @@ describe("canonical inserts", () => {
 		for (const id of SYSTEM_IDS) {
 			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, NOW).run();
 		}
+		const earlier = "2026-10-20T00:00:00.000Z";
 		const insertedAt = "2026-10-25T06:15:00.000Z";
+		const govuk = "https://design-system.service.gov.uk/components/button";
+		await db
+			.prepare("INSERT INTO queue (url, system_id, enqueued_at, op) VALUES (?, 'primer', ?, 'fetch')")
+			.bind(BUTTON, earlier)
+			.run();
 		for (const [systemId, url] of [
-			["primer", BUTTON_SLASH],
-			["primer", LOOKBOOK],
-			["primer", OCTICON],
-			["govuk", GOVUK],
+			["primer", BUTTON],
+			["govuk", govuk],
 			["uswds", USWDS],
 		] as const) {
 			await db
@@ -140,8 +143,8 @@ describe("canonical inserts", () => {
 			.prepare("SELECT system_id, url, enqueued_at FROM queue ORDER BY system_id, url")
 			.all<{ system_id: string; url: string; enqueued_at: string }>();
 		expect(queued.results).toEqual([
-			{ system_id: "govuk", url: "https://design-system.service.gov.uk/components/button", enqueued_at: insertedAt },
-			{ system_id: "primer", url: BUTTON, enqueued_at: insertedAt },
+			{ system_id: "govuk", url: govuk, enqueued_at: insertedAt },
+			{ system_id: "primer", url: BUTTON, enqueued_at: earlier },
 			{ system_id: "uswds", url: USWDS, enqueued_at: insertedAt },
 		]);
 	});

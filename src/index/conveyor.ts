@@ -257,31 +257,15 @@ function errorMessage(error: unknown): string {
 }
 
 async function copyPendingPageWork(db: D1Database): Promise<void> {
-	const listed = await db
+	await db
 		.prepare(
-			`SELECT url, system_id, enqueued_at
+			`INSERT INTO queue (url, system_id, enqueued_at, op)
+			 SELECT url, system_id, enqueued_at, 'fetch'
 			 FROM page_work
 			 WHERE status = 'pending' OR status = 'claimed'
-			 ORDER BY enqueued_at ASC, url ASC`,
+			 ON CONFLICT(url) DO NOTHING`,
 		)
-		.all<{ url: string; system_id: string; enqueued_at: string }>();
-	for (const row of listed.results) {
-		if (!isSystemId(row.system_id)) {
-			continue;
-		}
-		const url = admittedUrl(row.url, seedById(row.system_id));
-		if (!url) {
-			continue;
-		}
-		await db
-			.prepare(
-				`INSERT INTO queue (url, system_id, enqueued_at, op)
-				 VALUES (?, ?, ?, 'fetch')
-				 ON CONFLICT(url) DO NOTHING`,
-			)
-			.bind(url, row.system_id, row.enqueued_at)
-			.run();
-	}
+		.run();
 }
 
 async function settleStaleRun(env: WorkerEnv, now: Date): Promise<void> {
