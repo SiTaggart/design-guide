@@ -1478,7 +1478,8 @@ describe("discover continuation", () => {
 			.prepare("SELECT streak FROM cap_defer WHERE system_id = 'paste'")
 			.all<{ streak: number }>();
 		expect(progressed.results).toEqual([{ streak: 1 }]);
-		await pageQueue.addFrontier("paste", [empty, "https://example.com/nope"]);
+		await pageQueue.addFrontier("paste", [empty]);
+		await db.prepare("INSERT INTO discover_frontier (system_id, url) VALUES ('paste', ?)").bind("https://example.com/nope").run();
 		await db.prepare("UPDATE cap_defer SET deferred_at = ? WHERE system_id = 'paste'").bind(cooled).run();
 		await db.prepare("UPDATE page_work SET status = 'done' WHERE system_id = 'paste'").run();
 		const shorter = await discoverTick(env, DRIFT_CRON, new Date(NOW), deps);
@@ -2126,7 +2127,8 @@ describe("discover continuation", () => {
 		const pageQueue = new D1PageQueue(db);
 		const aged = new Date(Date.parse(NOW) - DAY_MS - 60_000).toISOString();
 		const button = "https://paste-dsys.com/components/button";
-		await pageQueue.addFrontier("paste", [button, "https://example.com/nope"]);
+		await pageQueue.addFrontier("paste", [button]);
+		await db.prepare("INSERT INTO discover_frontier (system_id, url) VALUES ('paste', ?)").bind("https://example.com/nope").run();
 		await pageQueue.insertRun({
 			systemId: "paste",
 			kind: "seed",

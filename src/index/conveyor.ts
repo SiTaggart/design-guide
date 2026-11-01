@@ -2,7 +2,7 @@ import { INSTANCE_ID } from "../config/instance.ts";
 import { SEEDS, seedById } from "../config/seed.ts";
 import { isSystemId, type Seed, type SystemId } from "../config/types.ts";
 import { fetchPageMarkdown, type CrawlAuth } from "../crawl/browser-run.ts";
-import { admittedUrl, frontierLinks, pageKey } from "../crawl/links.ts";
+import { admittedUrl, canonicalLink, frontierLinks, pageKey } from "../crawl/links.ts";
 import { contentHash } from "./content-hash.ts";
 import { D1PageQueue, DRAIN_LIMIT, FILL_TICK_DEADLINE_MS, MAX_ATTEMPTS } from "./page-queue.ts";
 import { deleteItem, listItems, uploadItem, type ItemRecord, type ItemsAuth } from "./items-rest.ts";
@@ -83,11 +83,12 @@ export async function applyRefresh(input: {
 	const rows = discoveryRows(input.seed).filter((row) => row.op === "sitemap");
 	const seen = new Set(rows.map((row) => row.url));
 	for (const url of input.known) {
-		if (!url || seen.has(url)) {
+		const admitted = admittedUrl(url, input.seed);
+		if (!admitted || seen.has(admitted)) {
 			continue;
 		}
-		seen.add(url);
-		rows.push({ url, op: "fetch" });
+		seen.add(admitted);
+		rows.push({ url: admitted, op: "fetch" });
 	}
 	return input.queue.enqueue(
 		rows.map((row) => ({ url: row.url, systemId: input.systemId, op: row.op })),
@@ -209,9 +210,13 @@ async function expandQueuedSitemap(
 	}
 	const seed = seedById(row.systemId);
 	const expanded = expandSitemap(page.body, (url) => admittedUrl(url, seed));
+	const sitemaps = expanded.sitemaps.flatMap((url) => {
+		const canonical = canonicalLink(url, url);
+		return canonical ? [canonical] : [];
+	});
 	const appended = await queue.enqueue(
 		[
-			...expanded.sitemaps.map((url) => ({ url, systemId: row.systemId, op: "sitemap" as const })),
+			...sitemaps.map((url) => ({ url, systemId: row.systemId, op: "sitemap" as const })),
 			...expanded.pages.map((url) => ({ url, systemId: row.systemId, op: "fetch" as const })),
 		],
 		clock,
@@ -252,15 +257,31 @@ function errorMessage(error: unknown): string {
 }
 
 async function copyPendingPageWork(db: D1Database): Promise<void> {
-	await db
+	const listed = await db
 		.prepare(
-			`INSERT INTO queue (url, system_id, enqueued_at, op)
-			 SELECT url, system_id, enqueued_at, 'fetch'
+			`SELECT url, system_id, enqueued_at
 			 FROM page_work
 			 WHERE status = 'pending' OR status = 'claimed'
-			 ON CONFLICT(url) DO NOTHING`,
+			 ORDER BY enqueued_at ASC, url ASC`,
 		)
-		.run();
+		.all<{ url: string; system_id: string; enqueued_at: string }>();
+	for (const row of listed.results) {
+		if (!isSystemId(row.system_id)) {
+			continue;
+		}
+		const url = admittedUrl(row.url, seedById(row.system_id));
+		if (!url) {
+			continue;
+		}
+		await db
+			.prepare(
+				`INSERT INTO queue (url, system_id, enqueued_at, op)
+				 VALUES (?, ?, ?, 'fetch')
+				 ON CONFLICT(url) DO NOTHING`,
+			)
+			.bind(url, row.system_id, row.enqueued_at)
+			.run();
+	}
 }
 
 async function settleStaleRun(env: WorkerEnv, now: Date): Promise<void> {
@@ -300,6 +321,10 @@ async function finishPage(db: D1Database | undefined, row: QueueRow, now: string
 	if (!db) {
 		return;
 	}
+	const url = canonicalLink(row.url, row.url);
+	if (!url) {
+		return;
+	}
 	await db
 		.prepare(
 			`INSERT INTO page_work (
@@ -313,7 +338,7 @@ async function finishPage(db: D1Database | undefined, row: QueueRow, now: string
 			   claimed_at = NULL,
 			   claim_token = NULL`,
 		)
-		.bind(row.systemId, row.url, now, now, indexed ? now : null, indexed ? 1 : 0)
+		.bind(row.systemId, url, now, now, indexed ? now : null, indexed ? 1 : 0)
 		.run();
 }
 

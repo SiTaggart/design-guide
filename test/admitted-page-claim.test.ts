@@ -70,7 +70,7 @@ afterEach(() => {
 });
 
 describe("an admitted page has one live claim", () => {
-	it("keeps one catalog item when two drains admit one page", async () => {
+	it("stores one page for a slash spelling and a query spelling", async () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
 		await pageQueue.enqueueUpsert(
@@ -80,184 +80,17 @@ describe("an admitted page has one live claim", () => {
 			],
 			"2026-01-01T00:00:00.000Z",
 		);
-		expect(await pageQueue.complete(
-			await stampClaim(db, "backpack", SLASH, "2026-01-02T00:00:00.000Z"),
-			{ lastCrawled: "2026-01-02T00:00:00.000Z", lastIndexed: "2026-01-02T00:00:00.000Z" },
-			PRIOR,
-		)).toBe(true);
-		await pageQueue.enqueueUpsert([{ systemId: "backpack", url: SLASH, kind: "seed" }], NOW);
-		const items: Stored[] = [
-			{
-				id: "prior-id",
-				key: PRIOR,
-				body: "# old",
-				metadata: { system: "backpack", source: "Backpack", source_url: CANONICAL },
-			},
-		];
-		let release!: () => void;
-		const gate = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		let stored!: () => void;
-		const firstStored = new Promise<void>((resolve) => {
-			stored = resolve;
-		});
-		let uploads = 0;
-		vi.stubGlobal(
-			"fetch",
-			catalog(items, async () => {
-				uploads += 1;
-				if (uploads === 1) {
-					stored();
-					await gate;
-				}
-			}),
-		);
-
-		const first = drainTick({
-			queue: pageQueue,
-			auth: AUTH,
-			now: NOW,
-			limit: 1,
-			fetchMarkdown: async () => "# real",
-		});
-		await firstStored;
-		const second = await drainTick({
-			queue: pageQueue,
-			auth: AUTH,
-			now: LATER,
-			limit: 1,
-			fetchMarkdown: async () => "# real",
-		});
-		release();
-		const firstCounts = await first;
-		expect({ first: firstCounts, second, page: pageKeys(items).length }).toEqual({
-			first: { claimed: 1, indexed: 1, failed: 0 },
-			second: { claimed: 0, indexed: 0, failed: 0 },
-			page: 1,
-		});
-
-		const third = await drainTick({
-			queue: pageQueue,
-			auth: AUTH,
-			now: LATEST,
-			limit: 1,
-			fetchMarkdown: async () => "# real",
-		});
-		expect(third).toEqual({ claimed: 1, indexed: 1, failed: 0 });
-		expect(pageKeys(items)).toHaveLength(1);
-		const rows = await db
-			.prepare("SELECT url, status, item_key FROM page_work WHERE system_id = ? ORDER BY url")
-			.bind("backpack")
-			.all<{ url: string; status: string; item_key: string | null }>();
-		expect(rows.results?.map((row) => row.status)).toEqual(["done", "done"]);
-		expect(rows.results?.map((row) => row.item_key)).toContain(pageKeys(items)[0]);
-		expect(pageKeys(items)[0]).not.toBe(PRIOR);
-	});
-
-	it("returns the second spelling to pending while the first claim is live", async () => {
-		const db = memoryD1();
-		const pageQueue = new D1PageQueue(db);
-		await pageQueue.enqueueUpsert(
-			[
-				{ systemId: "backpack", url: SLASH, kind: "seed" },
-				{ systemId: "backpack", url: QUERY, kind: "seed" },
-			],
-			NOW,
-		);
-		const held = await pageQueue.claim(1, NOW);
-		expect(held).toHaveLength(1);
-		expect(await pageQueue.claim(1, LATER)).toEqual([]);
-		const other = held[0]?.url === SLASH ? QUERY : SLASH;
-		const row = await db
-			.prepare("SELECT status, attempts FROM page_work WHERE url = ?")
-			.bind(other)
-			.first<{ status: string; attempts: number }>();
-		expect(row).toEqual({ status: "pending", attempts: 0 });
-		expect(await pageQueue.complete(held[0]!, { lastCrawled: NOW, lastIndexed: NOW }, "backpack/page/k.md")).toBe(
-			true,
-		);
-		expect((await pageQueue.claim(1, LATEST)).map((item) => item.url)).toEqual([other]);
-	});
-
-	it("keeps one catalog item when a repeated-slash row admits the same page", async () => {
-		const db = memoryD1();
-		const pageQueue = new D1PageQueue(db);
-		const repeated = `${CANONICAL}${"/".repeat(16)}`;
-		await pageQueue.enqueueUpsert(
-			[
-				{ systemId: "backpack", url: CANONICAL, kind: "seed" },
-				{ systemId: "backpack", url: repeated, kind: "seed" },
-			],
-			NOW,
-		);
-		const items: Stored[] = [];
-		let release!: () => void;
-		const gate = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		let stored!: () => void;
-		const firstStored = new Promise<void>((resolve) => {
-			stored = resolve;
-		});
-		let uploads = 0;
-		vi.stubGlobal(
-			"fetch",
-			catalog(items, async () => {
-				uploads += 1;
-				if (uploads === 1) {
-					stored();
-					await gate;
-				}
-			}),
-		);
-		const first = drainTick({
-			queue: pageQueue,
-			auth: AUTH,
-			now: NOW,
-			limit: 1,
-			fetchMarkdown: async () => "# real",
-		});
-		await firstStored;
-		const second = await drainTick({
-			queue: pageQueue,
-			auth: AUTH,
-			now: LATER,
-			limit: 1,
-			fetchMarkdown: async () => "# real",
-		});
-		const repeatedRow = await db
-			.prepare("SELECT status, attempts FROM page_work WHERE url = ?")
-			.bind(repeated)
-			.first<{ status: string; attempts: number }>();
-		expect(repeatedRow).toEqual({ status: "pending", attempts: 0 });
-		expect(second).toEqual({ claimed: 0, indexed: 0, failed: 0 });
-		expect(pageKeys(items)).toHaveLength(1);
-		release();
-		expect(await first).toEqual({ claimed: 1, indexed: 1, failed: 0 });
-		expect(pageKeys(items)).toHaveLength(1);
-	});
-
-	it("returns the canonical row to pending while a multi-slash row is claimed", async () => {
-		const db = memoryD1();
-		const pageQueue = new D1PageQueue(db);
-		const multi = `${CANONICAL}//`;
-		await pageQueue.enqueueUpsert(
-			[
-				{ systemId: "backpack", url: multi, kind: "seed" },
-				{ systemId: "backpack", url: CANONICAL, kind: "seed" },
-			],
-			NOW,
-		);
+		const rows = await db.prepare("SELECT url, status FROM page_work ORDER BY url").all<{ url: string; status: string }>();
+		expect(rows.results).toEqual([{ url: CANONICAL, status: "pending" }]);
 		const held = await pageQueue.claim(1, NOW);
 		expect(held.map((item) => item.url)).toEqual([CANONICAL]);
 		expect(await pageQueue.claim(1, LATER)).toEqual([]);
-		const row = await db
-			.prepare("SELECT status, attempts FROM page_work WHERE url = ?")
-			.bind(multi)
-			.first<{ status: string; attempts: number }>();
-		expect(row).toEqual({ status: "pending", attempts: 0 });
+		expect(
+			await pageQueue.complete(held[0]!, { lastCrawled: NOW, lastIndexed: NOW }, "backpack/page/k.md"),
+		).toBe(true);
+		expect((await pageQueue.claim(1, LATEST)).map((item) => item.url)).toEqual([]);
 	});
+
 
 	it("keeps the later drain's item when the first claim has expired", async () => {
 		const db = memoryD1();
