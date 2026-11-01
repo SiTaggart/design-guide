@@ -31,12 +31,54 @@ WITH stripped AS (
         ) - 1
       ),
       '/'
-    ) AS trimmed
+    ) AS bare
   FROM page_work
+),
+
+deported AS (
+  SELECT
+    s.*,
+    CASE
+      WHEN instr(bare, '://') = 0 THEN bare
+      ELSE
+        substr(bare, 1, instr(bare, '://') + 2)
+        || CASE
+          WHEN lower(substr(bare, 1, instr(bare, '://') - 1)) = 'https'
+            AND length(hostport) > 4 AND substr(hostport, -4) = ':443'
+            THEN substr(hostport, 1, length(hostport) - 4)
+          WHEN lower(substr(bare, 1, instr(bare, '://') - 1)) = 'http'
+            AND length(hostport) > 3 AND substr(hostport, -3) = ':80'
+            THEN substr(hostport, 1, length(hostport) - 3)
+          ELSE hostport
+        END
+        || pathrest
+    END AS trimmed
+  FROM (
+    SELECT
+      stripped.*,
+      CASE
+        WHEN instr(bare, '://') = 0 THEN ''
+        WHEN instr(substr(bare, instr(bare, '://') + 3), '/') = 0 THEN substr(bare, instr(bare, '://') + 3)
+        ELSE substr(
+          bare,
+          instr(bare, '://') + 3,
+          instr(substr(bare, instr(bare, '://') + 3), '/') - 1
+        )
+      END AS hostport,
+      CASE
+        WHEN instr(bare, '://') = 0 THEN ''
+        WHEN instr(substr(bare, instr(bare, '://') + 3), '/') = 0 THEN ''
+        ELSE substr(
+          bare,
+          instr(bare, '://') + 2 + instr(substr(bare, instr(bare, '://') + 3), '/')
+        )
+      END AS pathrest
+    FROM stripped
+  ) AS s
 ),
 shaped AS (
   SELECT
-    stripped.*,
+    deported.*,
     CASE
       WHEN instr(trimmed, '://') = 0 THEN trimmed
       WHEN instr(substr(trimmed, instr(trimmed, '://') + 3), '/') = 0 THEN lower(trimmed) || '/'
@@ -54,7 +96,7 @@ shaped AS (
           instr(trimmed, '://') + 2 + instr(substr(trimmed, instr(trimmed, '://') + 3), '/')
         )
     END AS canon
-  FROM stripped
+  FROM deported
 ),
 ranked AS (
   SELECT
@@ -114,12 +156,54 @@ WITH stripped AS (
         ) - 1
       ),
       '/'
-    ) AS trimmed
+    ) AS bare
   FROM queue
+),
+
+deported AS (
+  SELECT
+    s.*,
+    CASE
+      WHEN instr(bare, '://') = 0 THEN bare
+      ELSE
+        substr(bare, 1, instr(bare, '://') + 2)
+        || CASE
+          WHEN lower(substr(bare, 1, instr(bare, '://') - 1)) = 'https'
+            AND length(hostport) > 4 AND substr(hostport, -4) = ':443'
+            THEN substr(hostport, 1, length(hostport) - 4)
+          WHEN lower(substr(bare, 1, instr(bare, '://') - 1)) = 'http'
+            AND length(hostport) > 3 AND substr(hostport, -3) = ':80'
+            THEN substr(hostport, 1, length(hostport) - 3)
+          ELSE hostport
+        END
+        || pathrest
+    END AS trimmed
+  FROM (
+    SELECT
+      stripped.*,
+      CASE
+        WHEN instr(bare, '://') = 0 THEN ''
+        WHEN instr(substr(bare, instr(bare, '://') + 3), '/') = 0 THEN substr(bare, instr(bare, '://') + 3)
+        ELSE substr(
+          bare,
+          instr(bare, '://') + 3,
+          instr(substr(bare, instr(bare, '://') + 3), '/') - 1
+        )
+      END AS hostport,
+      CASE
+        WHEN instr(bare, '://') = 0 THEN ''
+        WHEN instr(substr(bare, instr(bare, '://') + 3), '/') = 0 THEN ''
+        ELSE substr(
+          bare,
+          instr(bare, '://') + 2 + instr(substr(bare, instr(bare, '://') + 3), '/')
+        )
+      END AS pathrest
+    FROM stripped
+  ) AS s
 ),
 shaped AS (
   SELECT
-    stripped.*,
+    deported.*,
     CASE
       WHEN instr(trimmed, '://') = 0 THEN trimmed
       WHEN instr(substr(trimmed, instr(trimmed, '://') + 3), '/') = 0 THEN lower(trimmed) || '/'
@@ -137,12 +221,15 @@ shaped AS (
           instr(trimmed, '://') + 2 + instr(substr(trimmed, instr(trimmed, '://') + 3), '/')
         )
     END AS canon
-  FROM stripped
+  FROM deported
 ),
 ranked AS (
   SELECT
     shaped.*,
-    ROW_NUMBER() OVER (PARTITION BY canon ORDER BY enqueued_at ASC, url ASC) AS n
+    ROW_NUMBER() OVER (
+      PARTITION BY canon
+      ORDER BY CASE WHEN op = 'seen' THEN 1 ELSE 0 END, enqueued_at ASC, url ASC
+    ) AS n
   FROM shaped
 )
 SELECT canon, system_id, enqueued_at, error, op
@@ -173,8 +260,50 @@ WITH stripped AS (
         ) - 1
       ),
       '/'
-    ) AS trimmed
+    ) AS bare
   FROM discover_url
+),
+
+deported AS (
+  SELECT
+    s.*,
+    CASE
+      WHEN instr(bare, '://') = 0 THEN bare
+      ELSE
+        substr(bare, 1, instr(bare, '://') + 2)
+        || CASE
+          WHEN lower(substr(bare, 1, instr(bare, '://') - 1)) = 'https'
+            AND length(hostport) > 4 AND substr(hostport, -4) = ':443'
+            THEN substr(hostport, 1, length(hostport) - 4)
+          WHEN lower(substr(bare, 1, instr(bare, '://') - 1)) = 'http'
+            AND length(hostport) > 3 AND substr(hostport, -3) = ':80'
+            THEN substr(hostport, 1, length(hostport) - 3)
+          ELSE hostport
+        END
+        || pathrest
+    END AS trimmed
+  FROM (
+    SELECT
+      stripped.*,
+      CASE
+        WHEN instr(bare, '://') = 0 THEN ''
+        WHEN instr(substr(bare, instr(bare, '://') + 3), '/') = 0 THEN substr(bare, instr(bare, '://') + 3)
+        ELSE substr(
+          bare,
+          instr(bare, '://') + 3,
+          instr(substr(bare, instr(bare, '://') + 3), '/') - 1
+        )
+      END AS hostport,
+      CASE
+        WHEN instr(bare, '://') = 0 THEN ''
+        WHEN instr(substr(bare, instr(bare, '://') + 3), '/') = 0 THEN ''
+        ELSE substr(
+          bare,
+          instr(bare, '://') + 2 + instr(substr(bare, instr(bare, '://') + 3), '/')
+        )
+      END AS pathrest
+    FROM stripped
+  ) AS s
 ),
 shaped AS (
   SELECT
@@ -196,7 +325,7 @@ shaped AS (
           instr(trimmed, '://') + 2 + instr(substr(trimmed, instr(trimmed, '://') + 3), '/')
         )
     END AS canon
-  FROM stripped
+  FROM deported
 )
 SELECT DISTINCT system_id, canon FROM shaped;
 
@@ -223,8 +352,50 @@ WITH stripped AS (
         ) - 1
       ),
       '/'
-    ) AS trimmed
+    ) AS bare
   FROM discover_indexable
+),
+
+deported AS (
+  SELECT
+    s.*,
+    CASE
+      WHEN instr(bare, '://') = 0 THEN bare
+      ELSE
+        substr(bare, 1, instr(bare, '://') + 2)
+        || CASE
+          WHEN lower(substr(bare, 1, instr(bare, '://') - 1)) = 'https'
+            AND length(hostport) > 4 AND substr(hostport, -4) = ':443'
+            THEN substr(hostport, 1, length(hostport) - 4)
+          WHEN lower(substr(bare, 1, instr(bare, '://') - 1)) = 'http'
+            AND length(hostport) > 3 AND substr(hostport, -3) = ':80'
+            THEN substr(hostport, 1, length(hostport) - 3)
+          ELSE hostport
+        END
+        || pathrest
+    END AS trimmed
+  FROM (
+    SELECT
+      stripped.*,
+      CASE
+        WHEN instr(bare, '://') = 0 THEN ''
+        WHEN instr(substr(bare, instr(bare, '://') + 3), '/') = 0 THEN substr(bare, instr(bare, '://') + 3)
+        ELSE substr(
+          bare,
+          instr(bare, '://') + 3,
+          instr(substr(bare, instr(bare, '://') + 3), '/') - 1
+        )
+      END AS hostport,
+      CASE
+        WHEN instr(bare, '://') = 0 THEN ''
+        WHEN instr(substr(bare, instr(bare, '://') + 3), '/') = 0 THEN ''
+        ELSE substr(
+          bare,
+          instr(bare, '://') + 2 + instr(substr(bare, instr(bare, '://') + 3), '/')
+        )
+      END AS pathrest
+    FROM stripped
+  ) AS s
 ),
 shaped AS (
   SELECT
@@ -246,7 +417,7 @@ shaped AS (
           instr(trimmed, '://') + 2 + instr(substr(trimmed, instr(trimmed, '://') + 3), '/')
         )
     END AS canon
-  FROM stripped
+  FROM deported
 )
 SELECT DISTINCT system_id, canon FROM shaped;
 
@@ -273,8 +444,50 @@ WITH stripped AS (
         ) - 1
       ),
       '/'
-    ) AS trimmed
+    ) AS bare
   FROM discover_frontier
+),
+
+deported AS (
+  SELECT
+    s.*,
+    CASE
+      WHEN instr(bare, '://') = 0 THEN bare
+      ELSE
+        substr(bare, 1, instr(bare, '://') + 2)
+        || CASE
+          WHEN lower(substr(bare, 1, instr(bare, '://') - 1)) = 'https'
+            AND length(hostport) > 4 AND substr(hostport, -4) = ':443'
+            THEN substr(hostport, 1, length(hostport) - 4)
+          WHEN lower(substr(bare, 1, instr(bare, '://') - 1)) = 'http'
+            AND length(hostport) > 3 AND substr(hostport, -3) = ':80'
+            THEN substr(hostport, 1, length(hostport) - 3)
+          ELSE hostport
+        END
+        || pathrest
+    END AS trimmed
+  FROM (
+    SELECT
+      stripped.*,
+      CASE
+        WHEN instr(bare, '://') = 0 THEN ''
+        WHEN instr(substr(bare, instr(bare, '://') + 3), '/') = 0 THEN substr(bare, instr(bare, '://') + 3)
+        ELSE substr(
+          bare,
+          instr(bare, '://') + 3,
+          instr(substr(bare, instr(bare, '://') + 3), '/') - 1
+        )
+      END AS hostport,
+      CASE
+        WHEN instr(bare, '://') = 0 THEN ''
+        WHEN instr(substr(bare, instr(bare, '://') + 3), '/') = 0 THEN ''
+        ELSE substr(
+          bare,
+          instr(bare, '://') + 2 + instr(substr(bare, instr(bare, '://') + 3), '/')
+        )
+      END AS pathrest
+    FROM stripped
+  ) AS s
 ),
 shaped AS (
   SELECT
@@ -296,64 +509,103 @@ shaped AS (
           instr(trimmed, '://') + 2 + instr(substr(trimmed, instr(trimmed, '://') + 3), '/')
         )
     END AS canon
-  FROM stripped
+  FROM deported
 )
 SELECT DISTINCT system_id, canon FROM shaped;
 
 DROP TABLE discover_frontier;
 ALTER TABLE discover_frontier_canonical RENAME TO discover_frontier;
 
-DELETE FROM page_work
+INSERT INTO queue (url, system_id, enqueued_at, error, op)
+SELECT url, system_id, enqueued_at, NULL, 'delete'
+FROM page_work
 WHERE system_id = 'primer'
+  AND last_indexed IS NOT NULL
   AND (
     url = 'https://primer.style/view-components/lookbook'
-    OR url LIKE 'https://primer.style/view-components/lookbook/%'
+    OR url GLOB 'https://primer.style/view-components/lookbook/*'
     OR url = 'https://primer.style/octicons/icon'
-    OR url LIKE 'https://primer.style/octicons/icon/%'
-    OR url LIKE 'https://primer.style/view-components/%/\_%' ESCAPE '\'
-    OR url LIKE 'https://primer.style/view-components/\_%' ESCAPE '\'
+    OR url GLOB 'https://primer.style/octicons/icon/*'
+    OR url GLOB 'https://primer.style/view-components/*/_*'
+    OR url GLOB 'https://primer.style/view-components/_*'
+  )
+ON CONFLICT(url) DO UPDATE SET op = 'delete', error = NULL;
+
+DELETE FROM page_work
+WHERE system_id = 'primer'
+  AND last_indexed IS NULL
+  AND (
+    url = 'https://primer.style/view-components/lookbook'
+    OR url GLOB 'https://primer.style/view-components/lookbook/*'
+    OR url = 'https://primer.style/octicons/icon'
+    OR url GLOB 'https://primer.style/octicons/icon/*'
+    OR url GLOB 'https://primer.style/view-components/*/_*'
+    OR url GLOB 'https://primer.style/view-components/_*'
   );
 
 DELETE FROM queue
 WHERE system_id = 'primer'
+  AND op != 'delete'
   AND (
     url = 'https://primer.style/view-components/lookbook'
-    OR url LIKE 'https://primer.style/view-components/lookbook/%'
+    OR url GLOB 'https://primer.style/view-components/lookbook/*'
     OR url = 'https://primer.style/octicons/icon'
-    OR url LIKE 'https://primer.style/octicons/icon/%'
-    OR url LIKE 'https://primer.style/view-components/%/\_%' ESCAPE '\'
-    OR url LIKE 'https://primer.style/view-components/\_%' ESCAPE '\'
+    OR url GLOB 'https://primer.style/octicons/icon/*'
+    OR url GLOB 'https://primer.style/view-components/*/_*'
+    OR url GLOB 'https://primer.style/view-components/_*'
   );
 
 DELETE FROM discover_url
 WHERE system_id = 'primer'
   AND (
     url = 'https://primer.style/view-components/lookbook'
-    OR url LIKE 'https://primer.style/view-components/lookbook/%'
+    OR url GLOB 'https://primer.style/view-components/lookbook/*'
     OR url = 'https://primer.style/octicons/icon'
-    OR url LIKE 'https://primer.style/octicons/icon/%'
-    OR url LIKE 'https://primer.style/view-components/%/\_%' ESCAPE '\'
-    OR url LIKE 'https://primer.style/view-components/\_%' ESCAPE '\'
+    OR url GLOB 'https://primer.style/octicons/icon/*'
+    OR url GLOB 'https://primer.style/view-components/*/_*'
+    OR url GLOB 'https://primer.style/view-components/_*'
   );
 
 DELETE FROM discover_indexable
 WHERE system_id = 'primer'
   AND (
     url = 'https://primer.style/view-components/lookbook'
-    OR url LIKE 'https://primer.style/view-components/lookbook/%'
+    OR url GLOB 'https://primer.style/view-components/lookbook/*'
     OR url = 'https://primer.style/octicons/icon'
-    OR url LIKE 'https://primer.style/octicons/icon/%'
-    OR url LIKE 'https://primer.style/view-components/%/\_%' ESCAPE '\'
-    OR url LIKE 'https://primer.style/view-components/\_%' ESCAPE '\'
+    OR url GLOB 'https://primer.style/octicons/icon/*'
+    OR url GLOB 'https://primer.style/view-components/*/_*'
+    OR url GLOB 'https://primer.style/view-components/_*'
   );
 
 DELETE FROM discover_frontier
 WHERE system_id = 'primer'
   AND (
     url = 'https://primer.style/view-components/lookbook'
-    OR url LIKE 'https://primer.style/view-components/lookbook/%'
+    OR url GLOB 'https://primer.style/view-components/lookbook/*'
     OR url = 'https://primer.style/octicons/icon'
-    OR url LIKE 'https://primer.style/octicons/icon/%'
-    OR url LIKE 'https://primer.style/view-components/%/\_%' ESCAPE '\'
-    OR url LIKE 'https://primer.style/view-components/\_%' ESCAPE '\'
+    OR url GLOB 'https://primer.style/octicons/icon/*'
+    OR url GLOB 'https://primer.style/view-components/*/_*'
+    OR url GLOB 'https://primer.style/view-components/_*'
+  );
+
+DELETE FROM page_copy
+WHERE system_id = 'primer'
+  AND (
+    url = 'https://primer.style/view-components/lookbook'
+    OR url GLOB 'https://primer.style/view-components/lookbook/*'
+    OR url = 'https://primer.style/octicons/icon'
+    OR url GLOB 'https://primer.style/octicons/icon/*'
+    OR url GLOB 'https://primer.style/view-components/*/_*'
+    OR url GLOB 'https://primer.style/view-components/_*'
+  )
+  AND url NOT IN (
+    SELECT url FROM page_work
+    WHERE system_id = 'primer' AND last_indexed IS NOT NULL AND (
+    url = 'https://primer.style/view-components/lookbook'
+    OR url GLOB 'https://primer.style/view-components/lookbook/*'
+    OR url = 'https://primer.style/octicons/icon'
+    OR url GLOB 'https://primer.style/octicons/icon/*'
+    OR url GLOB 'https://primer.style/view-components/*/_*'
+    OR url GLOB 'https://primer.style/view-components/_*'
+  )
   );

@@ -174,6 +174,15 @@ describe("page queue migrations", () => {
 		);
 		insertPage.run("primer", "https://primer.style/octicons/icon/shield-lock-24/", "seed", "pending", "2026-10-01T00:00:00.000Z", null);
 		insertPage.run("primer", "https://primer.style/foundations/icons", "seed", "done", "2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
+		insertPage.run("primer", "https://primer.style:443/brand/logo/", "seed", "done", "2026-09-02T00:00:00.000Z", "2026-09-02T00:00:00.000Z");
+		insertPage.run(
+			"primer",
+			"https://primer.style/view-components/Lookbook/inspect",
+			"seed",
+			"done",
+			"2026-09-03T00:00:00.000Z",
+			"2026-09-03T00:00:00.000Z",
+		);
 		insertPage.run("govuk", "https://design-system.service.gov.uk/components/button/", "seed", "pending", "2026-10-04T00:00:00.000Z", null);
 		insertPage.run("govuk", "https://design-system.service.gov.uk/components/button", "seed", "done", "2026-10-05T00:00:00.000Z", null);
 		insertPage.run("uswds", "https://designsystem.digital.gov/components/button", "seed", "done", "2026-10-06T00:00:00.000Z", "2026-10-06T00:00:00.000Z");
@@ -183,6 +192,11 @@ describe("page queue migrations", () => {
 		insertQueue.run("https://primer.style/view-components/lookbook/preview/button", "primer", "2026-10-30T00:00:02.000Z");
 		insertQueue.run("https://design-system.service.gov.uk/components/button/", "govuk", "2026-10-30T00:00:03.000Z");
 		insertQueue.run("https://designsystem.digital.gov/components/button", "uswds", "2026-10-30T00:00:04.000Z");
+		db.prepare("INSERT INTO queue (url, system_id, enqueued_at, op) VALUES (?, ?, ?, 'seen')").run(
+			"https://primer.style/product/button",
+			"primer",
+			"2026-10-29T00:00:00.000Z",
+		);
 		db.prepare("INSERT INTO discover_frontier (system_id, url) VALUES (?, ?)").run(
 			"primer",
 			"https://primer.style/octicons/icon/star-fill-16/",
@@ -217,6 +231,13 @@ describe("page queue migrations", () => {
 			},
 			{
 				system_id: "primer",
+				url: "https://primer.style/brand/logo",
+				kind: "seed",
+				status: "done",
+				enqueued_at: "2026-09-02T00:00:00.000Z",
+			},
+			{
+				system_id: "primer",
 				url: "https://primer.style/foundations/icons",
 				kind: "seed",
 				status: "done",
@@ -230,6 +251,13 @@ describe("page queue migrations", () => {
 				enqueued_at: "2026-10-02T00:00:00.000Z",
 			},
 			{
+				system_id: "primer",
+				url: "https://primer.style/view-components/Lookbook/inspect",
+				kind: "seed",
+				status: "done",
+				enqueued_at: "2026-09-03T00:00:00.000Z",
+			},
+			{
 				system_id: "uswds",
 				url: "https://designsystem.digital.gov/components/button",
 				kind: "seed",
@@ -237,22 +265,25 @@ describe("page queue migrations", () => {
 				enqueued_at: "2026-10-06T00:00:00.000Z",
 			},
 		]);
-		const queued = db.prepare("SELECT system_id, url, enqueued_at FROM queue ORDER BY system_id, url").all();
+		const queued = db.prepare("SELECT system_id, url, enqueued_at, op FROM queue ORDER BY system_id, url").all();
 		expect(queued).toEqual([
 			{
 				system_id: "govuk",
 				url: "https://design-system.service.gov.uk/components/button",
 				enqueued_at: "2026-10-30T00:00:03.000Z",
+				op: "fetch",
 			},
 			{
 				system_id: "primer",
 				url: "https://primer.style/product/button",
 				enqueued_at: "2026-10-30T00:00:00.000Z",
+				op: "fetch",
 			},
 			{
 				system_id: "uswds",
 				url: "https://designsystem.digital.gov/components/button",
 				enqueued_at: "2026-10-30T00:00:04.000Z",
+				op: "fetch",
 			},
 		]);
 		const frontier = db.prepare("SELECT url FROM discover_frontier ORDER BY url").all() as Array<{ url: string }>;
