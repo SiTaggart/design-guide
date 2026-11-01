@@ -192,6 +192,7 @@ describe("canonical inserts", () => {
 
 	it("removes an indexed excluded primer page from search and page_copy after the migration and a tick", async () => {
 		const indexed = "https://primer.style/view-components/lookbook/inspect/button";
+		const keyed = "https://primer.style/octicons/icon/shield-lock-24";
 		const pendingOnly = "https://primer.style/view-components/lookbook/preview/button";
 		const sqlite = new DatabaseSync(":memory:");
 		const migrationDir = join(dirname(fileURLToPath(import.meta.url)), "../migrations");
@@ -209,13 +210,19 @@ describe("canonical inserts", () => {
 		insertPage.run(indexed, "2026-10-01T00:00:00.000Z");
 		sqlite
 			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, item_key)
+				 VALUES ('primer', ?, 'seed', 'done', '2026-10-01T00:00:00.000Z', 0, 'primer/page/icon.md')`,
+			)
+			.run(keyed);
+		sqlite
+			.prepare(
 				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts)
 				 VALUES ('primer', ?, 'seed', 'pending', '2026-10-01T00:00:00.000Z', 0)`,
 			)
 			.run(pendingOnly);
-		sqlite
-			.prepare("INSERT INTO page_copy (url, system_id, content_hash) VALUES (?, 'primer', ?)")
-			.run(indexed, "hash-lookbook");
+		const insertCopy = sqlite.prepare("INSERT INTO page_copy (url, system_id, content_hash) VALUES (?, 'primer', ?)");
+		insertCopy.run(indexed, "hash-lookbook");
+		insertCopy.run(keyed, "hash-icon");
 		sqlite.exec(readFileSync(join(migrationDir, canon), "utf8"));
 		const db = databaseAsD1(sqlite);
 		for (const id of SYSTEM_IDS) {
@@ -243,23 +250,38 @@ describe("canonical inserts", () => {
 						content_hash: "hash-lookbook",
 					},
 				},
+				{
+					id: "item-icon",
+					key: "primer/page/icon.md",
+					metadata: {
+						system: "primer",
+						source_url: keyed,
+						content_hash: "hash-icon",
+					},
+				},
 			],
 		});
-		const copy = await db
-			.prepare("SELECT content_hash FROM page_copy WHERE url = ?")
-			.bind(indexed)
-			.first<{ content_hash: string }>();
+		const hashes = await db
+			.prepare("SELECT url, content_hash FROM page_copy WHERE url IN (?, ?) ORDER BY url")
+			.bind(keyed, indexed)
+			.all<{ url: string; content_hash: string }>();
 		const kept = await db
-			.prepare("SELECT status FROM page_work WHERE url = ?")
-			.bind(indexed)
-			.first<{ status: string }>();
+			.prepare("SELECT url, status FROM page_work WHERE url IN (?, ?) ORDER BY url")
+			.bind(keyed, indexed)
+			.all<{ url: string; status: string }>();
 		const dropped = await db
 			.prepare("SELECT url FROM page_work WHERE url = ?")
 			.bind(pendingOnly)
 			.first<{ url: string }>();
-		expect(deleted).toEqual(["item-lookbook"]);
-		expect(copy?.content_hash ?? null).toBe("");
-		expect(kept?.status).toBe("done");
+		expect(deleted.sort()).toEqual(["item-icon", "item-lookbook"]);
+		expect(hashes.results).toEqual([
+			{ url: keyed, content_hash: "" },
+			{ url: indexed, content_hash: "" },
+		]);
+		expect(kept.results).toEqual([
+			{ url: keyed, status: "done" },
+			{ url: indexed, status: "done" },
+		]);
 		expect(dropped).toBeNull();
 	});
 });
