@@ -123,7 +123,7 @@ describe("discovered records stay inside the seed", () => {
 		});
 		const rejected = await db
 			.prepare("SELECT status, error FROM page_work WHERE system_id = ? AND url = ?")
-			.bind("backpack", LINK_LOCAL)
+			.bind("backpack", "https://169.254.169.254/latest/meta-data")
 			.first<{ status: string; error: string | null }>();
 		expect(fetched).toEqual([allowed]);
 		expect(rejected).toMatchObject({ status: "failed", error: "url outside seed scope" });
@@ -169,7 +169,7 @@ describe("discovered records stay inside the seed", () => {
 		expect(uploaded).toEqual([CANONICAL]);
 		expect(rejected).toMatchObject({ status: "failed", error: "url outside seed scope" });
 		expect(drained.failed).toBe(1);
-		expect(drained.indexed).toBe(2);
+		expect(drained.indexed).toBe(1);
 	});
 
 	it("stores the admitted canonical url once when slash and query rows are queued", async () => {
@@ -211,11 +211,10 @@ describe("discovered records stay inside the seed", () => {
 		expect(upload.mock.calls[0]?.[3]).toMatchObject({ source_url: CANONICAL });
 		expect(rows.results).toEqual([
 			{ url: outside, status: "failed" },
-			{ url: slash, status: "done" },
-			{ url: query, status: "done" },
+			{ url: CANONICAL, status: "done" },
 		]);
 		expect(drained.failed).toBe(1);
-		expect(drained.indexed).toBe(2);
+		expect(drained.indexed).toBe(1);
 	});
 
 	it("queues a contents page from the fallback project and drops the rest of the project", async () => {

@@ -1,4 +1,5 @@
 import { isSystemId, type SystemId } from "../config/types.ts";
+import { canonicalLink } from "../crawl/links.ts";
 
 export type QueueOp = "fetch" | "delete" | "sitemap" | "seen";
 
@@ -44,15 +45,19 @@ export class UrlQueue {
 	): Promise<number> {
 		let added = 0;
 		for (const row of rows) {
+			const url = canonicalLink(row.url, row.url);
 			const enqueuedAt = new Date(clock.ms).toISOString();
 			clock.ms += 1;
+			if (!url) {
+				continue;
+			}
 			const result = await this.db
 				.prepare(
 					`INSERT INTO queue (url, system_id, enqueued_at, op)
 					 VALUES (?, ?, ?, ?)
 					 ON CONFLICT(url) DO NOTHING`,
 				)
-				.bind(row.url, row.systemId, enqueuedAt, row.op)
+				.bind(url, row.systemId, enqueuedAt, row.op)
 				.run();
 			added += result.meta.changes;
 		}
