@@ -124,6 +124,37 @@ describe("queue consumer", () => {
 		expect(await pageQueue.errorCount()).toBe(0);
 	});
 
+	it("picks a newer page from each other system before an older backlog", async () => {
+		const pageQueue = queue();
+		const older = Array.from({ length: 6 }, (_, index) => `https://primer.style/backlog/${index}`);
+		const uswds = "https://designsystem.digital.gov/backlog";
+		const nhs = "https://service-manual.nhs.uk/backlog";
+		await pageQueue.enqueue(
+			[
+				...older.map((url) => ({ url, systemId: "primer" as const, op: "fetch" as const })),
+				{ url: uswds, systemId: "uswds" as const, op: "fetch" as const },
+				{ url: nhs, systemId: "nhs" as const, op: "fetch" as const },
+			],
+			clock(),
+		);
+		const picked: string[] = [];
+		await consumeQueue({
+			queue: pageQueue,
+			now: NOW,
+			limit: 4,
+			clock: clock(Date.parse(NOW) + 60_000),
+			knownHashes: new Map(),
+			knownUrls: new Set(),
+			fetchPage: async (url) => {
+				picked.push(url);
+				return page(200, `body ${url}`);
+			},
+			upload: async () => undefined,
+			deletePage: async () => undefined,
+		});
+		expect(picked).toEqual([older[0], uswds, nhs, older[1]]);
+	});
+
 	it("writes no embedding when the hash matches, and uploads when it does not", async () => {
 		const pageQueue = queue();
 		const same = "unchanged page";
