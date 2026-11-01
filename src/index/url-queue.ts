@@ -65,19 +65,25 @@ export class UrlQueue {
 				`SELECT url, system_id, enqueued_at, error, op
 				 FROM (
 				   SELECT
-				     url,
-				     system_id,
-				     enqueued_at,
-				     error,
-				     op,
+				     queue.url AS url,
+				     queue.system_id AS system_id,
+				     queue.enqueued_at AS enqueued_at,
+				     queue.error AS error,
+				     queue.op AS op,
 				     ROW_NUMBER() OVER (
-				       PARTITION BY system_id
-				       ORDER BY enqueued_at ASC, url ASC
-				     ) AS turn
+				       PARTITION BY queue.system_id
+				       ORDER BY queue.enqueued_at ASC, queue.url ASC
+				     ) AS turn,
+				     served.last_crawled AS served_at
 				   FROM queue
-				   WHERE op != 'seen'
+				   LEFT JOIN (
+				     SELECT system_id, MAX(last_crawled) AS last_crawled
+				     FROM page_work
+				     GROUP BY system_id
+				   ) AS served ON served.system_id = queue.system_id
+				   WHERE queue.op != 'seen'
 				 ) AS ranked
-				 ORDER BY turn ASC, enqueued_at ASC, url ASC
+				 ORDER BY turn ASC, served_at ASC, enqueued_at ASC, url ASC
 				 LIMIT ?`,
 			)
 			.bind(limit)

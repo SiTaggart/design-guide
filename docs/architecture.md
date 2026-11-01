@@ -7,7 +7,7 @@ Cited retrieval over indexed design-system docs. The worker returns stored passa
 ```mermaid
 flowchart LR
   cron["Worker cron"] --> seed["Seed or weekly refresh"]
-  seed --> queue["D1 queue\nround-robin by system"]
+  seed --> queue["D1 queue\nleast recently crawled first"]
   queue --> worker["Fetch, hash, upsert"]
   worker --> items["AI Search"]
   worker --> queue
@@ -15,7 +15,7 @@ flowchart LR
 
 Seed ids: `paste`, `primer`, `uswds`, `govuk`, `nhs`, `antd`, `gitlab-pajamas`, `patternfly`, `cloudscape`, `vanilla`, `siemens-ix`, `backpack`, `garden`, `ouds-web`. One `startUrl` each.
 
-The cron reads `queue` (`url`, `system_id`, `enqueued_at`, `op`). `url` is unique. Seeding a system appends its root as a page fetch and its robots and sitemap URLs as sitemap rows. It does not fetch them. A weekly refresh runs when `system_mark.last_discovered` is at least 7 days old. It appends those sitemap rows and every known page URL in one insert. It does not fetch those pages, and a URL missing from the sitemap is not deleted. A gone page is removed because that weekly refresh enqueues every known page and the consumer deletes the stored page on 404 or 410. The worker then takes up to the existing drain batch, one row from each system before any system repeats, oldest enqueued_at then url within a system, and stops at the tick deadline. A sitemap row is fetched once, and its child sitemaps and page URLs are appended to the back, so a sitemap that spans ticks continues from the queue. An unchanged hash removes the row only after any older copy of that page is gone, and it does not upload. A new or changed page is uploaded, which chunks and embeds it, and the row stays until those older copies are deleted. A failed fetch or a failed delete updates `enqueued_at` and `error` so the row sits at the back. While a page is fetched, links that are not already stored or queued are appended with the same insert.
+The cron reads `queue` (`url`, `system_id`, `enqueued_at`, `op`). `url` is unique. Seeding a system appends its root as a page fetch and its robots and sitemap URLs as sitemap rows. It does not fetch them. A weekly refresh runs when `system_mark.last_discovered` is at least 7 days old. It appends those sitemap rows and every known page URL in one insert. It does not fetch those pages, and a URL missing from the sitemap is not deleted. A gone page is removed because that weekly refresh enqueues every known page and the consumer deletes the stored page on 404 or 410. The worker then takes up to the existing drain batch, one row from each system before any system repeats, systems with the oldest page_work last_crawled first and never-crawled systems before those, oldest enqueued_at then url within a system, and stops at the tick deadline. A sitemap row is fetched once, and its child sitemaps and page URLs are appended to the back, so a sitemap that spans ticks continues from the queue. An unchanged hash removes the row only after any older copy of that page is gone, and it does not upload. A new or changed page is uploaded, which chunks and embeds it, and the row stays until those older copies are deleted. A failed fetch or a failed delete updates `enqueued_at` and `error` so the row sits at the back. While a page is fetched, links that are not already stored or queued are appended with the same insert.
 
 The tick log `index_queue` reports `depth` and `oldestAgeMs`.
 
