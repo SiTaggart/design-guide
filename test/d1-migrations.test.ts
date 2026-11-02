@@ -48,6 +48,7 @@ const MIGRATIONS = [
 	"0022_discover_indexable_canon.sql",
 	"0023_discover_frontier_canon.sql",
 	"0024_primer_exclusion_deletes.sql",
+	"0025_drop_finished_primer_exclusions.sql",
 ];
 
 function filesUnder(dir: string): string[] {
@@ -302,6 +303,67 @@ describe("page queue migrations", () => {
 		expect(frontier.map((row) => row.url)).toEqual(["https://primer.style/brand/visual-assets"]);
 		const govukDiscover = db.prepare("SELECT url FROM discover_url").all() as Array<{ url: string }>;
 		expect(govukDiscover.map((row) => row.url)).toEqual(["https://design-system.service.gov.uk/styles"]);
+	});
+
+	it("drops finished excluded primer pages that are no longer queued for delete", () => {
+		const db = new DatabaseSync(":memory:");
+		for (const name of MIGRATIONS) {
+			if (name >= "0025") {
+				break;
+			}
+			db.exec(readFileSync(join(root, "migrations", name), "utf8"));
+		}
+		const insertPage = db.prepare(
+			`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts)
+			 VALUES (?, ?, 'seed', ?, '2026-10-01T00:00:00.000Z', 0)`,
+		);
+		insertPage.run("primer", "https://primer.style/view-components/lookbook/inspect/button", "done");
+		insertPage.run("primer", "https://primer.style/octicons/icon/shield-lock-24", "done");
+		insertPage.run("primer", "https://primer.style/view-components/lookbook/preview/button", "pending");
+		insertPage.run("primer", "https://primer.style/product/button", "done");
+		insertPage.run("primer", "https://primer.style/view-components/Lookbook/inspect", "done");
+		insertPage.run("uswds", "https://designsystem.digital.gov/components/button", "done");
+		insertPage.run("govuk", "https://design-system.service.gov.uk/components/button", "done");
+		db.prepare("INSERT INTO queue (url, system_id, enqueued_at, op) VALUES (?, 'primer', '2026-11-01T00:00:00.000Z', 'delete')").run(
+			"https://primer.style/octicons/icon/shield-lock-24",
+		);
+		const othersBefore = db.prepare("SELECT COUNT(*) AS n FROM page_work WHERE system_id != 'primer'").get() as { n: number };
+		db.exec(readFileSync(join(root, "migrations/0025_drop_finished_primer_exclusions.sql"), "utf8"));
+		const pages = db.prepare("SELECT system_id, url, status FROM page_work ORDER BY system_id, url").all();
+		expect(pages).toEqual([
+			{
+				system_id: "govuk",
+				url: "https://design-system.service.gov.uk/components/button",
+				status: "done",
+			},
+			{
+				system_id: "primer",
+				url: "https://primer.style/octicons/icon/shield-lock-24",
+				status: "done",
+			},
+			{
+				system_id: "primer",
+				url: "https://primer.style/product/button",
+				status: "done",
+			},
+			{
+				system_id: "primer",
+				url: "https://primer.style/view-components/Lookbook/inspect",
+				status: "done",
+			},
+			{
+				system_id: "primer",
+				url: "https://primer.style/view-components/lookbook/preview/button",
+				status: "pending",
+			},
+			{
+				system_id: "uswds",
+				url: "https://designsystem.digital.gov/components/button",
+				status: "done",
+			},
+		]);
+		const othersAfter = db.prepare("SELECT COUNT(*) AS n FROM page_work WHERE system_id != 'primer'").get() as { n: number };
+		expect(othersAfter.n).toBe(othersBefore.n);
 	});
 
 	it("keeps CREATE TABLE out of the worker source", () => {

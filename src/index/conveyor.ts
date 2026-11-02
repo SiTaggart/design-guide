@@ -132,8 +132,8 @@ export async function consumeQueue(input: {
 			if (row.op === "delete") {
 				await input.queue.commitCopy(row.systemId, row.url, "");
 				await input.deletePage(row.systemId, row.url);
+				await dropPageWork(input.pages, row);
 				await input.queue.remove(row.url);
-				await finishPage(input.pages, row, input.now, false);
 				deleted += 1;
 				continue;
 			}
@@ -299,6 +299,17 @@ async function noteFailure(db: D1Database | undefined, row: QueueRow, error: str
 		)
 		.bind(error, MAX_ATTEMPTS, row.systemId, row.url)
 		.run();
+}
+
+async function dropPageWork(db: D1Database | undefined, row: QueueRow): Promise<void> {
+	if (!db) {
+		return;
+	}
+	const url = canonicalLink(row.url, row.url);
+	if (!url) {
+		return;
+	}
+	await db.prepare("DELETE FROM page_work WHERE system_id = ? AND url = ?").bind(row.systemId, url).run();
 }
 
 async function finishPage(db: D1Database | undefined, row: QueueRow, now: string, indexed: boolean): Promise<void> {
