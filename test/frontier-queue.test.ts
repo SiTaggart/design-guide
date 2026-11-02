@@ -83,7 +83,7 @@ describe("discover frontier writes", () => {
 		expect(await stored()).toEqual([inside]);
 	});
 
-	it("drops out-of-scope frontier rows in one delete and keeps an in-scope row", async () => {
+	it("does not store an out-of-scope frontier row", async () => {
 		const outside = [
 			"https://www.skyscanner.design/account/a",
 			"https://www.skyscanner.design/account/b",
@@ -93,14 +93,6 @@ describe("discover frontier writes", () => {
 		const db = memoryD1();
 		const pageQueue = new D1PageQueue(db);
 		await pageQueue.addFrontier("backpack", [...outside, inside]);
-		let deletes = 0;
-		const prepare = db.prepare.bind(db);
-		db.prepare = ((sql: string) => {
-			if (sql.startsWith("DELETE FROM discover_frontier")) {
-				deletes += 1;
-			}
-			return prepare(sql);
-		}) as D1Database["prepare"];
 		const stored = async () => {
 			const rows = await db
 				.prepare("SELECT url FROM discover_frontier WHERE system_id = ? ORDER BY url")
@@ -108,12 +100,9 @@ describe("discover frontier writes", () => {
 				.all<{ url: string }>();
 			return rows.results?.map((row) => row.url) ?? [];
 		};
-		expect(await pageQueue.nextFrontier("backpack", new Set())).toBe(inside);
-		expect(deletes).toBe(1);
 		expect(await stored()).toEqual([inside]);
-		deletes = 0;
+		expect(await pageQueue.nextFrontier("backpack", new Set())).toBe(inside);
 		expect(await pageQueue.nextFrontier("backpack", new Set([inside]))).toBeNull();
-		expect(deletes).toBe(0);
 		expect(await stored()).toEqual([inside]);
 	});
 });

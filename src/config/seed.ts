@@ -22,7 +22,15 @@ export const SEEDS: readonly Seed[] = [
 		id: "primer",
 		source: "Primer",
 		startUrl: "https://primer.style/",
-		excludePatterns: HARD_OUTS,
+		excludePatterns: [
+			...HARD_OUTS,
+			"https://primer.style/view-components/lookbook/**",
+			"https://primer.style/view-components/**/_*",
+			"https://primer.style/view-components/**/_*/**",
+			"https://primer.style/view-components/_*",
+			"https://primer.style/view-components/_*/**",
+			"https://primer.style/octicons/icon/**",
+		],
 	},
 	{
 		id: "uswds",

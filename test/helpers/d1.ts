@@ -14,9 +14,7 @@ export function applyMigrations(db: DatabaseSync): void {
 	}
 }
 
-export function memoryD1(): D1Database {
-	const db = new DatabaseSync(":memory:");
-	applyMigrations(db);
+export function databaseAsD1(db: DatabaseSync): D1Database {
 	const statement = (sql: string, values: SQLInputValue[]) => ({
 		sql,
 		values,
@@ -74,6 +72,12 @@ export function memoryD1(): D1Database {
 			}
 		},
 	} as unknown as D1Database;
+}
+
+export function memoryD1(): D1Database {
+	const db = new DatabaseSync(":memory:");
+	applyMigrations(db);
+	return databaseAsD1(db);
 }
 
 export async function stampClaim(db: D1Database, systemId: SystemId, url: string, claimedAt: string) {

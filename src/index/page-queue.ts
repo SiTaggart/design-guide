@@ -1,6 +1,6 @@
 import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, isSystemId, type SystemId } from "../config/types.ts";
-import { admittedUrl, isStaticAsset, pageKey } from "../crawl/links.ts";
+import { admittedUrl, canonicalLink, isStaticAsset, pageKey } from "../crawl/links.ts";
 import { D1_STEP_RETRIES, d1MaxBackoffMs, d1Query, tickFrom, type D1QueryStep, type D1QueueOptions } from "./d1-step.ts";
 
 export const DRAIN_LIMIT = 100;
@@ -257,6 +257,10 @@ export class D1PageQueue implements PageQueue {
 				? "page_work.status = 'done' OR page_work.status = 'claimed'"
 				: "page_work.status = 'claimed'";
 		for (const item of items) {
+			const url = canonicalLink(item.url, item.url);
+			if (!url) {
+				continue;
+			}
 			await run(
 				this.step,
 				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts)
@@ -283,7 +287,7 @@ export class D1PageQueue implements PageQueue {
 				     ELSE NULL
 				   END`,
 				item.systemId,
-				item.url,
+				url,
 				item.kind,
 				now,
 			);
@@ -885,7 +889,15 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async addFrontier(systemId: SystemId, urls: readonly string[]): Promise<void> {
-		const unique = [...new Set(urls)];
+		const seed = seedById(systemId);
+		const unique = [
+			...new Set(
+				urls.flatMap((url) => {
+					const admitted = admittedUrl(url, seed);
+					return admitted ? [admitted] : [];
+				}),
+			),
+		];
 		if (unique.length === 0) {
 			return;
 		}
@@ -973,11 +985,15 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async stageUrl(systemId: SystemId, url: string): Promise<void> {
+		const admitted = admittedUrl(url, seedById(systemId));
+		if (!admitted) {
+			return;
+		}
 		await run(
 			this.step,
 			"INSERT INTO discover_url (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
 			systemId,
-			url,
+			admitted,
 		);
 	}
 
@@ -991,11 +1007,15 @@ export class D1PageQueue implements PageQueue {
 	}
 
 	async stageIndexable(systemId: SystemId, url: string): Promise<void> {
+		const admitted = admittedUrl(url, seedById(systemId));
+		if (!admitted) {
+			return;
+		}
 		await run(
 			this.step,
 			"INSERT INTO discover_indexable (system_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
 			systemId,
-			url,
+			admitted,
 		);
 	}
 
