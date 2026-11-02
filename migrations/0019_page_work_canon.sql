@@ -18,7 +18,7 @@ INSERT INTO page_work_canonical (
   system_id, url, kind, status, enqueued_at, attempts,
   last_crawled, last_indexed, claimed_at, error, item_key, claim_token
 )
-WITH stripped AS (
+WITH stripped AS MATERIALIZED (
   SELECT
     page_work.*,
     rtrim(
@@ -35,7 +35,7 @@ WITH stripped AS (
   FROM page_work
 ),
 
-deported AS (
+deported AS MATERIALIZED (
   SELECT
     s.*,
     CASE
@@ -76,7 +76,7 @@ deported AS (
     FROM stripped
   ) AS s
 ),
-shaped AS (
+shaped AS MATERIALIZED (
   SELECT
     deported.*,
     CASE

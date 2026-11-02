@@ -5,7 +5,7 @@ CREATE TABLE discover_indexable_canonical (
 );
 
 INSERT INTO discover_indexable_canonical (system_id, url)
-WITH stripped AS (
+WITH stripped AS MATERIALIZED (
   SELECT
     discover_indexable.*,
     rtrim(
@@ -22,7 +22,7 @@ WITH stripped AS (
   FROM discover_indexable
 ),
 
-deported AS (
+deported AS MATERIALIZED (
   SELECT
     s.*,
     CASE
@@ -63,7 +63,7 @@ deported AS (
     FROM stripped
   ) AS s
 ),
-shaped AS (
+shaped AS MATERIALIZED (
   SELECT
     system_id,
     CASE

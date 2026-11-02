@@ -7,7 +7,7 @@ CREATE TABLE queue_canonical (
 );
 
 INSERT INTO queue_canonical (url, system_id, enqueued_at, error, op)
-WITH stripped AS (
+WITH stripped AS MATERIALIZED (
   SELECT
     queue.*,
     rtrim(
@@ -24,7 +24,7 @@ WITH stripped AS (
   FROM queue
 ),
 
-deported AS (
+deported AS MATERIALIZED (
   SELECT
     s.*,
     CASE
@@ -65,7 +65,7 @@ deported AS (
     FROM stripped
   ) AS s
 ),
-shaped AS (
+shaped AS MATERIALIZED (
   SELECT
     deported.*,
     CASE
