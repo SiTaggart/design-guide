@@ -42,7 +42,12 @@ const MIGRATIONS = [
 	"0016_queue.sql",
 	"0017_page_copy.sql",
 	"0018_clear_discover_run.sql",
-	"0019_canonical_urls.sql",
+	"0019_page_work_canon.sql",
+	"0020_queue_canon.sql",
+	"0021_discover_url_canon.sql",
+	"0022_discover_indexable_canon.sql",
+	"0023_discover_frontier_canon.sql",
+	"0024_primer_exclusion_deletes.sql",
 ];
 
 function filesUnder(dir: string): string[] {
@@ -138,8 +143,10 @@ describe("page queue migrations", () => {
 
 	it("collapses url spellings and drops excluded primer rows", () => {
 		const db = new DatabaseSync(":memory:");
-		const canon = "0019_canonical_urls.sql";
-		for (const name of MIGRATIONS.slice(0, MIGRATIONS.indexOf(canon))) {
+		for (const name of MIGRATIONS) {
+			if (name >= "0019") {
+				break;
+			}
 			db.exec(readFileSync(join(root, "migrations", name), "utf8"));
 		}
 		const insertPage = db.prepare(
@@ -206,7 +213,12 @@ describe("page queue migrations", () => {
 			"https://primer.style/brand/visual-assets/",
 		);
 		db.prepare("INSERT INTO discover_url (system_id, url) VALUES (?, ?)").run("govuk", "https://design-system.service.gov.uk/styles/");
-		db.exec(readFileSync(join(root, "migrations", canon), "utf8"));
+		for (const name of MIGRATIONS) {
+			if (name < "0019") {
+				continue;
+			}
+			db.exec(readFileSync(join(root, "migrations", name), "utf8"));
+		}
 		const pages = db.prepare("SELECT system_id, url, kind, status, enqueued_at FROM page_work ORDER BY system_id, url").all() as Array<{
 			system_id: string;
 			url: string;

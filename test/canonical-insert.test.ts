@@ -199,8 +199,10 @@ describe("canonical inserts", () => {
 		const migrations = readdirSync(migrationDir)
 			.filter((name) => name.endsWith(".sql"))
 			.sort();
-		const canon = "0019_canonical_urls.sql";
-		for (const name of migrations.slice(0, migrations.indexOf(canon))) {
+		for (const name of migrations) {
+			if (name >= "0019") {
+				break;
+			}
 			sqlite.exec(readFileSync(join(migrationDir, name), "utf8"));
 		}
 		const insertPage = sqlite.prepare(
@@ -223,7 +225,12 @@ describe("canonical inserts", () => {
 		const insertCopy = sqlite.prepare("INSERT INTO page_copy (url, system_id, content_hash) VALUES (?, 'primer', ?)");
 		insertCopy.run(indexed, "hash-lookbook");
 		insertCopy.run(keyed, "hash-icon");
-		sqlite.exec(readFileSync(join(migrationDir, canon), "utf8"));
+		for (const name of migrations) {
+			if (name < "0019") {
+				continue;
+			}
+			sqlite.exec(readFileSync(join(migrationDir, name), "utf8"));
+		}
 		const db = databaseAsD1(sqlite);
 		for (const id of SYSTEM_IDS) {
 			await db.prepare("INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)").bind(id, NOW).run();
