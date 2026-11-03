@@ -285,10 +285,7 @@ describe("canonical inserts", () => {
 			{ url: keyed, content_hash: "" },
 			{ url: indexed, content_hash: "" },
 		]);
-		expect(kept.results).toEqual([
-			{ url: keyed, status: "done" },
-			{ url: indexed, status: "done" },
-		]);
+		expect(kept.results).toEqual([]);
 		expect(dropped).toBeNull();
 	});
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
+import { searchCitations } from "../src/index/ai-search.ts";
 import { contentHash } from "../src/index/content-hash.ts";
 import { MAX_ATTEMPTS } from "../src/index/page-queue.ts";
 import worker from "../src/worker.ts";
@@ -256,6 +257,100 @@ describe("queue consumer", () => {
 		const left = await pageQueue.list();
 		expect(left.map((row) => row.url)).toEqual([PRIMER]);
 		expect(left[0]?.error).toBe("primer down");
+		expect(Date.parse(left[0]?.enqueuedAt ?? NOW)).toBeGreaterThan(Date.parse(NOW));
+	});
+
+	it("drops the page_work row after a delete and hides a leftover search hit", async () => {
+		const db = memoryD1();
+		const url = "https://primer.style/view-components/lookbook/inspect/button";
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, last_indexed)
+				 VALUES ('primer', ?, 'seed', 'done', ?, 0, ?)`,
+			)
+			.bind(url, NOW, NOW)
+			.run();
+		await db
+			.prepare("INSERT INTO page_copy (url, system_id, content_hash) VALUES (?, 'primer', ?)")
+			.bind(url, "hash-lookbook")
+			.run();
+		const pageQueue = new UrlQueue(db);
+		await pageQueue.enqueue([{ url, systemId: "primer", op: "delete" }], clock());
+		await consumeQueue({
+			queue: pageQueue,
+			pages: db,
+			now: NOW,
+			limit: 5,
+			clock: clock(Date.parse(NOW) + 1000),
+			knownHashes: new Map(),
+			knownUrls: new Set(),
+			fetchPage: async () => page(200, "unused"),
+			upload: async () => undefined,
+			deletePage: async () => undefined,
+		});
+		expect(await db.prepare("SELECT url FROM page_work WHERE url = ?").bind(url).first()).toBeNull();
+		expect(
+			await db.prepare("SELECT content_hash FROM page_copy WHERE url = ?").bind(url).first<{ content_hash: string }>(),
+		).toEqual({ content_hash: "" });
+		const { env } = envWithIndex(
+			[
+				{
+					text: "Inspect the button in the lookbook.",
+					scoring_details: { vector_score: 0.91 },
+					item: {
+						key: "primer/page/lookbook.md",
+						metadata: {
+							system: "primer",
+							source: "Primer",
+							source_url: url,
+							content_hash: "hash-lookbook",
+						},
+					},
+				},
+			],
+			true,
+			{ PAGE_QUEUE: db },
+		);
+		expect(await searchCitations(env, { query: "button", k: 3 })).toEqual({ results: [] });
+		expect(await pageQueue.depth()).toBe(0);
+	});
+
+	it("keeps the page and retries when the search delete fails", async () => {
+		const db = memoryD1();
+		const url = "https://primer.style/view-components/lookbook/inspect/button";
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, last_indexed)
+				 VALUES ('primer', ?, 'seed', 'done', ?, 0, ?)`,
+			)
+			.bind(url, NOW, NOW)
+			.run();
+		const pageQueue = new UrlQueue(db);
+		await pageQueue.enqueue([{ url, systemId: "primer", op: "delete" }], clock());
+		await consumeQueue({
+			queue: pageQueue,
+			pages: db,
+			now: NOW,
+			limit: 5,
+			clock: clock(Date.parse(NOW) + 1000),
+			knownHashes: new Map(),
+			knownUrls: new Set(),
+			fetchPage: async () => page(200, "unused"),
+			upload: async () => undefined,
+			deletePage: async () => {
+				throw new Error("item delete failed item-1: overloaded");
+			},
+		});
+		expect(
+			await db
+				.prepare("SELECT status, attempts FROM page_work WHERE url = ?")
+				.bind(url)
+				.first<{ status: string; attempts: number }>(),
+		).toEqual({ status: "pending", attempts: 1 });
+		const left = await pageQueue.list();
+		expect(left.map((row) => ({ url: row.url, op: row.op, error: row.error }))).toEqual([
+			{ url, op: "delete", error: "item delete failed item-1: overloaded" },
+		]);
 		expect(Date.parse(left[0]?.enqueuedAt ?? NOW)).toBeGreaterThan(Date.parse(NOW));
 	});
 
