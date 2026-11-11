@@ -167,9 +167,9 @@ describe("fillHealthFrom", () => {
 		expectAlarm(body, ["fleet_freeze"]);
 	});
 
-	it("alarms fleet_freeze for a seed-drifted seed and not for Live idle", () => {
+	it("does not fleet_freeze a Live seed for a drifted hash alone", () => {
 		const drifted = fillHealthFrom(overlay(), CHECKED, { drifted: new Set(["antd"]) });
-		expectAlarm(drifted, ["fleet_freeze"]);
+		expect(drifted).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
 
 		const live = fillHealthFrom(
 			overlay({
@@ -202,7 +202,7 @@ describe("fillHealthFrom", () => {
 
 		const expiredAt = new Date(Date.parse(CHECKED) + CAP_RETRY_MS).toISOString();
 		const expired = fillHealthFrom(drained, expiredAt, { deferred, drifted });
-		expect(expired).toEqual({ fill: "alarm", alarms: ["fleet_freeze"], checkedAt: expiredAt });
+		expect(expired).toEqual({ fill: "ok", alarms: [], checkedAt: expiredAt });
 
 		const stillWaiting = fillHealthFrom(
 			overlay({
@@ -714,8 +714,9 @@ describe("GET /v1/fill-health", () => {
 		const drifted = await fleetEnv(now);
 		await drifted.env.INDEX?.delete(seedHashKey("antd"));
 		const driftedProbe = await probe(drifted);
-		expect(driftedProbe.body.alarms).toEqual(["fleet_freeze"]);
-		expect(driftedProbe.text).not.toContain('"fill":"ok"');
+		expect(driftedProbe.body.alarms).toEqual([]);
+		expect(driftedProbe.body.fill).toBe("ok");
+		expect(driftedProbe.text).toContain('"fill":"ok"');
 
 		const stuck = await fleetEnv(now, ["uswds"]);
 		await stuck.queue.enqueueUpsert(
@@ -781,8 +782,9 @@ describe("GET /v1/fill-health", () => {
 		await fleet.queue.clearCapDefer("paste");
 		await fleet.queue.noteCapDefer("paste", openedAt);
 		const expired = await probe(fleet);
-		expect(expired.body.alarms).toEqual(["fleet_freeze"]);
-		expect(expired.text).not.toContain('"fill":"ok"');
+		expect(expired.body.alarms).toEqual([]);
+		expect(expired.body.fill).toBe("ok");
+		expect(expired.text).toContain('"fill":"ok"');
 	});
 
 	it("does not hard_fail a sticky run error while discover or the queue is still filling", async () => {

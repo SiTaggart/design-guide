@@ -226,6 +226,9 @@ function freezeEligible(seed: SeedView, now: number, schedule: FillSchedule): bo
 	if (seed.phase === "empty") {
 		return true;
 	}
+	if (seed.phase === "live") {
+		return false;
+	}
 	return schedule.drifted?.has(seed.system) ?? false;
 }
 
