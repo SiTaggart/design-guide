@@ -122,6 +122,39 @@ describe("fillHealthFrom", () => {
 		expect(Object.keys(body)).toEqual(["fill", "alarms", "checkedAt"]);
 	});
 
+	it("does not fleet_freeze when every page is done and a Live seed hash has drifted", () => {
+		const body = fillHealthFrom(overlay(), CHECKED, { drifted: new Set(["antd"]) });
+		expect(body.alarms).not.toContain("fleet_freeze");
+		expect(body).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
+	});
+
+	it("alarms fleet_freeze when a seed has no pages and no lastDiscovered", () => {
+		const body = fillHealthFrom(
+			overlay({
+				freshness: liveRows({
+					antd: { lastCrawled: null, lastIndexed: null, lastDiscovered: null, done: 0 },
+				}),
+			}),
+			CHECKED,
+		);
+		expectAlarm(body, ["fleet_freeze"]);
+	});
+
+	it("alarms when pending pages have not been crawled for longer than the stall window", () => {
+		const lastCrawled = new Date(Date.parse(CHECKED) - 31 * 60 * 1000).toISOString();
+		const body = fillHealthFrom(
+			overlay({
+				freshness: liveRows({
+					primer: { pending: 2, done: 577, lastCrawled, lastIndexed: CHECKED, lastDiscovered: CHECKED },
+				}).map((row) => ({ ...row, lastCrawled })),
+			}),
+			CHECKED,
+		);
+		expect(body.fill).toBe("alarm");
+		expect(body.alarms).toContain("crawl_stalled");
+		expect(body.alarms).toContain("crawl_stalled:primer");
+	});
+
 	it("alarms fleet_freeze when discover is idle and an Empty seed remains", () => {
 		const body = fillHealthFrom(
 			overlay({
@@ -134,9 +167,9 @@ describe("fillHealthFrom", () => {
 		expectAlarm(body, ["fleet_freeze"]);
 	});
 
-	it("alarms fleet_freeze for a seed-drifted seed and not for Live idle", () => {
+	it("does not fleet_freeze a Live seed for a drifted hash alone", () => {
 		const drifted = fillHealthFrom(overlay(), CHECKED, { drifted: new Set(["antd"]) });
-		expectAlarm(drifted, ["fleet_freeze"]);
+		expect(drifted).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
 
 		const live = fillHealthFrom(
 			overlay({
@@ -150,10 +183,13 @@ describe("fillHealthFrom", () => {
 	});
 
 	it("does not fleet_freeze a capped seed while its cap-defer cooldown is open", () => {
-		const drained = overlay();
+		const drained = overlay({
+			systems: [{ ...systemError("paste", "crawl hit the 500 page limit"), hitLimit: true }],
+		});
 		const deferred = { paste: CHECKED };
 		const drifted = new Set<SystemId>(["paste"]);
 		const cooling = fillHealthFrom(drained, CHECKED, { deferred, drifted });
+		expect(cooling.alarms).not.toContain("fleet_freeze");
 		expect(cooling).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
 
 		const emptyCooling = fillHealthFrom(
@@ -681,8 +717,9 @@ describe("GET /v1/fill-health", () => {
 		const drifted = await fleetEnv(now);
 		await drifted.env.INDEX?.delete(seedHashKey("antd"));
 		const driftedProbe = await probe(drifted);
-		expect(driftedProbe.body.alarms).toEqual(["fleet_freeze"]);
-		expect(driftedProbe.text).not.toContain('"fill":"ok"');
+		expect(driftedProbe.body.alarms).toEqual([]);
+		expect(driftedProbe.body.fill).toBe("ok");
+		expect(driftedProbe.text).toContain('"fill":"ok"');
 
 		const stuck = await fleetEnv(now, ["uswds"]);
 		await stuck.queue.enqueueUpsert(
@@ -737,6 +774,11 @@ describe("GET /v1/fill-health", () => {
 	it("does not fleet_freeze a drained capped seed during the cap-defer hour", async () => {
 		const now = new Date().toISOString();
 		const fleet = await fleetEnv(now);
+		await writeStatus(fleet.env, {
+			...emptyStatus(false),
+			state: "ok",
+			systems: [{ ...systemError("paste", "crawl hit the 500 page limit"), hitLimit: true }],
+		});
 		await fleet.env.INDEX?.delete(seedHashKey("paste"));
 		await fleet.queue.noteCapDefer("paste", now);
 		const cooling = await probe(fleet);
