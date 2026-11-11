@@ -183,10 +183,13 @@ describe("fillHealthFrom", () => {
 	});
 
 	it("does not fleet_freeze a capped seed while its cap-defer cooldown is open", () => {
-		const drained = overlay();
+		const drained = overlay({
+			systems: [{ ...systemError("paste", "crawl hit the 500 page limit"), hitLimit: true }],
+		});
 		const deferred = { paste: CHECKED };
 		const drifted = new Set<SystemId>(["paste"]);
 		const cooling = fillHealthFrom(drained, CHECKED, { deferred, drifted });
+		expect(cooling.alarms).not.toContain("fleet_freeze");
 		expect(cooling).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
 
 		const emptyCooling = fillHealthFrom(
@@ -202,7 +205,7 @@ describe("fillHealthFrom", () => {
 
 		const expiredAt = new Date(Date.parse(CHECKED) + CAP_RETRY_MS).toISOString();
 		const expired = fillHealthFrom(drained, expiredAt, { deferred, drifted });
-		expect(expired).toEqual({ fill: "ok", alarms: [], checkedAt: expiredAt });
+		expect(expired).toEqual({ fill: "alarm", alarms: ["fleet_freeze"], checkedAt: expiredAt });
 
 		const stillWaiting = fillHealthFrom(
 			overlay({
@@ -771,6 +774,11 @@ describe("GET /v1/fill-health", () => {
 	it("does not fleet_freeze a drained capped seed during the cap-defer hour", async () => {
 		const now = new Date().toISOString();
 		const fleet = await fleetEnv(now);
+		await writeStatus(fleet.env, {
+			...emptyStatus(false),
+			state: "ok",
+			systems: [{ ...systemError("paste", "crawl hit the 500 page limit"), hitLimit: true }],
+		});
 		await fleet.env.INDEX?.delete(seedHashKey("paste"));
 		await fleet.queue.noteCapDefer("paste", now);
 		const cooling = await probe(fleet);
@@ -782,9 +790,8 @@ describe("GET /v1/fill-health", () => {
 		await fleet.queue.clearCapDefer("paste");
 		await fleet.queue.noteCapDefer("paste", openedAt);
 		const expired = await probe(fleet);
-		expect(expired.body.alarms).toEqual([]);
-		expect(expired.body.fill).toBe("ok");
-		expect(expired.text).toContain('"fill":"ok"');
+		expect(expired.body.alarms).toEqual(["fleet_freeze"]);
+		expect(expired.text).not.toContain('"fill":"ok"');
 	});
 
 	it("does not hard_fail a sticky run error while discover or the queue is still filling", async () => {
