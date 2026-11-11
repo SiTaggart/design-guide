@@ -122,6 +122,39 @@ describe("fillHealthFrom", () => {
 		expect(Object.keys(body)).toEqual(["fill", "alarms", "checkedAt"]);
 	});
 
+	it("does not fleet_freeze when every page is done and a Live seed hash has drifted", () => {
+		const body = fillHealthFrom(overlay(), CHECKED, { drifted: new Set(["antd"]) });
+		expect(body.alarms).not.toContain("fleet_freeze");
+		expect(body).toEqual({ fill: "ok", alarms: [], checkedAt: CHECKED });
+	});
+
+	it("alarms fleet_freeze when a seed has no pages and no lastDiscovered", () => {
+		const body = fillHealthFrom(
+			overlay({
+				freshness: liveRows({
+					antd: { lastCrawled: null, lastIndexed: null, lastDiscovered: null, done: 0 },
+				}),
+			}),
+			CHECKED,
+		);
+		expectAlarm(body, ["fleet_freeze"]);
+	});
+
+	it("alarms when pending pages have not been crawled for longer than the stall window", () => {
+		const lastCrawled = new Date(Date.parse(CHECKED) - 31 * 60 * 1000).toISOString();
+		const body = fillHealthFrom(
+			overlay({
+				freshness: liveRows({
+					primer: { pending: 2, done: 577, lastCrawled, lastIndexed: CHECKED, lastDiscovered: CHECKED },
+				}).map((row) => ({ ...row, lastCrawled })),
+			}),
+			CHECKED,
+		);
+		expect(body.fill).toBe("alarm");
+		expect(body.alarms).toContain("crawl_stalled");
+		expect(body.alarms).toContain("crawl_stalled:primer");
+	});
+
 	it("alarms fleet_freeze when discover is idle and an Empty seed remains", () => {
 		const body = fillHealthFrom(
 			overlay({
