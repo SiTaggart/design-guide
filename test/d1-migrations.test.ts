@@ -3,7 +3,8 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { memoryD1 } from "./helpers/d1.ts";
+import { D1PageQueue, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
+import { databaseAsD1, memoryD1 } from "./helpers/d1.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -49,6 +50,7 @@ const MIGRATIONS = [
 	"0023_discover_frontier_canon.sql",
 	"0024_primer_exclusion_deletes.sql",
 	"0025_drop_finished_primer_exclusions.sql",
+	"0026_reset_done_attempts.sql",
 ];
 
 function filesUnder(dir: string): string[] {
@@ -364,6 +366,104 @@ describe("page queue migrations", () => {
 		]);
 		const othersAfter = db.prepare("SELECT COUNT(*) AS n FROM page_work WHERE system_id != 'primer'").get() as { n: number };
 		expect(othersAfter.n).toBe(othersBefore.n);
+	});
+
+	it("clears attempts on finished pages and returns an over-cap failure to the claim path", async () => {
+		const db = new DatabaseSync(":memory:");
+		const repair = "0026_reset_done_attempts.sql";
+		for (const name of MIGRATIONS) {
+			if (name >= repair) {
+				break;
+			}
+			db.exec(readFileSync(join(root, "migrations", name), "utf8"));
+		}
+		const insert = db.prepare(
+			`INSERT INTO page_work (
+			   system_id, url, kind, status, enqueued_at, attempts, last_indexed, error, claimed_at
+			 ) VALUES (?, ?, 'seed', ?, '2026-10-01T00:00:00.000Z', ?, ?, ?, ?)`,
+		);
+		const finished = "https://primer.style/product/button";
+		const untouched = "https://primer.style/product/action-list";
+		const inProgress = "https://design-system.service.gov.uk/components/button";
+		const overCap = "https://primer.style/product/components/progress-bar";
+		const exhausted = "https://designsystem.digital.gov/components/button";
+		const cooling = "https://ant.design/components/button";
+		insert.run("primer", finished, "done", MAX_ATTEMPTS, "2026-10-01T00:00:00.000Z", null, null);
+		insert.run("primer", untouched, "done", 0, "2026-10-02T00:00:00.000Z", null, null);
+		insert.run("govuk", inProgress, "pending", MAX_ATTEMPTS - 1, null, null, null);
+		insert.run("primer", overCap, "failed", MAX_ATTEMPTS + 1, "2026-10-03T00:00:00.000Z", "fetch failed 422", null);
+		insert.run("uswds", exhausted, "failed", MAX_ATTEMPTS, null, "gave up", null);
+		insert.run("antd", cooling, "failed", MAX_ATTEMPTS, null, "fetch failed 422", "2026-10-28T00:00:00.000Z");
+		const sql = readFileSync(join(root, "migrations", repair), "utf8");
+		const readRows = () =>
+			db.prepare("SELECT system_id, url, status, attempts, error, claimed_at, last_indexed FROM page_work ORDER BY url").all();
+		db.exec(sql);
+		const after = readRows();
+		db.exec(sql);
+		expect(readRows()).toEqual(after);
+		expect(after).toEqual([
+			{
+				system_id: "antd",
+				url: cooling,
+				status: "failed",
+				attempts: MAX_ATTEMPTS,
+				error: "fetch failed 422",
+				claimed_at: "2026-10-28T00:00:00.000Z",
+				last_indexed: null,
+			},
+			{
+				system_id: "govuk",
+				url: inProgress,
+				status: "pending",
+				attempts: MAX_ATTEMPTS - 1,
+				error: null,
+				claimed_at: null,
+				last_indexed: null,
+			},
+			{
+				system_id: "uswds",
+				url: exhausted,
+				status: "failed",
+				attempts: MAX_ATTEMPTS,
+				error: "gave up",
+				claimed_at: null,
+				last_indexed: null,
+			},
+			{
+				system_id: "primer",
+				url: untouched,
+				status: "done",
+				attempts: 0,
+				error: null,
+				claimed_at: null,
+				last_indexed: "2026-10-02T00:00:00.000Z",
+			},
+			{
+				system_id: "primer",
+				url: finished,
+				status: "done",
+				attempts: 0,
+				error: null,
+				claimed_at: null,
+				last_indexed: "2026-10-01T00:00:00.000Z",
+			},
+			{
+				system_id: "primer",
+				url: overCap,
+				status: "pending",
+				attempts: 0,
+				error: null,
+				claimed_at: null,
+				last_indexed: "2026-10-03T00:00:00.000Z",
+			},
+		]);
+		const claimed = await new D1PageQueue(databaseAsD1(db)).claim(10, "2026-10-28T00:30:00.000Z");
+		const claimedUrls = claimed.map((item) => item.url);
+		expect(claimedUrls).toContain(overCap);
+		expect(claimedUrls).toContain(inProgress);
+		expect(claimedUrls).not.toContain(exhausted);
+		expect(claimedUrls).not.toContain(cooling);
+		expect(claimedUrls).not.toContain(finished);
 	});
 
 	it("keeps CREATE TABLE out of the worker source", () => {
