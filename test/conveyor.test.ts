@@ -3,7 +3,7 @@ import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { searchCitations } from "../src/index/ai-search.ts";
 import { contentHash } from "../src/index/content-hash.ts";
-import { MAX_ATTEMPTS } from "../src/index/page-queue.ts";
+import { D1PageQueue, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
 import worker from "../src/worker.ts";
 import type { SearchChunk } from "../src/config/types.ts";
 import {
@@ -718,6 +718,44 @@ describe("conveyor tick", () => {
 		expect(row).toEqual({ status: "failed", attempts: MAX_ATTEMPTS, error: "fetch failed 500" });
 		expect(status.queue.failed).toBe(1);
 		expect(primer).toMatchObject({ failed: 1, pending: 0 });
+	});
+
+	it("stays retryable when one refresh fails after the page had already used its attempts", async () => {
+		const db = memoryD1();
+		const url = "https://primer.style/product/components/progress-bar";
+		await db
+			.prepare(
+				`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, last_indexed)
+				 VALUES ('primer', ?, 'seed', 'done', ?, ?, ?)`,
+			)
+			.bind(url, "2026-10-01T00:00:00.000Z", MAX_ATTEMPTS, "2026-10-01T00:00:00.000Z")
+			.run();
+		const pageQueue = new UrlQueue(db);
+		const fetched = async (status: number) => {
+			await pageQueue.enqueue([{ url, systemId: "primer", op: "fetch" }], clock());
+			await consumeQueue({
+				queue: pageQueue,
+				pages: db,
+				now: NOW,
+				limit: 5,
+				clock: clock(Date.parse(NOW) + 1000),
+				knownHashes: new Map(),
+				knownUrls: new Set(),
+				fetchPage: async () => page(status, "Progress bar"),
+				upload: async () => undefined,
+				deletePage: async () => undefined,
+			});
+		};
+		await fetched(200);
+		await fetched(500);
+		expect(
+			await db
+				.prepare("SELECT status, attempts FROM page_work WHERE url = ?")
+				.bind(url)
+				.first<{ status: string; attempts: number }>(),
+		).toEqual({ status: "pending", attempts: 1 });
+		const claimed = await new D1PageQueue(db).claim(1, "2026-10-28T01:00:00.000Z");
+		expect(claimed.map((item) => item.url)).toEqual([url]);
 	});
 
 	it("keeps the prior lastIndexed when the page is unchanged", async () => {
