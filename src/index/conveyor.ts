@@ -331,7 +331,8 @@ async function finishPage(db: D1Database | undefined, row: QueueRow, now: string
 			   last_indexed = CASE WHEN ? = 1 THEN excluded.last_indexed ELSE page_work.last_indexed END,
 			   error = NULL,
 			   claimed_at = NULL,
-			   claim_token = NULL`,
+			   claim_token = NULL,
+			   attempts = 0`,
 		)
 		.bind(row.systemId, url, now, now, indexed ? now : null, indexed ? 1 : 0)
 		.run();
