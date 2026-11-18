@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SEED_HASH } from "../src/index/seed-hash.ts";
-import { readParks, writePark } from "../src/index/parks.ts";
-import { writeLastIndexedHashIfComplete } from "../src/index/indexed-hashes.ts";
+import { PARKS_KEY } from "../src/index/parks.ts";
 import { writeStatus } from "../src/index/status.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
@@ -40,7 +39,10 @@ describe("GET /v1/index-status", () => {
 	it("returns last-run JSON with parks, errors, and workflow id", async () => {
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
-		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
+		await kv.put(
+			PARKS_KEY,
+			JSON.stringify({ garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" } }),
+		);
 		await writeStatus(env, {
 			unbound: false,
 			workflowId: "reindex-drift-test",

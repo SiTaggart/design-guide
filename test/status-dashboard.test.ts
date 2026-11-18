@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SYSTEM_IDS } from "../src/config/types.ts";
-import { writePark } from "../src/index/parks.ts";
+import { PARKS_KEY } from "../src/index/parks.ts";
 import { SEED_HASH } from "../src/index/seed-hash.ts";
 import { emptyStatus, writeStatus, type IndexStatusDocument } from "../src/index/status.ts";
 import { queueMotion, renderStatusPage, systemPhase } from "../src/serve/status-page.ts";
@@ -85,7 +85,10 @@ describe("GET /status", () => {
 			.run();
 
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });
-		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
+		await kv.put(
+			PARKS_KEY,
+			JSON.stringify({ garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" } }),
+		);
 		await writeStatus(env, {
 			...emptyStatus(false),
 			workflowId: "discover-recrawl-primer",

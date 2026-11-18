@@ -1,13 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { SEEDS } from "../src/config/seed.ts";
 import { seedById } from "../src/config/seed.ts";
-import {
-	SEED_HASH,
-	catalogHash,
-	crawlBounds,
-	driftedSystems,
-	systemSeedHash,
-} from "../src/index/seed-hash.ts";
+import { SEED_HASH, catalogHash, crawlBounds, systemSeedHash } from "../src/index/seed-hash.ts";
 
 describe("seed hashes", () => {
 	it("is stable for the current catalog and per-seed payload", () => {
@@ -30,16 +24,5 @@ describe("seed hashes", () => {
 		const primer = seedById("primer");
 		const renamed = systemSeedHash({ ...primer, source: "Primer Renamed" });
 		expect(renamed).not.toBe(systemSeedHash(primer));
-		const indexed = Object.fromEntries(SEEDS.map((seed) => [seed.id, systemSeedHash(seed)]));
-		expect(driftedSystems({ ...indexed, primer: renamed })).toEqual(["primer"]);
-	});
-
-	it("lists systems whose stored hash is missing or different", () => {
-		const primer = systemSeedHash(seedById("primer"));
-		const indexed = Object.fromEntries(SEEDS.map((seed) => [seed.id, systemSeedHash(seed)]));
-		expect(driftedSystems(indexed)).toEqual([]);
-		expect(driftedSystems({ ...indexed, primer: "changed" })).toEqual(["primer"]);
-		const { primer: _drop, ...missing } = indexed;
-		expect(driftedSystems(missing)).toEqual(["primer"]);
 	});
 });

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { BROWSER_CRAWL_DEPTH, BROWSER_CRAWL_LIMIT, CRAWL_RUNAWAY_PAGES } from "../config/instance.ts";
 import { SEEDS } from "../config/seed.ts";
-import { SYSTEM_IDS, type Seed, type SystemId } from "../config/types.ts";
+import type { Seed, SystemId } from "../config/types.ts";
 
 export type CrawlBounds = {
 	browserCrawlLimit: number;
@@ -50,20 +50,3 @@ export function catalogHash(seeds: readonly Seed[] = SEEDS): string {
 }
 
 export const SEED_HASH = catalogHash();
-
-export function driftedSystems(
-	indexed: Readonly<Record<string, string>>,
-	seeds: readonly Seed[] = SEEDS,
-): SystemId[] {
-	return seeds.filter((seed) => indexed[seed.id] !== systemSeedHash(seed)).map((seed) => seed.id);
-}
-
-export function allSeedHashesMatch(
-	indexed: Readonly<Record<string, string>>,
-	seeds: readonly Seed[] = SEEDS,
-): boolean {
-	if (SYSTEM_IDS.some((id) => seeds.find((seed) => seed.id === id) === undefined)) {
-		return false;
-	}
-	return seeds.length === SYSTEM_IDS.length && driftedSystems(indexed, seeds).length === 0;
-}

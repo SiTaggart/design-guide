@@ -232,13 +232,6 @@ function admittedRecords(records: readonly CrawlRecord[], seed: Seed): CrawlReco
 	return [...byUrl.values()];
 }
 
-function indexableRecords(records: readonly CrawlRecord[], seed: Seed): CrawlRecord[] {
-	return admittedRecords(
-		records.filter((record) => record.status === "completed"),
-		seed,
-	);
-}
-
 async function uploadFittedRecords(
 	auth: ReindexAuth,
 	seed: Seed,
@@ -276,19 +269,6 @@ async function releaseFailedGeneration(
 		await deleteMatching(itemsAuth, (key) => key.startsWith(prefix), options);
 	}
 	return { keptPrevious: prior, indexed: 0 };
-}
-
-async function deleteGeneration(
-	auth: ReindexAuth,
-	system: SystemId,
-	generation: string,
-	options?: ItemRequestOptions,
-): Promise<void> {
-	await deleteMatching(
-		itemsAuthFrom(auth),
-		(key) => isSystemGenerationKey(key, system, generation),
-		options,
-	);
 }
 
 async function deletePreviousGeneration(

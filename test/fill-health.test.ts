@@ -2,12 +2,11 @@ import { describe, expect, it } from "vitest";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../src/config/types.ts";
 import type { WorkerEnv } from "../src/index/ai-search.ts";
-import { readIndexedHashes, writeIndexedHash } from "../src/index/indexed-hashes.ts";
 import type { SystemFreshness } from "../src/index/page-queue.ts";
-import { writePark } from "../src/index/parks.ts";
-import { driftedSystems, seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
+import { PARKS_KEY, readParks } from "../src/index/parks.ts";
+import { seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
 import { swapFromOutcome } from "../src/index/reindex.ts";
-import { emptyStatus, readStatus, runStateFrom, writeStatus, type IndexStatusDocument } from "../src/index/status.ts";
+import { emptyStatus, readStatus, writeStatus, type IndexStatusDocument } from "../src/index/status.ts";
 import { fillHealthFrom, type FillHealthBody } from "../src/serve/fill-health.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
@@ -362,7 +361,6 @@ describe("fillHealthFrom", () => {
 			hitLimit: false,
 			error: "crawl ended failed",
 		});
-		expect(runStateFrom([fromSwap])).toBe("fail");
 		expectAlarm(
 			fillHealthFrom(
 				overlay({
@@ -619,7 +617,13 @@ describe("GET /v1/fill-health", () => {
 		const mark = watch.counts();
 		const overlayDoc = await readStatus(env);
 		const afterOverlay = watch.counts();
-		const indexed = await readIndexedHashes(env);
+		const drifted = new Set<SystemId>();
+		for (const id of SYSTEM_IDS) {
+			const hash = await env.INDEX?.get(seedHashKey(id));
+			if (hash !== systemSeedHash(seedById(id))) {
+				drifted.add(id);
+			}
+		}
 		const afterHashes = watch.counts();
 
 		expect(response.status).toBe(200);
@@ -628,9 +632,7 @@ describe("GET /v1/fill-health", () => {
 		expect(body.fill).toBe("ok");
 		expect(body.checkedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 		expect(body).toEqual(
-			fillHealthFrom(overlayDoc, body.checkedAt, {
-				drifted: new Set(driftedSystems(indexed)),
-			}),
+			fillHealthFrom(overlayDoc, body.checkedAt, { drifted }),
 		);
 		expect(routeReads).toEqual({
 			gets: afterOverlay.gets - mark.gets + (afterHashes.gets - afterOverlay.gets),
@@ -753,7 +755,7 @@ describe("GET /v1/fill-health", () => {
 		expect(fillingProbe.text).toContain('"fill":"ok"');
 
 		const parked = await fleetEnv(now, ["garden"]);
-		await writePark(parked.env, "garden", 1, now);
+		await putPark(parked.env, "garden", 1, now);
 		await writeStatus(parked.env, {
 			...emptyStatus(false),
 			state: "ok",
@@ -817,9 +819,16 @@ async function fleetEnv(now: string, skip: readonly SystemId[] = []): Promise<Fl
 	const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });
 	await writeStatus(env, { ...emptyStatus(false), state: "ok" });
 	for (const systemId of SYSTEM_IDS) {
-		await writeIndexedHash(env, systemId, systemSeedHash(seedById(systemId)));
+		await env.INDEX?.put(seedHashKey(systemId), systemSeedHash(seedById(systemId)));
 	}
 	return { env, db };
+}
+
+async function putPark(env: WorkerEnv, system: SystemId, usable: number, at: string): Promise<void> {
+	const read = await readParks(env);
+	const parks = read.kind === "ok" ? { ...read.parks } : {};
+	parks[system] = { reason: "stub", usable, at };
+	await env.INDEX?.put(PARKS_KEY, JSON.stringify(parks));
 }
 
 async function probe(fleet: Fleet): Promise<{ text: string; body: FillHealthBody }> {

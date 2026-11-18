@@ -48,8 +48,6 @@ export type CrawlJobResult = {
 	cursor?: string | number | null;
 };
 
-export type CrawlJobSnapshot = { status: string } & CrawlCounts;
-
 export type StartResult = { jobId: string } | { httpStatus: number; detail: string };
 
 export class CrawlStartError extends Error {

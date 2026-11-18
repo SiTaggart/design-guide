@@ -58,13 +58,6 @@ export type IndexStatusDocument = {
 	discover: IndexDiscoverStatus | null;
 };
 
-export type ReindexParams = {
-	trigger: IndexTrigger;
-	systems: SystemId[];
-	catalogHash: string;
-	workflowId: string;
-};
-
 const EMPTY_ERRORS: Record<IndexErrorChannel, IndexErrorEntry[]> = {
 	crawl: [],
 	render: [],
@@ -125,13 +118,6 @@ export function countsFrom(
 		parked: Object.keys(parks).length,
 		errors: errorCount,
 	};
-}
-
-export function runStateFrom(results: readonly SystemReindexResult[], runError?: string): IndexRunState {
-	if (runError) {
-		return "fail";
-	}
-	return results.some((result) => classifyError(result) !== null) ? "fail" : "ok";
 }
 
 export function emptyStatus(unbound: boolean, lastIndexedHash: string | null = null): IndexStatusDocument {

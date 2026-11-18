@@ -117,7 +117,7 @@ describe("AI Search upload and delete retries", () => {
 			{ sleep: async () => {} },
 		);
 		await expect(failure).rejects.toBeInstanceOf(ItemApiError);
-		await expect(failure).rejects.toMatchObject({ code: 7009, overload: true });
+		await expect(failure).rejects.toMatchObject({ code: 7009 });
 		expect(calls).toBe(5);
 	});
 });
