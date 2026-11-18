@@ -3,8 +3,8 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { D1PageQueue, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
-import { databaseAsD1, memoryD1 } from "./helpers/d1.ts";
+import { MAX_ATTEMPTS } from "../src/index/page-queue.ts";
+import { memoryD1 } from "./helpers/d1.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -51,6 +51,7 @@ const MIGRATIONS = [
 	"0024_primer_exclusion_deletes.sql",
 	"0025_drop_finished_primer_exclusions.sql",
 	"0026_reset_done_attempts.sql",
+	"0027_drop_discover.sql",
 ];
 
 function filesUnder(dir: string): string[] {
@@ -88,26 +89,39 @@ describe("page queue migrations", () => {
 		expect(columns.results.map((column) => column.name)).toEqual(PAGE_WORK_COLUMNS_NOW);
 		const lease = await db.prepare("PRAGMA table_info(fill_lease)").all<{ name: string }>();
 		expect(lease.results.map((column) => column.name)).toEqual(["id", "owner", "claimed_at"]);
-		const resume = await db.prepare("PRAGMA table_info(discover_resume)").all<{ name: string }>();
-		expect(resume.results.map((column) => column.name)).toEqual(["system_id", "seed_hash", "yielded_at"]);
-		const discoverRun = await db.prepare("PRAGMA table_info(discover_run)").all<{ name: string }>();
-		const freshNames = discoverRun.results.map((column) => column.name);
+		const queue = await db.prepare("PRAGMA table_info(queue)").all<{ name: string }>();
+		expect(queue.results.map((column) => column.name)).toEqual([
+			"url",
+			"system_id",
+			"enqueued_at",
+			"error",
+			"op",
+		]);
+		const tables = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>();
+		const names = tables.results.map((row) => row.name);
+		for (const dropped of [
+			"discover_run",
+			"discover_resume",
+			"discover_url",
+			"discover_frontier",
+			"discover_indexable",
+			"discover_attempt",
+			"cap_defer",
+			"recovery_attempt",
+			"seed_refresh",
+		]) {
+			expect(names).not.toContain(dropped);
+		}
 		const migrated = new DatabaseSync(":memory:");
 		const tableNames = (sqlite: DatabaseSync) =>
 			(sqlite.prepare("PRAGMA table_info(discover_run)").all() as Array<{ name: string }>).map((row) => row.name);
 		const dropState = "0015_discover_run_drop_state.sql";
 		const beforeDrop = MIGRATIONS.slice(0, MIGRATIONS.indexOf(dropState));
-		const afterDrop = MIGRATIONS.slice(MIGRATIONS.indexOf(dropState));
 		for (const name of beforeDrop) migrated.exec(readFileSync(join(root, "migrations", name), "utf8"));
 		expect(tableNames(migrated)).toEqual(expect.arrayContaining(["state", "error", "slice_frontier_start", "slice_accepted"]));
-		for (const name of afterDrop) migrated.exec(readFileSync(join(root, "migrations", name), "utf8"));
-		const migratedNames = tableNames(migrated);
-		expect(migratedNames).toEqual(freshNames);
-		for (const names of [freshNames, migratedNames]) {
-			expect(names).not.toContain("state");
-			expect(names).not.toContain("error");
-		}
-		expect(freshNames).toEqual(expect.arrayContaining(["slice_frontier_start", "slice_accepted"]));
+		migrated.exec(readFileSync(join(root, "migrations", dropState), "utf8"));
+		expect(tableNames(migrated)).not.toContain("state");
+		expect(tableNames(migrated)).toEqual(expect.arrayContaining(["slice_frontier_start", "slice_accepted"]));
 	});
 
 	it("adds slice progress columns in the discover_resume migration", () => {
@@ -217,7 +231,7 @@ describe("page queue migrations", () => {
 		);
 		db.prepare("INSERT INTO discover_url (system_id, url) VALUES (?, ?)").run("govuk", "https://design-system.service.gov.uk/styles/");
 		for (const name of MIGRATIONS) {
-			if (name < "0019") {
+			if (name < "0019" || name >= "0027") {
 				continue;
 			}
 			db.exec(readFileSync(join(root, "migrations", name), "utf8"));
@@ -305,6 +319,9 @@ describe("page queue migrations", () => {
 		expect(frontier.map((row) => row.url)).toEqual(["https://primer.style/brand/visual-assets"]);
 		const govukDiscover = db.prepare("SELECT url FROM discover_url").all() as Array<{ url: string }>;
 		expect(govukDiscover.map((row) => row.url)).toEqual(["https://design-system.service.gov.uk/styles"]);
+		db.exec(readFileSync(join(root, "migrations/0027_drop_discover.sql"), "utf8"));
+		const left = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('discover_frontier', 'discover_url')").all();
+		expect(left).toEqual([]);
 	});
 
 	it("drops finished excluded primer pages that are no longer queued for delete", () => {
@@ -457,13 +474,15 @@ describe("page queue migrations", () => {
 				last_indexed: "2026-10-03T00:00:00.000Z",
 			},
 		]);
-		const claimed = await new D1PageQueue(databaseAsD1(db)).claim(10, "2026-10-28T00:30:00.000Z");
-		const claimedUrls = claimed.map((item) => item.url);
-		expect(claimedUrls).toContain(overCap);
-		expect(claimedUrls).toContain(inProgress);
-		expect(claimedUrls).not.toContain(exhausted);
-		expect(claimedUrls).not.toContain(cooling);
-		expect(claimedUrls).not.toContain(finished);
+		const claimable = db
+			.prepare("SELECT url FROM page_work WHERE status = 'pending' AND attempts < ?")
+			.all(MAX_ATTEMPTS) as Array<{ url: string }>;
+		const claimableUrls = claimable.map((row) => row.url);
+		expect(claimableUrls).toContain(overCap);
+		expect(claimableUrls).toContain(inProgress);
+		expect(claimableUrls).not.toContain(exhausted);
+		expect(claimableUrls).not.toContain(cooling);
+		expect(claimableUrls).not.toContain(finished);
 	});
 
 	it("keeps CREATE TABLE out of the worker source", () => {

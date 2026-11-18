@@ -7,7 +7,6 @@ import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { admittedUrl } from "../src/crawl/links.ts";
 import { applyRefresh, consumeQueue, conveyorTick, type FetchedPage } from "../src/index/conveyor.ts";
-import { D1PageQueue } from "../src/index/page-queue.ts";
 import { UrlQueue } from "../src/index/url-queue.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
 import { databaseAsD1, memoryD1 } from "./helpers/d1.ts";
@@ -98,20 +97,6 @@ describe("canonical inserts", () => {
 		);
 	});
 
-	it("stores one page_work row for slash and query spellings", async () => {
-		const db = memoryD1();
-		const pages = new D1PageQueue(db);
-		await pages.enqueueUpsert(
-			[
-				{ systemId: "primer", url: BUTTON_SLASH, kind: "seed" },
-				{ systemId: "primer", url: BUTTON_QUERY, kind: "seed" },
-			],
-			NOW,
-		);
-		const rows = await db.prepare("SELECT url FROM page_work WHERE system_id = ?").bind("primer").all<{ url: string }>();
-		expect(rows.results.map((row) => row.url)).toEqual([BUTTON]);
-	});
-
 	it("copies a canonical pending row and keeps the earlier queue enqueued_at", async () => {
 		const db = memoryD1();
 		const kv = memoryKV();
@@ -156,20 +141,6 @@ describe("canonical inserts", () => {
 			{ system_id: "primer", url: BUTTON, enqueued_at: earlier },
 			{ system_id: "uswds", url: USWDS, enqueued_at: insertedAt },
 		]);
-	});
-
-	it("stores one discover url and does not keep an excluded primer frontier", async () => {
-		const db = memoryD1();
-		const pages = new D1PageQueue(db);
-		await pages.stageUrl("primer", BUTTON_SLASH);
-		await pages.stageIndexable("primer", BUTTON_QUERY);
-		await pages.addFrontier("primer", [BUTTON_HASH, LOOKBOOK, OCTICON, PASCAL]);
-		const staged = await db.prepare("SELECT url FROM discover_url").all<{ url: string }>();
-		const indexable = await db.prepare("SELECT url FROM discover_indexable").all<{ url: string }>();
-		const frontier = await db.prepare("SELECT url FROM discover_frontier ORDER BY url").all<{ url: string }>();
-		expect(staged.results.map((row) => row.url)).toEqual([BUTTON]);
-		expect(indexable.results.map((row) => row.url)).toEqual([BUTTON]);
-		expect(frontier.results.map((row) => row.url)).toEqual([BUTTON, PASCAL].sort());
 	});
 
 	it("admits primer docs and rejects the lookbook and octicon icon pages", () => {

@@ -3,7 +3,7 @@ import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { searchCitations } from "../src/index/ai-search.ts";
 import { contentHash } from "../src/index/content-hash.ts";
-import { D1PageQueue, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
+import { MAX_ATTEMPTS } from "../src/index/page-queue.ts";
 import worker from "../src/worker.ts";
 import type { SearchChunk } from "../src/config/types.ts";
 import {
@@ -493,8 +493,6 @@ describe("conveyor tick", () => {
 		expect(report?.failed).toBe(0);
 		expect(report?.depth).toBe(SYSTEM_IDS.length * 4 - 3);
 		expect((await new UrlQueue(db).list()).some((row) => row.op === "sitemap")).toBe(true);
-		const discover = await db.prepare("SELECT system_id FROM discover_run").first();
-		expect(discover).toBeNull();
 	});
 
 	it("enqueues every known page on a weekly refresh, and an unchanged page uploads nothing", async () => {
@@ -642,14 +640,6 @@ describe("conveyor tick", () => {
 			)
 			.bind("primer", ABOUT, "2026-10-29T17:00:00.000Z")
 			.run();
-		await db
-			.prepare(
-				`INSERT INTO discover_run (
-				   system_id, kind, trigger_name, job_id, start_url, poll_failures, started_at, updated_at
-				 ) VALUES (?, 'seed', 'deploy-drift', 'job-patternfly', 'https://www.patternfly.org/', 0, ?, ?)`,
-			)
-			.bind("patternfly", "2026-10-29T17:20:00.000Z", "2026-10-29T17:20:00.000Z")
-			.run();
 		await writeStatus(env, {
 			...emptyStatus(false),
 			workflowId: "discover-deploy-drift-patternfly",
@@ -676,7 +666,7 @@ describe("conveyor tick", () => {
 		expect(report?.failed).toBe(0);
 		expect(status.queue).toMatchObject({ pending: 0, claimed: 0, failed: 0 });
 		expect(primer).toMatchObject({ pending: 0, lastCrawled: NOW });
-		expect(status.discover?.systemId).toBe("patternfly");
+		expect(status.discover).toBeNull();
 		expect(status.state).toBe("ok");
 	});
 
@@ -754,8 +744,6 @@ describe("conveyor tick", () => {
 				.bind(url)
 				.first<{ status: string; attempts: number }>(),
 		).toEqual({ status: "pending", attempts: 1 });
-		const claimed = await new D1PageQueue(db).claim(1, "2026-10-28T01:00:00.000Z");
-		expect(claimed.map((item) => item.url)).toEqual([url]);
 	});
 
 	it("keeps the prior lastIndexed when the page is unchanged", async () => {

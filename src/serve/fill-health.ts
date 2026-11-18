@@ -2,8 +2,6 @@ import { seedById } from "../config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../config/types.ts";
 import type { WorkerEnv } from "../index/ai-search.ts";
 import { isCrawlCapError, seedFailure } from "../index/crawl-cap.ts";
-import { capCooling, type CapDeferMark } from "../index/discover.ts";
-import { D1PageQueue } from "../index/page-queue.ts";
 import { seedHashKey, systemSeedHash } from "../index/seed-hash.ts";
 import type { IndexStatusDocument } from "../index/status.ts";
 import { readIndexOverlay } from "./index-status.ts";
@@ -21,7 +19,6 @@ export type FillHealthBody = {
 };
 
 export type FillSchedule = {
-	deferred?: Readonly<Record<string, CapDeferMark>>;
 	drifted?: ReadonlySet<SystemId>;
 };
 
@@ -60,8 +57,7 @@ export async function handleFillHealth(env: WorkerEnv): Promise<Response> {
 }
 
 async function readFillSchedule(env: WorkerEnv): Promise<FillSchedule> {
-	const [deferred, drifted] = await Promise.all([readCapDefers(env), readDriftedSeeds(env)]);
-	return { deferred, drifted };
+	return { drifted: await readDriftedSeeds(env) };
 }
 
 async function readDriftedSeeds(env: WorkerEnv): Promise<Set<SystemId>> {
@@ -91,29 +87,11 @@ async function readDriftedSeeds(env: WorkerEnv): Promise<Set<SystemId>> {
 	return drifted;
 }
 
-async function readCapDefers(env: WorkerEnv): Promise<Record<string, CapDeferMark>> {
-	if (!env.PAGE_QUEUE) {
-		return {};
-	}
-	try {
-		const queue = new D1PageQueue(env.PAGE_QUEUE);
-		return await queue.capDeferMarks();
-	} catch (error) {
-		console.log(
-			JSON.stringify({
-				event: "fill_health_defer_unread",
-				error: error instanceof Error ? error.message : String(error),
-			}),
-		);
-		return {};
-	}
-}
-
 function fillAlarms(document: IndexStatusDocument, now: number, schedule: FillSchedule): string[] {
 	const seeds = seedViews(document);
 	const alarms: string[] = [];
 	const idle = document.queue.pending + document.queue.claimed === 0;
-	if (document.discover === null && idle && seeds.some((seed) => freezeEligible(seed, now, schedule))) {
+	if (document.discover === null && idle && seeds.some((seed) => freezeEligible(seed, schedule))) {
 		alarms.push("fleet_freeze");
 	}
 	for (const seed of seeds) {
@@ -219,8 +197,8 @@ function seedViews(document: IndexStatusDocument): SeedView[] {
 	});
 }
 
-function freezeEligible(seed: SeedView, now: number, schedule: FillSchedule): boolean {
-	if (seed.parked || capCooling(seed.system, schedule.deferred ?? {}, now)) {
+function freezeEligible(seed: SeedView, schedule: FillSchedule): boolean {
+	if (seed.parked) {
 		return false;
 	}
 	if (seed.phase === "empty") {

@@ -32,15 +32,6 @@ async function writeHold(env: WorkerEnv, systems: Set<SystemId>): Promise<void> 
 	await env.INDEX.put(RETRIEVAL_HOLD_KEY, JSON.stringify([...systems]));
 }
 
-export async function holdRetrieval(env: WorkerEnv, system: SystemId): Promise<void> {
-	const read = await readRetrievalHold(env);
-	if (read.kind === "unread") {
-		return;
-	}
-	read.systems.add(system);
-	await writeHold(env, read.systems);
-}
-
 export async function clearRetrievalHold(env: WorkerEnv, system: SystemId): Promise<void> {
 	const read = await readRetrievalHold(env);
 	if (read.kind === "unread" || !read.systems.has(system)) {

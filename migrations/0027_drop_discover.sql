@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS discover_run;
+DROP TABLE IF EXISTS discover_resume;
+DROP TABLE IF EXISTS discover_url;
+DROP TABLE IF EXISTS discover_frontier;
+DROP TABLE IF EXISTS discover_indexable;
+DROP TABLE IF EXISTS discover_attempt;
+DROP TABLE IF EXISTS cap_defer;
+DROP TABLE IF EXISTS recovery_attempt;
+DROP TABLE IF EXISTS seed_refresh;

@@ -33,25 +33,10 @@
 			"migrations_dir": "migrations"
 		}
 	],
-	"workflows": [
-		{
-			"name": "design-guide-reindex",
-			"binding": "REINDEX",
-			"class_name": "ReindexWorkflow",
-			"limits": {
-				"steps": 25000
-			}
-		}
-	],
 	"limits": {
 		"subrequests": 1000000
 	},
 	"secrets": {
 		"required": ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN", "STATUS_TOKEN"]
-	},
-	"send_email": [
-		{
-			"name": "EMAIL"
-		}
-	]
+	}
 }

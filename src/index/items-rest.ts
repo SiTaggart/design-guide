@@ -29,18 +29,12 @@ const ALREADY_EXISTS_CODE = 7042;
 
 export class ItemApiError extends Error {
 	readonly code: number | null;
-	readonly overload: boolean;
 
 	constructor(message: string, code: number | null) {
 		super(message);
 		this.name = "ItemApiError";
 		this.code = code;
-		this.overload = code !== null && RETRYABLE_ITEM_CODES.has(code);
 	}
-}
-
-export function isItemOverload(error: unknown): boolean {
-	return error instanceof ItemApiError && error.overload;
 }
 
 export type ItemRequestOptions = {
@@ -295,21 +289,5 @@ export async function deleteItem(
 			`item delete failed ${itemId}: ${JSON.stringify(data.errors ?? data)}`,
 			itemErrorCode(data),
 		);
-	}
-}
-
-export async function deleteItemByKey(
-	auth: ItemsAuth,
-	key: string,
-	options?: ItemRequestOptions,
-): Promise<void> {
-	try {
-		const item = await findItemByKey(auth, key, options);
-		await deleteItem(auth, item.id, options);
-	} catch (error) {
-		if (error instanceof Error && error.message.includes("was not found")) {
-			return;
-		}
-		throw error;
 	}
 }

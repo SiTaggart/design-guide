@@ -4,7 +4,6 @@ import { isCrawlCapError } from "./crawl-cap.ts";
 import {
 	D1PageQueue,
 	emptyDepths,
-	type DiscoverRun,
 	type QueueDepths,
 	type SystemFreshness,
 } from "./page-queue.ts";
@@ -34,7 +33,7 @@ export type IndexStatusCounts = {
 export type IndexDiscoverStatus = {
 	systemId: SystemId;
 	jobId: string;
-	kind: DiscoverRun["kind"];
+	kind: "seed" | "reindex";
 	trigger: IndexTrigger;
 	startedAt: string;
 };
@@ -59,35 +58,11 @@ export type IndexStatusDocument = {
 	discover: IndexDiscoverStatus | null;
 };
 
-export type ReindexParams = {
-	trigger: IndexTrigger;
-	systems: SystemId[];
-	catalogHash: string;
-	workflowId: string;
-};
-
 const EMPTY_ERRORS: Record<IndexErrorChannel, IndexErrorEntry[]> = {
 	crawl: [],
 	render: [],
 	index: [],
 };
-
-const LIVE_WORKFLOW = new Set(["queued", "running", "paused", "waiting", "waitingForPause"]);
-
-export async function isWorkflowLive(
-	env: WorkerEnv,
-	workflowId: string | null | undefined,
-): Promise<boolean> {
-	if (!env.REINDEX || !workflowId) {
-		return false;
-	}
-	try {
-		const live = await (await env.REINDEX.get(workflowId)).status();
-		return LIVE_WORKFLOW.has(live.status);
-	} catch {
-		return false;
-	}
-}
 
 export function classifyMessage(error: string): IndexErrorChannel {
 	const lowered = error.toLowerCase();
@@ -145,13 +120,6 @@ export function countsFrom(
 	};
 }
 
-export function runStateFrom(results: readonly SystemReindexResult[], runError?: string): IndexRunState {
-	if (runError) {
-		return "fail";
-	}
-	return results.some((result) => classifyError(result) !== null) ? "fail" : "ok";
-}
-
 export function emptyStatus(unbound: boolean, lastIndexedHash: string | null = null): IndexStatusDocument {
 	return {
 		unbound,
@@ -166,19 +134,6 @@ export function emptyStatus(unbound: boolean, lastIndexedHash: string | null = n
 		queue: emptyDepths(),
 		freshness: [],
 		discover: null,
-	};
-}
-
-function discoverFromRun(run: DiscoverRun | null): IndexDiscoverStatus | null {
-	if (!run) {
-		return null;
-	}
-	return {
-		systemId: run.systemId,
-		jobId: run.jobId,
-		kind: run.kind,
-		trigger: run.trigger,
-		startedAt: run.startedAt,
 	};
 }
 
@@ -238,12 +193,8 @@ export async function readStatus(env: WorkerEnv): Promise<IndexStatusDocument> {
 	}
 	try {
 		const queue = new D1PageQueue(env.PAGE_QUEUE);
-		const [depths, freshness, run] = await Promise.all([
-			queue.depths(),
-			queue.freshness(),
-			queue.running(),
-		]);
-		return { ...stored, queue: depths, freshness, discover: discoverFromRun(run) };
+		const [depths, freshness] = await Promise.all([queue.depths(), queue.freshness()]);
+		return { ...stored, queue: depths, freshness, discover: null };
 	} catch (error) {
 		console.log(
 			JSON.stringify({
@@ -260,131 +211,4 @@ export async function writeStatus(env: WorkerEnv, document: IndexStatusDocument)
 		return;
 	}
 	await env.INDEX.put(STATUS_KEY, JSON.stringify(document));
-}
-
-export async function startStatusRun(
-	env: WorkerEnv,
-	params: Pick<ReindexParams, "trigger" | "workflowId">,
-	startedAt = new Date().toISOString(),
-): Promise<IndexStatusDocument> {
-	const current = await readStoredStatus(env);
-	if (
-		current.state === "running" &&
-		current.workflowId &&
-		current.workflowId !== params.workflowId &&
-		(await isWorkflowLive(env, current.workflowId))
-	) {
-		return current;
-	}
-	const lastIndexedHash = await readLastIndexedHash(env);
-	const parksRead = await readParks(env);
-	const parks = parksRead.kind === "ok" ? parksRead.parks : current.parks;
-	const document: IndexStatusDocument = {
-		unbound: false,
-		workflowId: params.workflowId,
-		trigger: params.trigger,
-		state: "running",
-		startedAt,
-		finishedAt: null,
-		seedHash: SEED_HASH,
-		lastIndexedHash,
-		parks,
-		unparked: [],
-		systems: [],
-		errors: { crawl: [], render: [], index: [] },
-		counts: countsFrom([], parks),
-		runError: undefined,
-		queue: current.queue ?? emptyDepths(),
-		freshness: current.freshness ?? [],
-		discover: null,
-	};
-	await writeStatus(env, document);
-	return document;
-}
-
-export async function recordSystemResult(
-	env: WorkerEnv,
-	result: SystemReindexResult,
-	unparked?: SystemId,
-): Promise<IndexStatusDocument> {
-	const current = await readStoredStatus(env);
-	const systems = [...current.systems.filter((entry) => entry.system !== result.system), result];
-	const parksRead = await readParks(env);
-	const parks = parksRead.kind === "ok" ? parksRead.parks : current.parks;
-	const nextUnparked = unparked
-		? [...new Set([...(current.unparked ?? []), unparked])]
-		: (current.unparked ?? []);
-	const document: IndexStatusDocument = {
-		...current,
-		unbound: false,
-		parks,
-		unparked: nextUnparked,
-		systems,
-		errors: errorsFromResults(systems),
-		counts: countsFrom(systems, parks),
-	};
-	await writeStatus(env, document);
-	return document;
-}
-
-export async function finishStatusRun(
-	env: WorkerEnv,
-	results: readonly SystemReindexResult[],
-	finishedAt = new Date().toISOString(),
-	workflowId?: string,
-	runError?: string,
-): Promise<IndexStatusDocument> {
-	const current = await readStoredStatus(env);
-	if (
-		workflowId &&
-		current.workflowId &&
-		current.workflowId !== workflowId &&
-		(await isWorkflowLive(env, current.workflowId))
-	) {
-		return current;
-	}
-	const parksRead = await readParks(env);
-	const parks = parksRead.kind === "ok" ? parksRead.parks : current.parks;
-	const document: IndexStatusDocument = {
-		...current,
-		unbound: false,
-		workflowId: workflowId ?? current.workflowId,
-		state: runStateFrom(results, runError),
-		finishedAt,
-		lastIndexedHash: await readLastIndexedHash(env),
-		parks,
-		unparked: current.unparked ?? [],
-		systems: [...results],
-		runError,
-		errors: errorsFromResults(results, runError),
-		counts: countsFrom(results, parks, runError),
-	};
-	await writeStatus(env, document);
-	return document;
-}
-
-export async function notifyFailOrPark(
-	env: WorkerEnv,
-	document: IndexStatusDocument,
-	kind: "fail" | "park",
-): Promise<void> {
-	const payload = { event: kind === "park" ? "index_park" : "index_fail", ...document };
-	console.log(JSON.stringify(payload));
-	if (!env.INDEX_WEBHOOK_URL) {
-		return;
-	}
-	try {
-		await fetch(env.INDEX_WEBHOOK_URL, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(payload),
-		});
-	} catch (error) {
-		console.log(
-			JSON.stringify({
-				event: "index_webhook_failed",
-				error: error instanceof Error ? error.message : String(error),
-			}),
-		);
-	}
 }

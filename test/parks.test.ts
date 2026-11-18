@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { SYSTEM_IDS } from "../src/config/types.ts";
+import { SYSTEM_IDS, type SystemId } from "../src/config/types.ts";
+import type { WorkerEnv } from "../src/index/ai-search.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV, parksKvGetRaw, parksKvGetThrows } from "./helpers/index-env.ts";
-import { liveSystemIds, loadLiveSystemIds, PARKS_KEY, readParks, writePark } from "../src/index/parks.ts";
-import { persistSystemOutcome } from "../src/index/trigger.ts";
-import { startStatusRun } from "../src/index/status.ts";
+import { clearPark, liveSystemIds, loadLiveSystemIds, PARKS_KEY, readParks } from "../src/index/parks.ts";
 import { parseSearchFields } from "../src/serve/parse.ts";
 import worker from "../src/worker.ts";
 
@@ -42,7 +41,7 @@ describe("park state", () => {
 	it("writes a stub park that parse and HTTP search treat as unknown", async () => {
 		const kv = memoryKV();
 		const { env, calls } = envWithIndex(fixtureChunks, true, { INDEX: kv });
-		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
+		await putPark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
 		expect(await readParks(env)).toEqual({
 			kind: "ok",
 			parks: { garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" } },
@@ -71,7 +70,7 @@ describe("park state", () => {
 	it("drops parked-system citations from an unfiltered search", async () => {
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
-		await writePark(env, "paste", 0);
+		await putPark(env, "paste", 0);
 		const response = await worker.fetch(
 			new Request("https://example.test/v1/search", {
 				method: "POST",
@@ -87,7 +86,7 @@ describe("park state", () => {
 	it("excludes parked systems at retrieval so they do not consume k", async () => {
 		const kv = memoryKV();
 		const { env, calls } = envWithIndex(fixtureChunks, true, { INDEX: kv });
-		await writePark(env, "paste", 0);
+		await putPark(env, "paste", 0);
 		const response = await worker.fetch(
 			new Request("https://example.test/v1/search", {
 				method: "POST",
@@ -105,7 +104,7 @@ describe("park state", () => {
 	it("excludes a parked system from the MCP skill enum", async () => {
 		const kv = memoryKV();
 		const { env, calls } = envWithIndex(fixtureChunks, true, { INDEX: kv });
-		await writePark(env, "garden", 1);
+		await putPark(env, "garden", 1);
 		const listed = (await mcpRpc(env, { jsonrpc: "2.0", id: 1, method: "tools/list" })) as {
 			result: { tools: Array<{ inputSchema: { properties?: { system?: { enum?: string[] } } } }> };
 		};
@@ -129,7 +128,7 @@ describe("park state", () => {
 		const kv = memoryKV();
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
 		for (const id of SYSTEM_IDS) {
-			await writePark(env, id, 0);
+			await putPark(env, id, 0);
 		}
 		const listed = (await mcpRpc(env, { jsonrpc: "2.0", id: 1, method: "tools/list" })) as {
 			result: { tools: Array<{ inputSchema: { properties?: { system?: { enum?: string[] } } } }> };
@@ -153,7 +152,7 @@ describe("park state", () => {
 		};
 		const kv = memoryKV();
 		const { env, calls } = envWithIndex([gardenChunk], true, { INDEX: kv });
-		await writePark(env, "garden", 1);
+		await putPark(env, "garden", 1);
 		const parked = await worker.fetch(
 			new Request("https://example.test/v1/search", {
 				method: "POST",
@@ -165,17 +164,7 @@ describe("park state", () => {
 		expect(parked.status).toBe(200);
 		expect(await parked.json()).toEqual({ results: [] });
 		expect(calls).toEqual([]);
-		await startStatusRun(env, { trigger: "recovery", workflowId: "reindex-recovery-live" });
-		await persistSystemOutcome(env, {
-			system: "garden",
-			startUrl: "https://garden.zendesk.com/",
-			crawl: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
-			indexed: 2,
-			hitLimit: false,
-			keptPrevious: false,
-			parked: false,
-			usable: 2,
-		});
+		await clearPark(env, "garden");
 		expect(parseSearchFields({ query: "focus", system: "garden" }, await loadLiveSystemIds(env))).toEqual({
 			kind: "ok",
 			params: { query: "focus", k: undefined, system: "garden" },
@@ -244,13 +233,6 @@ describe("park state", () => {
 		});
 	});
 
-	it("does not write parks when the existing map is unread", async () => {
-		const kv = parksKvGetThrows(memoryKV());
-		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv });
-		await writePark(env, "garden", 1);
-		expect(kv.store.get(PARKS_KEY)).toBeUndefined();
-	});
-
 	it("returns 503 index_not_ready from search and MCP when parks are unread", async () => {
 		const kv = parksKvGetThrows(memoryKV());
 		const { env, calls } = envWithIndex(fixtureChunks, true, { INDEX: kv });
@@ -289,3 +271,10 @@ describe("park state", () => {
 		}
 	});
 });
+
+async function putPark(env: WorkerEnv, system: SystemId, usable: number, at = new Date().toISOString()): Promise<void> {
+	const read = await readParks(env);
+	const parks = read.kind === "ok" ? { ...read.parks } : {};
+	parks[system] = { reason: "stub", usable, at };
+	await env.INDEX?.put(PARKS_KEY, JSON.stringify(parks));
+}

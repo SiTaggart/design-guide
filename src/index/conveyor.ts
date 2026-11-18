@@ -15,7 +15,7 @@ import {
 } from "./refresh-delta.ts";
 import { clearPark } from "./parks.ts";
 import { clearRetrievalHold } from "./retrieval-hold.ts";
-import { isWorkflowLive, readStoredStatus, writeStatus } from "./status.ts";
+import { readStoredStatus, writeStatus } from "./status.ts";
 import { readMarks, writeMark, UrlQueue, type QueueRow } from "./url-queue.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 export const REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
@@ -271,9 +271,6 @@ async function copyPendingPageWork(db: D1Database): Promise<void> {
 async function settleStaleRun(env: WorkerEnv, now: Date): Promise<void> {
 	const current = await readStoredStatus(env);
 	if (current.state !== "running") {
-		return;
-	}
-	if (await isWorkflowLive(env, current.workflowId)) {
 		return;
 	}
 	await writeStatus(env, {

@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { SYSTEM_IDS } from "../src/config/types.ts";
-import { D1PageQueue } from "../src/index/page-queue.ts";
-import { writePark } from "../src/index/parks.ts";
+import { PARKS_KEY } from "../src/index/parks.ts";
 import { SEED_HASH } from "../src/index/seed-hash.ts";
 import { emptyStatus, writeStatus, type IndexStatusDocument } from "../src/index/status.ts";
 import { queueMotion, renderStatusPage, systemPhase } from "../src/serve/status-page.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { memoryD1, stampClaim } from "./helpers/d1.ts";
+import { memoryD1 } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
 const STATUS_TOKEN = "test-status-token";
@@ -67,44 +66,29 @@ describe("GET /status", () => {
 	it("reads live discover and renders the same document as /v1/index-status", async () => {
 		const kv = memoryKV();
 		const db = memoryD1();
-		const queue = new D1PageQueue(db);
-		await queue.enqueueUpsert(
-			[
-				{ systemId: "primer", url: "https://primer.style/a", kind: "reindex" },
-				{ systemId: "primer", url: "https://primer.style/b", kind: "reindex" },
-				{ systemId: "uswds", url: "https://designsystem.digital.gov/a", kind: "reindex" },
-				{ systemId: "paste", url: "https://paste-dsys.com/a", kind: "seed" },
-			],
-			NOW,
+		const insert = db.prepare(
+			`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, error, claimed_at, last_crawled, last_indexed, item_key)
+			 VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
 		);
-		await db
-			.prepare("UPDATE page_work SET status = 'failed', error = ? WHERE system_id = ?")
-			.bind("render failed", "uswds")
+		insert.bind("primer", "https://primer.style/a", "reindex", "pending", NOW, null, null, null, null, null).run();
+		insert.bind("primer", "https://primer.style/b", "reindex", "claimed", NOW, null, NOW, null, null, null).run();
+		insert
+			.bind("uswds", "https://designsystem.digital.gov/a", "reindex", "failed", NOW, "render failed", null, null, null, null)
 			.run();
+		insert.bind("paste", "https://paste-dsys.com/a", "seed", "done", NOW, null, null, NOW, NOW, "paste/key").run();
 		await db
-			.prepare("UPDATE page_work SET status = 'claimed', claimed_at = ? WHERE system_id = ? AND url = ?")
-			.bind(NOW, "primer", "https://primer.style/b")
+			.prepare(
+				`INSERT INTO system_mark (system_id, last_discovered) VALUES ('paste', ?)
+				 ON CONFLICT(system_id) DO UPDATE SET last_discovered = excluded.last_discovered`,
+			)
+			.bind(NOW)
 			.run();
-		await queue.complete(
-			await stampClaim(db, "paste", "https://paste-dsys.com/a", NOW),
-			{ lastCrawled: NOW, lastIndexed: NOW },
-			"paste/key",
-		);
-		await queue.markDiscovered("paste", NOW);
-		await queue.insertRun({
-			systemId: "primer",
-			kind: "reindex",
-			trigger: "recrawl",
-			jobId: "job-primer-1",
-			startUrl: "https://primer.style/",
-			cursor: null,
-			pollFailures: 0,
-			startedAt: NOW,
-			now: NOW,
-		});
 
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });
-		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");
+		await kv.put(
+			PARKS_KEY,
+			JSON.stringify({ garden: { reason: "stub", usable: 1, at: "2026-09-27T00:00:00.000Z" } }),
+		);
 		await writeStatus(env, {
 			...emptyStatus(false),
 			workflowId: "discover-recrawl-primer",
@@ -141,19 +125,15 @@ describe("GET /status", () => {
 		const body = (await jsonResponse.json()) as IndexStatusDocument;
 		const html = await htmlResponse.text();
 
-		expect(body.discover).toEqual({
-			systemId: "primer",
-			jobId: "job-primer-1",
-			kind: "reindex",
-			trigger: "recrawl",
-			startedAt: NOW,
-		});
+		expect(body.discover).toBeNull();
 		expect(body.state).toBe("running");
 		expect(body.trigger).toBe("recrawl");
 		expect(body.queue).toEqual({ pending: 1, claimed: 1, failed: 1, done: 1 });
 		expect(body.runError).toBeUndefined();
 		expect(html).not.toContain(STATUS_TOKEN);
 		expect(html).not.toContain("stale-kv-job");
+		expect(html).toContain('data-discover="none"');
+		expect(html).toContain("No active discover");
 		expect(html).toContain('data-queue="filling"');
 		expect(html).not.toContain("Queue stuck");
 		expect(html).toContain("Filling.");
@@ -169,11 +149,6 @@ describe("GET /status", () => {
 			["queue.claimed", body.queue.claimed],
 			["queue.failed", body.queue.failed],
 			["queue.done", body.queue.done],
-			["discover.systemId", body.discover?.systemId],
-			["discover.jobId", body.discover?.jobId],
-			["discover.kind", body.discover?.kind],
-			["discover.trigger", body.discover?.trigger],
-			["discover.startedAt", body.discover?.startedAt],
 		] as const) {
 			expect(html).toContain(`data-field="${field[0]}">${field[1]}`);
 		}

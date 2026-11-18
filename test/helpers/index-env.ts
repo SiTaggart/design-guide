@@ -1,7 +1,6 @@
 import type { SearchCall, SystemFilter, WorkerEnv } from "../../src/index/ai-search.ts";
 import type { SearchChunk } from "../../src/config/types.ts";
 import { PARKS_KEY } from "../../src/index/parks.ts";
-import type { ReindexParams } from "../../src/index/status.ts";
 
 function matchesSystemFilter(system: unknown, filter?: SystemFilter): boolean {
 	if (filter === undefined) {
@@ -67,32 +66,6 @@ export function memoryKV(init: Record<string, string> = {}): KVNamespace & { sto
 			cacheStatus: null,
 		})) as unknown as KVNamespace["getWithMetadata"],
 	} as KVNamespace & { store: Map<string, string> };
-}
-
-export function mockWorkflow(options?: {
-	existingStatus?: string;
-	existingId?: string;
-}): {
-	created: Array<{ id?: string; params?: ReindexParams }>;
-	binding: Workflow;
-} {
-	const created: Array<{ id?: string; params?: ReindexParams }> = [];
-	const binding = {
-		create: async (opts?: { id?: string; params?: ReindexParams }) => {
-			created.push({ id: opts?.id, params: opts?.params });
-			return {
-				id: opts?.id ?? "wf-new",
-				status: async () => ({ status: "running" as const }),
-			};
-		},
-		get: async (id: string) => ({
-			id,
-			status: async () => ({
-				status: (options?.existingId === id ? options.existingStatus : "complete") as "complete",
-			}),
-		}),
-	};
-	return { created, binding: binding as unknown as Workflow };
 }
 
 export function envWithIndex(
