@@ -197,7 +197,7 @@ Change the seed and deploy. The Worker bundle carries a seed hash. The cron drai
 
 `GET /status` and `GET /v1/index-status` are the fill record: queue depths, per-system crawl and index timestamps, parks, unparked ids, and crawl/render/index errors. `discover` is null. `GET /v1/fill-health` alarms from that record and per-seed hash drift: `fleet_freeze`, `stuck:<systemId>`, `pending_no_claims:<systemId>`, `hard_fail`, and `crawl_stalled`. A Live seed with a drifted KV hash is not a freeze. Slack is not the health path. Those routes require `STATUS_TOKEN`.
 
-The cron does not send discover mail. `wrangler.jsonc` still binds `EMAIL` as `{ "name": "EMAIL" }`. There is no REST/SMTP path, no Resend, Mailchannels, SES, or agent mailer. The Worker secrets are **CLOUDFLARE_ACCOUNT_ID**, **CLOUDFLARE_API_TOKEN**, and **STATUS_TOKEN**. Set the status secret with `bunx wrangler secret put STATUS_TOKEN`.
+The Worker does not send index mail. The Worker secrets are **CLOUDFLARE_ACCOUNT_ID**, **CLOUDFLARE_API_TOKEN**, and **STATUS_TOKEN**. Set the status secret with `bunx wrangler secret put STATUS_TOKEN`.
 
 ## Reindex
 
@@ -250,7 +250,7 @@ A merge to `main` deploys the production Worker `design-guide` only after the `C
 
 Create a custom API token scoped to this one account, with only these account permissions:
 
-- **Workers Scripts Edit.** This is the permission `wrangler deploy` uses for the existing Worker. It covers cron triggers (`PUT /accounts/{account_id}/workers/scripts/{script}/schedules`; Workers Scripts write includes triggers), the `send_email` binding, and attaching the existing KV, D1, and AI Search bindings. This repo's Wrangler (`4.129.1`) treats a KV namespace with an `id` and a D1 database with a `database_id` as fully specified, so deploy does not call the KV or D1 APIs to bind them. [Workers authorization](https://developers.cloudflare.com/workers/authorization/) says deploying a binding does not need a separate permission on the bound resource.
+- **Workers Scripts Edit.** This is the permission `wrangler deploy` uses for the existing Worker. It covers cron triggers (`PUT /accounts/{account_id}/workers/scripts/{script}/schedules`; Workers Scripts write includes triggers) and attaching the existing KV, D1, and AI Search bindings. This repo's Wrangler (`4.129.1`) treats a KV namespace with an `id` and a D1 database with a `database_id` as fully specified, so deploy does not call the KV or D1 APIs to bind them. [Workers authorization](https://developers.cloudflare.com/workers/authorization/) says deploying a binding does not need a separate permission on the bound resource.
 - **D1 Edit.** `wrangler d1 migrations apply PAGE_QUEUE --remote` reads and writes the database directly. That is the only direct resource call in this job.
 
 `wrangler.jsonc` has no `account_id`. Set the repository variable `CLOUDFLARE_ACCOUNT_ID` and the repository secret `CLOUDFLARE_API_TOKEN`. With the account id set, Wrangler does not list accounts, so the token does not need Account Settings Read or Memberships Read. The Edit Cloudflare Workers template includes permissions this job does not use.

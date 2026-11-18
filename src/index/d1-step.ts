@@ -119,10 +119,6 @@ export function pastTickDeadline(tick: D1Tick | undefined): boolean {
 	return tick?.deadlineMs !== undefined && Date.now() >= tick.deadlineMs;
 }
 
-export function isTickDeadlineStop(error: unknown): boolean {
-	return error instanceof TickDeadlineStop;
-}
-
 function stopForDeadline(tick: D1Tick): never {
 	if (!tick.budget.deadline) {
 		tick.budget.deadline = true;
@@ -203,7 +199,7 @@ export async function d1Query<T>(
 		throw budgetError(step.tick.budget);
 	}
 	// One deadline for the whole tick. Past it, no new write or read starts.
-	// Lease release and the open-claim release pass bypassBudget so they can run from finally.
+	// Lease release bypasses the tick budget so it can run from finally.
 	// A stop throws. Callers must not treat it as an empty result.
 	if (!bypassBudget && step.tick && pastTickDeadline(step.tick)) {
 		stopForDeadline(step.tick);

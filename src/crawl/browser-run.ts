@@ -137,19 +137,6 @@ export function reachedRunawayCeiling(pages: number): boolean {
 	return pages >= CRAWL_RUNAWAY_PAGES;
 }
 
-export function snapshotJob(
-	job: Pick<CrawlJobResult, "status" | "total" | "finished" | "skipped" | "disallowed" | "errored">,
-): CrawlJobSnapshot {
-	return {
-		status: job.status ?? "unknown",
-		total: toCount(job.total),
-		finished: toCount(job.finished),
-		skipped: toCount(job.skipped),
-		disallowed: toCount(job.disallowed),
-		errored: toCount(job.errored),
-	};
-}
-
 export async function startCrawl(auth: CrawlAuth, seed: Seed, startUrl: string): Promise<StartResult> {
 	const { ok, status, data } = await cfJson(auth, crawlUrl(auth.accountId), {
 		method: "POST",
@@ -296,14 +283,6 @@ export async function startSeedCrawl(
 		);
 	}
 	return { startUrl, jobId: started.jobId };
-}
-
-export async function cancelCrawl(auth: CrawlAuth, jobId: string): Promise<void> {
-	const { ok, status, data } = await cfJson(auth, crawlUrl(auth.accountId, jobId), { method: "DELETE" });
-	if (ok || status === 404) {
-		return;
-	}
-	throw new Error(`crawl cancel failed ${status}: ${JSON.stringify(data.errors ?? data)}`);
 }
 
 export function crawlStatusCounts(

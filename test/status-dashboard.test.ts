@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { SYSTEM_IDS } from "../src/config/types.ts";
-import { D1PageQueue } from "../src/index/page-queue.ts";
 import { writePark } from "../src/index/parks.ts";
 import { SEED_HASH } from "../src/index/seed-hash.ts";
 import { emptyStatus, writeStatus, type IndexStatusDocument } from "../src/index/status.ts";
 import { queueMotion, renderStatusPage, systemPhase } from "../src/serve/status-page.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { memoryD1, stampClaim } from "./helpers/d1.ts";
+import { memoryD1 } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
 const STATUS_TOKEN = "test-status-token";
@@ -67,30 +66,23 @@ describe("GET /status", () => {
 	it("reads live discover and renders the same document as /v1/index-status", async () => {
 		const kv = memoryKV();
 		const db = memoryD1();
-		const queue = new D1PageQueue(db);
-		await queue.enqueueUpsert(
-			[
-				{ systemId: "primer", url: "https://primer.style/a", kind: "reindex" },
-				{ systemId: "primer", url: "https://primer.style/b", kind: "reindex" },
-				{ systemId: "uswds", url: "https://designsystem.digital.gov/a", kind: "reindex" },
-				{ systemId: "paste", url: "https://paste-dsys.com/a", kind: "seed" },
-			],
-			NOW,
+		const insert = db.prepare(
+			`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, error, claimed_at, last_crawled, last_indexed, item_key)
+			 VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
 		);
-		await db
-			.prepare("UPDATE page_work SET status = 'failed', error = ? WHERE system_id = ?")
-			.bind("render failed", "uswds")
+		insert.bind("primer", "https://primer.style/a", "reindex", "pending", NOW, null, null, null, null, null).run();
+		insert.bind("primer", "https://primer.style/b", "reindex", "claimed", NOW, null, NOW, null, null, null).run();
+		insert
+			.bind("uswds", "https://designsystem.digital.gov/a", "reindex", "failed", NOW, "render failed", null, null, null, null)
 			.run();
+		insert.bind("paste", "https://paste-dsys.com/a", "seed", "done", NOW, null, null, NOW, NOW, "paste/key").run();
 		await db
-			.prepare("UPDATE page_work SET status = 'claimed', claimed_at = ? WHERE system_id = ? AND url = ?")
-			.bind(NOW, "primer", "https://primer.style/b")
+			.prepare(
+				`INSERT INTO system_mark (system_id, last_discovered) VALUES ('paste', ?)
+				 ON CONFLICT(system_id) DO UPDATE SET last_discovered = excluded.last_discovered`,
+			)
+			.bind(NOW)
 			.run();
-		await queue.complete(
-			await stampClaim(db, "paste", "https://paste-dsys.com/a", NOW),
-			{ lastCrawled: NOW, lastIndexed: NOW },
-			"paste/key",
-		);
-		await queue.markDiscovered("paste", NOW);
 
 		const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });
 		await writePark(env, "garden", 1, "2026-09-27T00:00:00.000Z");

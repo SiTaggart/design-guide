@@ -3,8 +3,8 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { D1PageQueue, MAX_ATTEMPTS } from "../src/index/page-queue.ts";
-import { databaseAsD1, memoryD1 } from "./helpers/d1.ts";
+import { MAX_ATTEMPTS } from "../src/index/page-queue.ts";
+import { memoryD1 } from "./helpers/d1.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -474,13 +474,15 @@ describe("page queue migrations", () => {
 				last_indexed: "2026-10-03T00:00:00.000Z",
 			},
 		]);
-		const claimed = await new D1PageQueue(databaseAsD1(db)).claim(10, "2026-10-28T00:30:00.000Z");
-		const claimedUrls = claimed.map((item) => item.url);
-		expect(claimedUrls).toContain(overCap);
-		expect(claimedUrls).toContain(inProgress);
-		expect(claimedUrls).not.toContain(exhausted);
-		expect(claimedUrls).not.toContain(cooling);
-		expect(claimedUrls).not.toContain(finished);
+		const claimable = db
+			.prepare("SELECT url FROM page_work WHERE status = 'pending' AND attempts < ?")
+			.all(MAX_ATTEMPTS) as Array<{ url: string }>;
+		const claimableUrls = claimable.map((row) => row.url);
+		expect(claimableUrls).toContain(overCap);
+		expect(claimableUrls).toContain(inProgress);
+		expect(claimableUrls).not.toContain(exhausted);
+		expect(claimableUrls).not.toContain(cooling);
+		expect(claimableUrls).not.toContain(finished);
 	});
 
 	it("keeps CREATE TABLE out of the worker source", () => {

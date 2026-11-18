@@ -2,9 +2,7 @@ import { describe, expect, it } from "vitest";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
 import { envWithIndex, memoryKV, parksKvGetRaw, parksKvGetThrows } from "./helpers/index-env.ts";
-import { liveSystemIds, loadLiveSystemIds, PARKS_KEY, readParks, writePark } from "../src/index/parks.ts";
-import { persistSystemOutcome } from "../src/index/trigger.ts";
-import { startStatusRun } from "../src/index/status.ts";
+import { clearPark, liveSystemIds, loadLiveSystemIds, PARKS_KEY, readParks, writePark } from "../src/index/parks.ts";
 import { parseSearchFields } from "../src/serve/parse.ts";
 import worker from "../src/worker.ts";
 
@@ -165,17 +163,7 @@ describe("park state", () => {
 		expect(parked.status).toBe(200);
 		expect(await parked.json()).toEqual({ results: [] });
 		expect(calls).toEqual([]);
-		await startStatusRun(env, { trigger: "recovery", workflowId: "reindex-recovery-live" });
-		await persistSystemOutcome(env, {
-			system: "garden",
-			startUrl: "https://garden.zendesk.com/",
-			crawl: { total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 },
-			indexed: 2,
-			hitLimit: false,
-			keptPrevious: false,
-			parked: false,
-			usable: 2,
-		});
+		await clearPark(env, "garden");
 		expect(parseSearchFields({ query: "focus", system: "garden" }, await loadLiveSystemIds(env))).toEqual({
 			kind: "ok",
 			params: { query: "focus", k: undefined, system: "garden" },

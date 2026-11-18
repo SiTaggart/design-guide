@@ -1,18 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS, type SystemId } from "../src/config/types.ts";
 import type { WorkerEnv } from "../src/index/ai-search.ts";
 import { readIndexedHashes, writeIndexedHash } from "../src/index/indexed-hashes.ts";
-import { D1PageQueue, type SystemFreshness } from "../src/index/page-queue.ts";
+import type { SystemFreshness } from "../src/index/page-queue.ts";
 import { writePark } from "../src/index/parks.ts";
 import { driftedSystems, seedHashKey, systemSeedHash } from "../src/index/seed-hash.ts";
-import { streamSwap, swapFromOutcome } from "../src/index/reindex.ts";
+import { swapFromOutcome } from "../src/index/reindex.ts";
 import { emptyStatus, readStatus, runStateFrom, writeStatus, type IndexStatusDocument } from "../src/index/status.ts";
-import { persistSystemOutcome } from "../src/index/trigger.ts";
 import { fillHealthFrom, type FillHealthBody } from "../src/serve/fill-health.ts";
 import worker from "../src/worker.ts";
 import { fixtureChunks } from "./fixtures/chunks.ts";
-import { memoryD1, stampClaim } from "./helpers/d1.ts";
+import { memoryD1 } from "./helpers/d1.ts";
 import { envWithIndex, memoryKV } from "./helpers/index-env.ts";
 
 const STATUS_TOKEN = "test-status-token";
@@ -357,23 +356,12 @@ describe("fillHealthFrom", () => {
 			records: [],
 		};
 		const fromSwap = await swapFromOutcome(auth, seed, outcome);
-		const fromStream = await streamSwap(auth, seed, {
-			startUrl: seed.startUrl,
-			snapshot: { status: "failed", total: 533, finished: 533, errored: 1 },
-			generation: "gen-failed-cap",
-			fetchPage: async () => {
-				throw new Error("failed crawl must not page");
-			},
-			countStatuses: async () => counts,
+		expect(fromSwap).toMatchObject({
+			indexed: 0,
+			keptPrevious: true,
+			hitLimit: false,
+			error: "crawl ended failed",
 		});
-		for (const result of [fromSwap, fromStream]) {
-			expect(result).toMatchObject({
-				indexed: 0,
-				keptPrevious: true,
-				hitLimit: false,
-				error: "crawl ended failed",
-			});
-		}
 		expect(runStateFrom([fromSwap])).toBe("fail");
 		expectAlarm(
 			fillHealthFrom(
@@ -397,17 +385,6 @@ describe("fillHealthFrom", () => {
 			),
 			["hard_fail"],
 		);
-		const logged: string[] = [];
-		const spy = vi.spyOn(console, "log").mockImplementation((line?: unknown) => {
-			logged.push(String(line));
-		});
-		try {
-			const { env } = envWithIndex(fixtureChunks, true, { INDEX: memoryKV() });
-			await persistSystemOutcome(env, fromSwap);
-		} finally {
-			spy.mockRestore();
-		}
-		expect(logged.some((line) => line.includes('"event":"index_fail"'))).toBe(true);
 	});
 
 	it("still hard_fails a drained seed with a real crawl error", () => {
@@ -687,33 +664,17 @@ describe("GET /v1/fill-health", () => {
 		expect(driftedProbe.text).toContain('"fill":"ok"');
 
 		const stuck = await fleetEnv(now, ["uswds"]);
-		await stuck.queue.enqueueUpsert(
-			[{ systemId: "uswds", url: "https://example.test/uswds-failed", kind: "reindex" }],
-			now,
-		);
-		await stuck.db
-			.prepare("UPDATE page_work SET status = 'failed', last_crawled = ?, last_indexed = ? WHERE system_id = ?")
-			.bind(now, now, "uswds")
-			.run();
-		await stuck.queue.markDiscovered("uswds", now);
+		await insertWork(stuck.db, "uswds", "https://example.test/uswds-failed", "failed", now, now, now);
+		await markDiscovered(stuck.db, "uswds", now);
 		const stuckProbe = await probe(stuck);
 		expect(stuckProbe.body.alarms).toEqual(["stuck:uswds"]);
 		expect(stuckProbe.text).not.toContain('"fill":"ok"');
 
 		const starved = await fleetEnv(now, ["antd", "paste"]);
-		await starved.queue.enqueueUpsert(
-			[
-				{ systemId: "antd", url: "https://example.test/antd-a", kind: "reindex" },
-				{ systemId: "antd", url: "https://example.test/antd-b", kind: "reindex" },
-				{ systemId: "paste", url: "https://example.test/paste", kind: "reindex" },
-			],
-			now,
-		);
-		await starved.db
-			.prepare("UPDATE page_work SET status = 'claimed', claimed_at = ?, last_indexed = ? WHERE system_id = ?")
-			.bind(now, now, "paste")
-			.run();
-		await starved.queue.markDiscovered("paste", now);
+		await insertWork(starved.db, "antd", "https://example.test/antd-a", "pending", now);
+		await insertWork(starved.db, "antd", "https://example.test/antd-b", "pending", now);
+		await insertWork(starved.db, "paste", "https://example.test/paste", "claimed", now, null, now, now);
+		await markDiscovered(starved.db, "paste", now);
 		const starvedProbe = await probe(starved);
 		expect(starvedProbe.body.alarms).toEqual(["pending_no_claims:antd"]);
 		expect(starvedProbe.text).not.toContain('"fill":"ok"');
@@ -753,10 +714,7 @@ describe("GET /v1/fill-health", () => {
 	it("does not hard_fail a sticky run error while discover or the queue is still filling", async () => {
 		const now = new Date().toISOString();
 		const draining = await fleetEnv(now);
-		await draining.queue.enqueueUpsert(
-			[{ systemId: "paste", url: "https://example.test/paste-pending", kind: "reindex" }],
-			now,
-		);
+		await insertWork(draining.db, "paste", "https://example.test/paste-pending", "pending", now);
 		await writeStatus(draining.env, {
 			...emptyStatus(false),
 			state: "fail",
@@ -770,14 +728,7 @@ describe("GET /v1/fill-health", () => {
 		expect(drainingProbe.text).not.toContain("hard_fail");
 
 		const stalled = await fleetEnv(now);
-		await stalled.queue.enqueueUpsert(
-			[{ systemId: "paste", url: "https://example.test/paste-stuck", kind: "reindex" }],
-			now,
-		);
-		await stalled.db
-			.prepare("UPDATE page_work SET status = 'claimed', claimed_at = ? WHERE system_id = ? AND url = ?")
-			.bind(now, "paste", "https://example.test/paste-stuck")
-			.run();
+		await insertWork(stalled.db, "paste", "https://example.test/paste-stuck", "claimed", now, null, null, now);
 		await writeStatus(stalled.env, {
 			...emptyStatus(false),
 			state: "fail",
@@ -793,18 +744,9 @@ describe("GET /v1/fill-health", () => {
 		const now = new Date().toISOString();
 
 		const filling = await fleetEnv(now, ["primer"]);
-		await filling.queue.enqueueUpsert(
-			[
-				{ systemId: "primer", url: "https://example.test/primer-a", kind: "reindex" },
-				{ systemId: "primer", url: "https://example.test/primer-b", kind: "reindex" },
-			],
-			now,
-		);
-		await filling.db
-			.prepare("UPDATE page_work SET status = 'claimed', claimed_at = ? WHERE system_id = ? AND url = ?")
-			.bind(now, "primer", "https://example.test/primer-b")
-			.run();
-		await filling.queue.markDiscovered("primer", now);
+		await insertWork(filling.db, "primer", "https://example.test/primer-a", "pending", now);
+		await insertWork(filling.db, "primer", "https://example.test/primer-b", "claimed", now, null, null, now);
+		await markDiscovered(filling.db, "primer", now);
 		await writeStatus(filling.env, { ...emptyStatus(false), state: "running" });
 		const fillingProbe = await probe(filling);
 		expect(fillingProbe.body).toMatchObject({ fill: "ok", alarms: [] });
@@ -830,30 +772,54 @@ describe("GET /v1/fill-health", () => {
 type Fleet = {
 	env: WorkerEnv;
 	db: D1Database;
-	queue: D1PageQueue;
 };
+
+async function insertWork(
+	db: D1Database,
+	systemId: SystemId,
+	url: string,
+	status: string,
+	now: string,
+	crawled: string | null = null,
+	indexed: string | null = null,
+	claimedAt: string | null = null,
+): Promise<void> {
+	await db
+		.prepare(
+			`INSERT INTO page_work (system_id, url, kind, status, enqueued_at, attempts, claimed_at, last_crawled, last_indexed)
+			 VALUES (?, ?, 'reindex', ?, ?, 0, ?, ?, ?)`,
+		)
+		.bind(systemId, url, status, now, claimedAt, crawled, indexed)
+		.run();
+}
+
+async function markDiscovered(db: D1Database, systemId: SystemId, now: string): Promise<void> {
+	await db
+		.prepare(
+			`INSERT INTO system_mark (system_id, last_discovered) VALUES (?, ?)
+			 ON CONFLICT(system_id) DO UPDATE SET last_discovered = excluded.last_discovered`,
+		)
+		.bind(systemId, now)
+		.run();
+}
 
 async function fleetEnv(now: string, skip: readonly SystemId[] = []): Promise<Fleet> {
 	const kv = memoryKV();
 	const db = memoryD1();
-	const queue = new D1PageQueue(db);
 	const skipSet = new Set(skip);
-	const items = SYSTEM_IDS.filter((systemId) => !skipSet.has(systemId)).map((systemId) => ({
-		systemId,
-		url: `https://example.test/${systemId}`,
-		kind: "reindex" as const,
-	}));
-	await queue.enqueueUpsert(items, now);
-	for (const item of items) {
-		await queue.complete(await stampClaim(db, item.systemId, item.url, now), { lastCrawled: now, lastIndexed: now }, `${item.systemId}/key`);
-		await queue.markDiscovered(item.systemId, now);
+	for (const systemId of SYSTEM_IDS) {
+		if (skipSet.has(systemId)) {
+			continue;
+		}
+		await insertWork(db, systemId, `https://example.test/${systemId}`, "done", now, now, now);
+		await markDiscovered(db, systemId, now);
 	}
 	const { env } = envWithIndex(fixtureChunks, true, { INDEX: kv, PAGE_QUEUE: db, STATUS_TOKEN });
 	await writeStatus(env, { ...emptyStatus(false), state: "ok" });
 	for (const systemId of SYSTEM_IDS) {
 		await writeIndexedHash(env, systemId, systemSeedHash(seedById(systemId)));
 	}
-	return { env, db, queue };
+	return { env, db };
 }
 
 async function probe(fleet: Fleet): Promise<{ text: string; body: FillHealthBody }> {

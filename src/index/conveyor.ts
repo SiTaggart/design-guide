@@ -2,7 +2,7 @@ import { INSTANCE_ID } from "../config/instance.ts";
 import { SEEDS, seedById } from "../config/seed.ts";
 import { isSystemId, type Seed, type SystemId } from "../config/types.ts";
 import { fetchPageMarkdown, type CrawlAuth } from "../crawl/browser-run.ts";
-import { admittedUrl, canonicalLink, frontierLinks, linkBase, pageKey } from "../crawl/links.ts";
+import { admittedUrl, canonicalLink, frontierLinks, pageKey } from "../crawl/links.ts";
 import { contentHash } from "./content-hash.ts";
 import { D1PageQueue, DRAIN_LIMIT, FILL_TICK_DEADLINE_MS, MAX_ATTEMPTS } from "./page-queue.ts";
 import { deleteItem, listItems, uploadItem, type ItemRecord, type ItemsAuth } from "./items-rest.ts";
@@ -15,7 +15,7 @@ import {
 } from "./refresh-delta.ts";
 import { clearPark } from "./parks.ts";
 import { clearRetrievalHold } from "./retrieval-hold.ts";
-import { isWorkflowLive, readStoredStatus, writeStatus } from "./status.ts";
+import { readStoredStatus, writeStatus } from "./status.ts";
 import { readMarks, writeMark, UrlQueue, type QueueRow } from "./url-queue.ts";
 import type { WorkerEnv } from "./ai-search.ts";
 export const REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
@@ -233,8 +233,7 @@ async function appendLinks(
 	knownUrls: ReadonlySet<string>,
 	clock: Clock,
 ): Promise<number> {
-	const base = linkBase(pageUrl, markdown, seed);
-	const links = frontierLinks(markdown, base, seed).filter((url) => !knownUrls.has(`${seed.id}\0${url}`) && !isSitemapFile(url));
+	const links = frontierLinks(markdown, pageUrl, seed).filter((url) => !knownUrls.has(`${seed.id}\0${url}`) && !isSitemapFile(url));
 	const fresh: string[] = [];
 	for (const url of links) {
 		if (!(await queue.has(url))) {
@@ -272,9 +271,6 @@ async function copyPendingPageWork(db: D1Database): Promise<void> {
 async function settleStaleRun(env: WorkerEnv, now: Date): Promise<void> {
 	const current = await readStoredStatus(env);
 	if (current.state !== "running") {
-		return;
-	}
-	if (await isWorkflowLive(env, current.workflowId)) {
 		return;
 	}
 	await writeStatus(env, {

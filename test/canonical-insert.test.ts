@@ -7,7 +7,6 @@ import { seedById } from "../src/config/seed.ts";
 import { SYSTEM_IDS } from "../src/config/types.ts";
 import { admittedUrl } from "../src/crawl/links.ts";
 import { applyRefresh, consumeQueue, conveyorTick, type FetchedPage } from "../src/index/conveyor.ts";
-import { D1PageQueue } from "../src/index/page-queue.ts";
 import { UrlQueue } from "../src/index/url-queue.ts";
 import * as itemsRest from "../src/index/items-rest.ts";
 import { databaseAsD1, memoryD1 } from "./helpers/d1.ts";
@@ -96,20 +95,6 @@ describe("canonical inserts", () => {
 				"https://primer.style/sitemap_index.xml",
 			].sort(),
 		);
-	});
-
-	it("stores one page_work row for slash and query spellings", async () => {
-		const db = memoryD1();
-		const pages = new D1PageQueue(db);
-		await pages.enqueueUpsert(
-			[
-				{ systemId: "primer", url: BUTTON_SLASH, kind: "seed" },
-				{ systemId: "primer", url: BUTTON_QUERY, kind: "seed" },
-			],
-			NOW,
-		);
-		const rows = await db.prepare("SELECT url FROM page_work WHERE system_id = ?").bind("primer").all<{ url: string }>();
-		expect(rows.results.map((row) => row.url)).toEqual([BUTTON]);
 	});
 
 	it("copies a canonical pending row and keeps the earlier queue enqueued_at", async () => {

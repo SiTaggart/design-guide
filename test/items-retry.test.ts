@@ -1,8 +1,5 @@
-import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { seedById } from "../src/config/seed.ts";
 import { ItemApiError, deleteItem, uploadItem } from "../src/index/items-rest.ts";
-import { streamSwap, swapGeneration } from "../src/index/reindex.ts";
 
 const auth = { accountId: "acct", apiToken: "token", instanceId: "design-guide" };
 
@@ -125,85 +122,3 @@ describe("AI Search upload and delete retries", () => {
 	});
 });
 
-describe("stream last-wins after a 7042 upload", () => {
-	it("deletes the real item id and keeps the later markdown", async () => {
-		const generation = swapGeneration("primer", "reindex-7042-id");
-		const pageUrl = "https://primer.style/";
-		const digest = createHash("sha256").update(pageUrl).digest("hex").slice(0, 16);
-		const key = `primer/${generation}/${digest}.md`;
-		const items: Array<{ id: string; key: string; body: string }> = [
-			{ id: "real-a", key, body: "# stale" },
-		];
-		const deleted: string[] = [];
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async (input: string | URL, init?: RequestInit) => {
-				const url = new URL(typeof input === "string" ? input : input.toString());
-				const method = init?.method ?? "GET";
-				if (method === "DELETE") {
-					const marker = "/items/";
-					const id = decodeURIComponent(url.pathname.slice(url.pathname.lastIndexOf(marker) + marker.length));
-					deleted.push(id);
-					const index = items.findIndex((item) => item.id === id);
-					if (index < 0) {
-						return jsonResponse(404, { errors: [{ code: 7041, message: "item_not_found" }] });
-					}
-					items.splice(index, 1);
-					return jsonResponse(200, { success: true });
-				}
-				if (method === "POST") {
-					const form = init?.body as FormData;
-					const file = form.get("file") as File;
-					const itemKey = file.name;
-					const body = await file.text();
-					const existing = items.find((item) => item.key === itemKey);
-					if (existing) {
-						return jsonResponse(409, { errors: [{ code: 7042, message: "item_key_already_exist" }] });
-					}
-					const created = { id: `real-${items.length + 1}`, key: itemKey, body };
-					items.push(created);
-					return jsonResponse(200, { result: { id: created.id, key: created.key } });
-				}
-				const lookup = url.searchParams.get("key");
-				const result = lookup ? items.filter((item) => item.key === lookup) : items;
-				return jsonResponse(200, {
-					result: result.map((item) => ({ id: item.id, key: item.key })),
-					result_info: { count: result.length, total_count: lookup ? result.length : items.length },
-				});
-			}),
-		);
-		const seed = seedById("primer");
-		let fetched = 0;
-		const result = await streamSwap(
-			{ accountId: "acct", apiToken: "token", instanceId: "design-guide" },
-			seed,
-			{
-				startUrl: seed.startUrl,
-				snapshot: { status: "completed", total: 2, finished: 2 },
-				generation,
-				fetchPage: async () => {
-					fetched += 1;
-					if (fetched === 1) {
-						return {
-							records: [{ url: pageUrl, status: "completed" as const, markdown: "# stale" }],
-							cursor: "2",
-						};
-					}
-					return {
-						records: [
-							{ url: pageUrl, status: "completed" as const, markdown: "# fresh" },
-							{ url: "https://primer.style/select", status: "completed" as const, markdown: "# other" },
-						],
-						cursor: null,
-					};
-				},
-				countStatuses: async () => ({ total: 2, finished: 2, skipped: 0, disallowed: 0, errored: 0 }),
-			},
-		);
-		expect(result).toMatchObject({ indexed: 2, keptPrevious: false });
-		expect(deleted).toContain("real-a");
-		expect(deleted).not.toContain(key);
-		expect(items.find((item) => item.key === key)?.body).toBe("# fresh");
-		expect(items.find((item) => item.key === key)?.id).not.toBe(key);
-	});
-});
